@@ -24,7 +24,6 @@ type settingsViewResponse struct {
 }
 
 type updateSettingsRequest struct {
-	ListenPort     int      `json:"listen_port"`
 	MTU            int      `json:"mtu"`
 	StatusInterval int      `json:"status_interval"`
 	UpstreamDNS    []string `json:"upstream_dns"`
@@ -75,7 +74,7 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 	}
 
 	oldMTU := settings.MTU
-	if err := s.Store.UpdateMutableSettings(req.MTU, req.StatusInterval, req.ListenPort, req.UpstreamDNS); err != nil {
+	if err := s.Store.UpdateMutableSettings(req.MTU, req.StatusInterval, req.UpstreamDNS); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

@@ -18,10 +18,7 @@ func (s *Settings) ToHubConfig(adminUsername string) domain.HubConfig {
 	}
 }
 
-func (s *Store) UpdateMutableSettings(mtu, statusInterval, listenPort int, upstreamDNS []string) error {
-	if err := config.ValidateEndpointPort(listenPort); err != nil {
-		return err
-	}
+func (s *Store) UpdateMutableSettings(mtu, statusInterval int, upstreamDNS []string) error {
 	settings, err := s.GetSettings()
 	if err != nil {
 		return err
@@ -41,7 +38,6 @@ func (s *Store) UpdateMutableSettings(mtu, statusInterval, listenPort int, upstr
 	norm := domain.NormalizeHubConfig(draft)
 	settings.MTU = norm.MTU
 	settings.StatusInterval = norm.StatusInterval
-	settings.ListenPort = listenPort
 	settings.UpstreamDNS = norm.UpstreamDNS
 	return s.UpdateSettings(settings)
 }

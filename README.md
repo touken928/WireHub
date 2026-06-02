@@ -156,15 +156,15 @@ Open **Settings** in the sidebar.
 
 | Section | Editable |
 |---------|----------|
-| Hub (read-only) | Public endpoint, VPN subnet, admin username |
-| Editable | Client endpoint port, MTU, status interval, additional DNS |
+| Hub (read-only) | Public endpoint, VPN subnet, admin username, client endpoint port |
+| Editable | MTU, status interval, additional DNS |
 | Change password | Current + new password |
 | Export | Download full `wirehub.db` snapshot |
 | Danger zone | **Reset WireHub** — wipes all data; requires admin password |
 
 Changing **MTU** restarts the VPN stack. **Reset** returns to setup mode.
 
-Fields fixed after setup: public endpoint, VPN subnet, admin username (set only in the wizard or via database import).
+Fields fixed after setup: public endpoint, VPN subnet, admin username, client endpoint port (set only in the wizard or via database import).
 
 ## Port forwarding
 

@@ -67,8 +67,10 @@ export default function SettingsPage() {
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
 
-  const [readOnly, setReadOnly] = useState<Pick<HubSettings, 'endpoint' | 'subnet' | 'admin_username'> | null>(null);
-  const [listenPort, setListenPort] = useState('');
+  const [readOnly, setReadOnly] = useState<Pick<
+    HubSettings,
+    'endpoint' | 'subnet' | 'admin_username' | 'listen_port'
+  > | null>(null);
   const [mtu, setMtu] = useState('');
   const [statusInterval, setStatusInterval] = useState('');
   const [upstreamDns, setUpstreamDns] = useState('');
@@ -86,8 +88,8 @@ export default function SettingsPage() {
       endpoint: settings.endpoint,
       subnet: settings.subnet,
       admin_username: settings.admin_username,
+      listen_port: settings.listen_port,
     });
-    setListenPort(String(settings.listen_port));
     setMtu(String(settings.mtu));
     setStatusInterval(String(settings.status_interval));
     setUpstreamDns(upstreamDnsToText(settings.upstream_dns));
@@ -130,7 +132,6 @@ export default function SettingsPage() {
       }
 
       const result = await api.updateSettings({
-        listen_port: parseInt(listenPort, 10),
         mtu: parseInt(mtu, 10),
         status_interval: parseInt(statusInterval, 10),
         upstream_dns: textToUpstreamDns(upstreamDns),
@@ -188,7 +189,7 @@ export default function SettingsPage() {
     <div className={pageLayout.page}>
       <PageHeader
         title="Settings"
-        description="Endpoint, subnet, and admin name are fixed after setup. WireGuard port is used in client configs only. Export downloads the full wirehub.db SQLite backup."
+        description="Endpoint, subnet, admin name, and client endpoint port are fixed after setup. Export downloads the full wirehub.db SQLite backup."
       />
 
       <Card className={styles.card}>
@@ -202,16 +203,16 @@ export default function SettingsPage() {
         <Field label="Admin username">
           <Input readOnly value={readOnly?.admin_username ?? ''} />
         </Field>
+        <Field
+          label="Client endpoint port"
+          hint="UDP port in peer .conf (Endpoint); set at setup only. May differ from hub --port when using port forwarding."
+        >
+          <Input readOnly value={readOnly ? String(readOnly.listen_port) : ''} className={styles.mono} />
+        </Field>
       </Card>
 
       <Card className={styles.card}>
         <Text weight="semibold" className={styles.sectionTitle}>Editable</Text>
-        <Field
-          label="Client endpoint port"
-          hint="UDP port in peer .conf (Endpoint); may differ from hub --port when using port forwarding. Does not restart WireGuard."
-        >
-          <Input type="number" value={listenPort} onChange={(_, data) => setListenPort(data.value)} />
-        </Field>
         <Field label="MTU" hint="Changing MTU restarts the hub network stack">
           <Input type="number" value={mtu} onChange={(_, data) => setMtu(data.value)} />
         </Field>

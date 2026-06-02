@@ -65,7 +65,6 @@ export const api = {
   getSettings: () => request<HubSettings>('/settings'),
 
   updateSettings: (body: {
-    listen_port: number;
     mtu: number;
     status_interval: number;
     upstream_dns: string[];
