@@ -57,14 +57,11 @@ jobs:
           out="dist/wirehub-${{ matrix.name }}"
           go build -ldflags="-s -w" -o "$out" ./cmd/wirehub
           chmod +x "$out"
-          (cd dist && sha256sum "wirehub-${{ matrix.name }}" > "wirehub-${{ matrix.name }}.sha256")
 
       - uses: actions/upload-artifact@v4
         with:
           name: wirehub-${{ matrix.name }}
-          path: |
-            dist/wirehub-${{ matrix.name }}
-            dist/wirehub-${{ matrix.name }}.sha256
+          path: dist/wirehub-${{ matrix.name }}
 
   docker:
     name: Publish Docker image
@@ -122,7 +119,6 @@ jobs:
           mkdir -p release
           for name in linux-amd64 linux-arm64 darwin-arm64; do
             tar -czf "release/wirehub-${VERSION}-${name}.tar.gz" -C dist "wirehub-${name}"
-            cp "dist/wirehub-${name}.sha256" "release/wirehub-${VERSION}-${name}.sha256"
           done
 
       - name: Publish release
