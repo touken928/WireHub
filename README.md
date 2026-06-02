@@ -107,14 +107,18 @@ No `--cap-add` or `--privileged` is required: WireHub uses wireguard-go's usersp
 
 ### Pre-built binary
 
-Download the archive for your platform from [GitHub Releases](https://github.com/touken928/wirehub/releases), then:
+Download the executable for your platform from [GitHub Releases](https://github.com/touken928/wirehub/releases) (uncompressed assets), then:
 
 ```bash
-tar -xzf wirehub-vX.Y.Z-linux-amd64.tar.gz
-./wirehub-linux-amd64 --data-dir ./data
+chmod +x wirehub-vX.Y.Z-linux-amd64
+./wirehub-vX.Y.Z-linux-amd64 --data-dir ./data
 ```
 
-Supported release targets: **Linux amd64**, **Linux arm64**, **macOS arm64**.
+```powershell
+.\wirehub-vX.Y.Z-windows-amd64.exe --data-dir .\data
+```
+
+Supported release targets: **Linux amd64**, **Linux arm64**, **macOS arm64**, **Windows amd64**.
 
 ### From source
 

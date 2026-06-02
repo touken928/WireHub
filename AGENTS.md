@@ -122,6 +122,10 @@ web/src/
 5. Update `web/src/api/types.ts` and pages if the UI exposes the feature.
 6. Run `go test ./...` and `cd web && npm run build` before finishing.
 
+## Release binaries (CI)
+
+Tag `v*.*.*` triggers `.github/workflows/release.yml`. Targets: `linux-amd64`, `linux-arm64`, `darwin-arm64`, `windows-amd64` (`.exe`). Assets are uncompressed executables named `wirehub-<tag>-<platform>`.
+
 ## Docs and README
 
 - Centered HTML header + badges in `README.md` / `docs/README_zh.md`.

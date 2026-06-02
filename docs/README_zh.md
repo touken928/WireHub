@@ -107,14 +107,18 @@ docker compose -f docker/docker-compose.yml up -d --build
 
 ### 预编译二进制
 
-在 [GitHub Releases](https://github.com/touken928/wirehub/releases) 下载对应平台压缩包：
+在 [GitHub Releases](https://github.com/touken928/wirehub/releases) 下载对应平台的可执行文件（未压缩），例如：
 
 ```bash
-tar -xzf wirehub-vX.Y.Z-linux-amd64.tar.gz
-./wirehub-linux-amd64 --data-dir ./data
+chmod +x wirehub-vX.Y.Z-linux-amd64
+./wirehub-vX.Y.Z-linux-amd64 --data-dir ./data
 ```
 
-发布目标：**Linux amd64**、**Linux arm64**、**macOS arm64**。
+```powershell
+.\wirehub-vX.Y.Z-windows-amd64.exe --data-dir .\data
+```
+
+发布目标：**Linux amd64**、**Linux arm64**、**macOS arm64**、**Windows amd64**。
 
 ### 从源码构建
 
