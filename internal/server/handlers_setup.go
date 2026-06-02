@@ -52,7 +52,7 @@ func (s *Server) handleSetupStatus(c *gin.Context) {
 		Defaults: setupDefaultsResponse{
 			Subnet:         config.DefaultSubnet,
 			AdminUsername:  config.DefaultAdminUsername,
-			ListenPort:     config.DefaultListenPort,
+			ListenPort:     config.DefaultEndpointPort,
 			MTU:            config.DefaultMTU,
 			StatusInterval: config.DefaultStatusInterval,
 			UpstreamDNS:    append([]string(nil), config.DefaultUpstreamDNS...),
@@ -79,7 +79,7 @@ func (s *Server) handleSetup(c *gin.Context) {
 
 	listenPort := req.ListenPort
 	if listenPort == 0 {
-		listenPort = config.DefaultListenPort
+		listenPort = config.DefaultEndpointPort
 	}
 
 	priv, pub, err := wg.GenerateKeyPair()

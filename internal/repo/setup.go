@@ -66,9 +66,9 @@ func (s *Store) Setup(in SetupInput) error {
 
 	listenPort := in.ListenPort
 	if listenPort == 0 {
-		listenPort = config.DefaultListenPort
+		listenPort = config.DefaultEndpointPort
 	}
-	if err := config.ValidateListenPort(listenPort); err != nil {
+	if err := config.ValidateEndpointPort(listenPort); err != nil {
 		return err
 	}
 

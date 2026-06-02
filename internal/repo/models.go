@@ -13,7 +13,7 @@ type Settings struct {
 	ServerPublicKey  string `json:"server_public_key"`
 	ServerPrivateKey string `json:"-"`
 	Endpoint         string `json:"endpoint"`
-	ListenPort       int    `json:"listen_port"`
+	ListenPort       int    `json:"listen_port"` // client Endpoint port only; hub WG bind uses CLI --port
 	WGSubnet         string `json:"wg_subnet"`
 	HubIP            string `json:"hub_ip"`
 	DNSIP            string `json:"dns_ip"`

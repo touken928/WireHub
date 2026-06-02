@@ -75,7 +75,6 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 	}
 
 	oldMTU := settings.MTU
-	oldListenPort := settings.ListenPort
 	if err := s.Store.UpdateMutableSettings(req.MTU, req.StatusInterval, req.ListenPort, req.UpstreamDNS); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -88,8 +87,7 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 	}
 
 	mtuChanged := settings.MTU != oldMTU
-	portChanged := settings.ListenPort != oldListenPort
-	networkReload := mtuChanged || portChanged
+	networkReload := mtuChanged
 
 	s.SetDNSUpstream(settings.UpstreamDNSOrDefault())
 	s.StopStatusPoller()

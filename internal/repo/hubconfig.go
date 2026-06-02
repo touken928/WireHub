@@ -19,7 +19,7 @@ func (s *Settings) ToHubConfig(adminUsername string) domain.HubConfig {
 }
 
 func (s *Store) UpdateMutableSettings(mtu, statusInterval, listenPort int, upstreamDNS []string) error {
-	if err := config.ValidateListenPort(listenPort); err != nil {
+	if err := config.ValidateEndpointPort(listenPort); err != nil {
 		return err
 	}
 	settings, err := s.GetSettings()

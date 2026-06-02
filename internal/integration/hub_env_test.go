@@ -80,9 +80,9 @@ func setupPeerMesh(t *testing.T, specs []meshPeerSpec, linkPairs [][2]string) (*
 
 	cfg := &config.RuntimeConfig{
 		Bind:         "0.0.0.0",
-		Port:         config.DefaultWebPort,
+		Port:         config.DefaultPort,
 		DataDir:      dir,
-		ListenAddr:   fmt.Sprintf("0.0.0.0:%d", config.DefaultWebPort),
+		ListenAddr:   fmt.Sprintf("0.0.0.0:%d", config.DefaultPort),
 		DatabasePath: filepath.Join(dir, "wirehub.db"),
 		JWTSecret:    "test-jwt-secret",
 	}

@@ -142,9 +142,9 @@ export default function SetupPage() {
           />
         </Field>
         <Field
-          label="WireGuard port"
+          label="Client endpoint port"
           required
-          hint="UDP port in client configs (default 8443)"
+          hint="UDP port in peer .conf (Endpoint); use your public/NAT port if forwarded (default 8443). Hub listens on CLI --port."
         >
           <Input
             type="number"

@@ -59,12 +59,13 @@ func (s *Stack) Start() error {
 		statusInterval = config.DefaultStatusInterval
 	}
 
-	wgMgr, err := wg.NewManager(settings.HubIP, settings.DNSIP, settings.ListenPort, mtu)
+	wgPort := s.cfg.Port
+	wgMgr, err := wg.NewManager(settings.HubIP, settings.DNSIP, wgPort, mtu)
 	if err != nil {
 		return fmt.Errorf("wireguard: %w", err)
 	}
 
-	if err := wgMgr.ConfigureServer(settings.ServerPrivateKey, settings.ListenPort); err != nil {
+	if err := wgMgr.ConfigureServer(settings.ServerPrivateKey, wgPort); err != nil {
 		_ = wgMgr.Close()
 		return fmt.Errorf("configure wireguard: %w", err)
 	}
@@ -107,7 +108,7 @@ func (s *Stack) Start() error {
 	s.wgMgr = wgMgr
 	s.dnsServer = dnsServer
 	s.tunnelSrv = tunnelSrv
-	log.Printf("WireHub VPN stack started (WG port %d)", settings.ListenPort)
+	log.Printf("WireHub VPN stack started (WG UDP port %d, client endpoint port %d)", wgPort, settings.ListenPort)
 	return nil
 }
 

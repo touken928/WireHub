@@ -207,8 +207,8 @@ export default function SettingsPage() {
       <Card className={styles.card}>
         <Text weight="semibold" className={styles.sectionTitle}>Editable</Text>
         <Field
-          label="WireGuard port"
-          hint="UDP port in peer configs (default 8443). Changing this restarts the hub network stack."
+          label="Client endpoint port"
+          hint="UDP port in peer .conf (Endpoint); may differ from hub --port when using port forwarding. Does not restart WireGuard."
         >
           <Input type="number" value={listenPort} onChange={(_, data) => setListenPort(data.value)} />
         </Field>

@@ -49,9 +49,7 @@ flowchart TB
   hub -->|WireGuard tunnel| p3["Restricted peer<br/>(other group)"]
 ```
 
-After setup, the hub listens on its VPN address for **TCP (web UI via tunnel)** and **UDP 53 (DNS)**. The **WireGuard UDP port** is stored in the database and written to client configs (`Endpoint = <public host>:<port>`). It is independent of the **web UI port** (`--port`, default `8443`).
-
-Peer-to-peer traffic is L3-forwarded and filtered by group access rules. Traffic to the hub itself (web, DNS) is not subject to peer filtering.
+After setup, the hub serves tunnel web UI and DNS on the VPN address. Peer-to-peer traffic is L3-forwarded and filtered by group rules; traffic to the hub itself is not filtered.
 
 ## Web UI
 
@@ -86,13 +84,6 @@ docker run -d --name wirehub \
   -p 8443:8443/udp \
   -v wirehub-data:/app/data \
   ghcr.io/touken928/wirehub:latest
-```
-
-If you set a **WireGuard port other than 8443** during setup, publish that UDP port as well (example for port `51820`):
-
-```bash
-  -p 8443:8443 \
-  -p 51820:51820/udp \
 ```
 
 Build locally with Compose:
@@ -143,7 +134,7 @@ On a fresh install the HTTP server starts immediately, but WireGuard and DNS sta
 | Field | Required | Notes |
 |-------|----------|-------|
 | Public endpoint | Yes | Hostname or IP in client `Endpoint` (before the port), e.g. `example.com` |
-| WireGuard port | Yes | UDP port in client configs (`Endpoint = host:port`); hint default **8443**, not pre-filled |
+| Client endpoint port | Yes | Port in peer `Endpoint` (`host:port`); default **8443** |
 | VPN subnet | No | Default `100.127.0.0/24`; hub and DNS use the first host (`.1`) |
 | Admin username | No | Default `admin` |
 | Admin password | Yes | At least 8 characters; bcrypt hash in SQLite |
@@ -164,12 +155,12 @@ Open **Settings** in the sidebar.
 | Section | Editable |
 |---------|----------|
 | Hub (read-only) | Public endpoint, VPN subnet, admin username |
-| Editable | WireGuard port, MTU, status interval, additional DNS |
+| Editable | Client endpoint port, MTU, status interval, additional DNS |
 | Change password | Current + new password |
 | Export | Download full `wirehub.db` snapshot |
 | Danger zone | **Reset WireHub** — wipes all data; requires admin password |
 
-Changing **WireGuard port** or **MTU** restarts the hub network stack. **Reset** returns to setup mode.
+Changing **MTU** restarts the VPN stack. **Reset** returns to setup mode.
 
 Fields fixed after setup: public endpoint, VPN subnet, admin username (set only in the wizard or via database import).
 
@@ -179,15 +170,13 @@ Process-level settings only — not stored in the database:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--port` | `8443` | TCP port for the **web UI and REST API** only |
+| `--port` | `8443` | Hub listen port (Web/API TCP and WireGuard UDP). `listen_port` in the DB is only the port written to peer configs (`Endpoint`), e.g. when using port forwarding |
 | `--bind` | `0.0.0.0` | Address for the HTTP server |
 | `--data-dir` | `./data` | SQLite database, JWT secret, persistent state |
 
 ```bash
 ./wirehub --port 8443 --bind 0.0.0.0 --data-dir ./data
 ```
-
-The **WireGuard listen port** is configured in the setup wizard and **Settings**, not via `--port`.
 
 ## Client setup
 
@@ -196,7 +185,7 @@ The **WireGuard listen port** is configured in the setup wizard and **Settings**
 3. Download the `.conf` file or scan the QR code
 4. Import into any WireGuard client and connect
 
-Each client config includes `Endpoint = <public endpoint>:<WireGuard port>`, keys, allowed IPs, DNS (`hub IP` plus additional resolvers), and MTU.
+Each client config includes `Endpoint`, keys, allowed IPs, DNS (`hub IP` plus additional resolvers), and MTU.
 
 ## DNS
 

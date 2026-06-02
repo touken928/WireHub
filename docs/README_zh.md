@@ -49,9 +49,7 @@ flowchart TB
   hub -->|WireGuard 隧道| p3["隔离 Peer<br/>（其他组）"]
 ```
 
-完成初始化后，Hub 在 VPN 地址上提供 **TCP（经隧道的 Web UI）** 与 **UDP 53（DNS）**。**WireGuard UDP 端口** 保存在数据库中，并写入客户端配置（`Endpoint = <公网地址>:<端口>`），与 **Web UI 端口**（`--port`，默认 `8443`）相互独立。
-
-Peer 间流量由 Hub 做 L3 转发并按组规则过滤；访问 Hub 自身（Web、DNS）不受 Peer 过滤影响。
+完成初始化后，Hub 在 VPN 地址上提供经隧道的 Web UI 与 DNS。Peer 间流量由 Hub 做 L3 转发并按组规则过滤；访问 Hub 自身（Web、DNS）不受 Peer 过滤影响。
 
 ## Web 界面
 
@@ -86,13 +84,6 @@ docker run -d --name wirehub \
   -p 8443:8443/udp \
   -v wirehub-data:/app/data \
   ghcr.io/touken928/wirehub:latest
-```
-
-若在配置向导中把 **WireGuard 端口** 设为非 `8443`（例如 `51820`），需额外映射对应 UDP 端口：
-
-```bash
-  -p 8443:8443 \
-  -p 51820:51820/udp \
 ```
 
 本地用 Compose 构建：
@@ -143,7 +134,7 @@ go build -o wirehub ./cmd/wirehub
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | Public endpoint | 是 | 客户端 `Endpoint` 中的主机名或 IP（端口前），如 `example.com` |
-| WireGuard port | 是 | 客户端配置中的 UDP 端口（`Endpoint = 主机:端口`）；提示默认 **8443**，不预填 |
+| Client endpoint port | 是 | Peer `Endpoint` 中的端口（`主机:端口`）；默认 **8443** |
 | VPN subnet | 否 | 默认 `100.127.0.0/24`；Hub 与 DNS 使用首个主机地址（`.1`） |
 | 管理员用户名 | 否 | 默认 `admin` |
 | 管理员密码 | 是 | 至少 8 位；SQLite 中以 bcrypt 存储 |
@@ -164,12 +155,12 @@ JWT 签名密钥在首次启动时自动生成，保存在 `{data-dir}/.jwt_secr
 | 区域 | 是否可改 |
 |------|----------|
 | Hub（只读） | 公网 Endpoint、VPN 网段、管理员用户名 |
-| 可编辑 | WireGuard 端口、MTU、状态轮询间隔、额外 DNS |
+| 可编辑 | 客户端 Endpoint 端口、MTU、状态轮询间隔、额外 DNS |
 | 修改密码 | 当前密码 + 新密码 |
 | 导出 | 下载完整 `wirehub.db` 快照 |
 | 危险区 | **Reset WireHub** — 清空全部数据；需输入管理员密码 |
 
-修改 **WireGuard 端口** 或 **MTU** 会重启 Hub 网络栈。**Reset** 后回到配置向导。
+修改 **MTU** 会重启 VPN 栈。**Reset** 后回到配置向导。
 
 初始化后不可在 UI 修改的项：公网 Endpoint、VPN 网段、管理员用户名（仅在向导或导入数据库时确定）。
 
@@ -179,15 +170,13 @@ JWT 签名密钥在首次启动时自动生成，保存在 `{data-dir}/.jwt_secr
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--port` | `8443` | **Web UI 与 REST API** 的 TCP 端口 |
+| `--port` | `8443` | Hub 监听端口（Web/API TCP 与 WireGuard UDP）。数据库 `listen_port` 仅写入 Peer 配置的 `Endpoint`（如端口转发时填公网端口） |
 | `--bind` | `0.0.0.0` | HTTP 监听地址 |
 | `--data-dir` | `./data` | SQLite、JWT 密钥及持久化数据目录 |
 
 ```bash
 ./wirehub --port 8443 --bind 0.0.0.0 --data-dir ./data
 ```
-
-**WireGuard 监听端口** 在配置向导与 **Settings** 中设置，**不能** 通过 `--port` 指定。
 
 ## 客户端接入
 
@@ -196,7 +185,7 @@ JWT 签名密钥在首次启动时自动生成，保存在 `{data-dir}/.jwt_secr
 3. 下载 `.conf` 或扫描二维码
 4. 导入任意 WireGuard 客户端并连接
 
-生成的配置包含 `Endpoint = <公网 Endpoint>:<WireGuard 端口>`、密钥、AllowedIPs、DNS（Hub IP + 额外解析器）及 MTU。
+生成的配置包含 `Endpoint`、密钥、AllowedIPs、DNS（Hub IP + 额外解析器）及 MTU。
 
 ## DNS
 

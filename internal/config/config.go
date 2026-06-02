@@ -12,8 +12,8 @@ const DNSDomain = "wirehub"
 
 const (
 	DefaultSubnet         = "100.127.0.0/24"
-	DefaultWebPort        = 8443 // Web UI / API (CLI --port)
-	DefaultListenPort     = 8443 // WireGuard UDP port in hub and client configs
+	DefaultPort           = 8443 // CLI --port: WireGuard UDP listen + Web UI/API TCP (same number)
+	DefaultEndpointPort   = 8443 // Default port in client configs (setup/settings; may differ with NAT)
 	DefaultBind           = "0.0.0.0"
 	DefaultDataDir        = "./data"
 	DefaultAdminUsername  = "admin"
@@ -38,7 +38,7 @@ type RuntimeConfig struct {
 
 // ParseFlags parses CLI flags and returns runtime configuration.
 func ParseFlags() (*RuntimeConfig, error) {
-	port := flag.Int("port", DefaultWebPort, "TCP port for web UI and API (WireGuard port is configured at setup)")
+	port := flag.Int("port", DefaultPort, "TCP port for web UI/API and UDP port for WireGuard (same number)")
 	bind := flag.String("bind", DefaultBind, "IP address to bind the web UI")
 	dataDir := flag.String("data-dir", DefaultDataDir, "data directory (SQLite DB, JWT secret)")
 	flag.Parse()
