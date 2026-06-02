@@ -149,6 +149,10 @@ func (s *Stack) applyPortForwards(hubIP string) error {
 	if err != nil {
 		return err
 	}
+	dmzRow, err := s.repo.GetPortForwardDMZ()
+	if err != nil {
+		return err
+	}
 	if s.portProxies == nil {
 		m, err := filter.NewPortProxyManager(s.wgMgr.Net(), hubIP, s.dnsServer)
 		if err != nil {
@@ -167,7 +171,11 @@ func (s *Stack) applyPortForwards(hubIP string) error {
 			Enabled:    r.Enabled,
 		})
 	}
-	return s.portProxies.Apply(runtimeRules)
+	dmzCfg := filter.DMZConfig{
+		Enabled:    dmzRow.Enabled,
+		TargetHost: dmzRow.TargetHost,
+	}
+	return s.portProxies.Apply(runtimeRules, dmzCfg, s.cfg.Port)
 }
 
 func (s *Stack) Stop() error {

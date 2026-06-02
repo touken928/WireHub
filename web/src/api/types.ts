@@ -100,8 +100,16 @@ export interface PortForward {
   target_display: string;
 }
 
+export interface PortForwardDMZ {
+  id: number;
+  target_host: string;
+  enabled: boolean;
+  target_display: string;
+}
+
 export interface PortForwardList {
   rules: PortForward[];
+  dmz: PortForwardDMZ;
   hub_ip: string;
   hub_port: number;
 }

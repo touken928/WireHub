@@ -31,7 +31,7 @@ func TestPortForwardTCPToPeerHostname(t *testing.T) {
 	if _, err := env.store.CreatePortForward(hubWebPort, repo.PortForwardInput{
 		ListenPort: listenPort,
 		Protocol:   domain.ForwardProtoTCP,
-		TargetHost: "app",
+		TargetHost: domain.PeerFQDN("app"),
 		TargetPort: backendPort,
 		Enabled:    true,
 	}); err != nil {
@@ -149,7 +149,7 @@ func TestPortForwardTCPDisabled(t *testing.T) {
 	if _, err := env.store.CreatePortForward(hubWebPort, repo.PortForwardInput{
 		ListenPort: listenPort,
 		Protocol:   domain.ForwardProtoTCP,
-		TargetHost: "app",
+		TargetHost: domain.PeerFQDN("app"),
 		TargetPort: backendPort,
 		Enabled:    false,
 	}); err != nil {
@@ -184,7 +184,7 @@ func TestPortForwardUDPToPeer(t *testing.T) {
 	if _, err := env.store.CreatePortForward(hubWebPort, repo.PortForwardInput{
 		ListenPort: listenPort,
 		Protocol:   domain.ForwardProtoUDP,
-		TargetHost: "app",
+		TargetHost: domain.PeerFQDN("app"),
 		TargetPort: backendPort,
 		Enabled:    true,
 	}); err != nil {
@@ -223,7 +223,7 @@ func TestPortForwardReapplyAfterUpdate(t *testing.T) {
 	rule, err := env.store.CreatePortForward(hubWebPort, repo.PortForwardInput{
 		ListenPort: listenPort,
 		Protocol:   domain.ForwardProtoTCP,
-		TargetHost: "app",
+		TargetHost: domain.PeerFQDN("app"),
 		TargetPort: backendPort,
 		Enabled:    false,
 	})
@@ -240,7 +240,7 @@ func TestPortForwardReapplyAfterUpdate(t *testing.T) {
 	if _, err := env.store.UpdatePortForward(rule.ID, hubWebPort, repo.PortForwardInput{
 		ListenPort: listenPort,
 		Protocol:   domain.ForwardProtoTCP,
-		TargetHost: "app",
+		TargetHost: domain.PeerFQDN("app"),
 		TargetPort: backendPort,
 		Enabled:    true,
 	}); err != nil {

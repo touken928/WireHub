@@ -26,27 +26,104 @@ import {
 import { AddRegular, DeleteRegular, EditRegular } from '@fluentui/react-icons';
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/api';
-import type { PortForward } from '@/api/types';
+import type { PortForward, PortForwardDMZ } from '@/api/types';
 import { DNS_DOMAIN } from '@/constants';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { useConfirm } from '@/components/common/useConfirm';
+import { validateForwardTargetHost } from '@/lib/forwardTarget';
 import { usePageLayoutStyles } from '@/styles/pageLayout';
 
 const useStyles = makeStyles({
+  stack: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '20px',
+  },
   card: {
-    padding: '16px',
+    padding: '20px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '16px',
     borderRadius: tokens.borderRadiusXLarge,
   },
-  hint: {
-    color: tokens.colorNeutralForeground3,
-    marginBottom: '16px',
-  },
-  actions: {
+  cardHeader: {
     display: 'flex',
-    gap: '6px',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: '16px',
+    flexWrap: 'wrap',
+  },
+  cardTitle: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+  },
+  infoBanner: {
+    padding: '12px 16px',
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorNeutralBackground3,
+    color: tokens.colorNeutralForeground2,
+    fontSize: tokens.fontSizeBase300,
+    lineHeight: tokens.lineHeightBase300,
   },
   mono: {
     fontFamily: tokens.fontFamilyMonospace,
+    fontSize: tokens.fontSizeBase300,
+  },
+  hint: {
+    color: tokens.colorNeutralForeground3,
+    fontSize: tokens.fontSizeBase300,
+  },
+  error: {
+    color: tokens.colorPaletteRedForeground1,
+    fontSize: tokens.fontSizeBase300,
+  },
+  dmzGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(200px, 1fr) auto',
+    gap: '12px 16px',
+    alignItems: 'end',
+  },
+  dmzHostField: {
+    gridColumn: '1',
+  },
+  dmzActions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+    flexWrap: 'wrap',
+    gridColumn: '2',
+    justifyContent: 'flex-end',
+  },
+  tableWrap: {
+    overflowX: 'auto',
+  },
+  table: {
+    minWidth: '640px',
+  },
+  colActions: {
+    width: '88px',
+    textAlign: 'right',
+  },
+  colEnabled: {
+    width: '72px',
+  },
+  colListen: {
+    width: '120px',
+  },
+  actions: {
+    display: 'flex',
+    justifyContent: 'flex-end',
+    gap: '4px',
+  },
+  dialogGrid: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: '12px',
+    alignItems: 'start',
+  },
+  dialogFull: {
+    gridColumn: '1 / -1',
   },
 });
 
@@ -58,18 +135,6 @@ type ForwardForm = {
   target_port: string;
 };
 
-function displayTargetHost(host: string): string {
-  const suffix = `.${DNS_DOMAIN}`;
-  const lower = host.toLowerCase();
-  if (lower.endsWith(suffix)) {
-    const label = lower.slice(0, -suffix.length);
-    if (label && !label.includes('.')) {
-      return label;
-    }
-  }
-  return host;
-}
-
 const emptyForm = (): ForwardForm => ({
   name: '',
   listen_port: '',
@@ -78,12 +143,19 @@ const emptyForm = (): ForwardForm => ({
   target_port: '',
 });
 
+function formatListen(hubIP: string, port: number, proto: string) {
+  return `${hubIP}:${port}/${proto}`;
+}
+
 export default function ForwardPage() {
   const styles = useStyles();
   const pageLayout = usePageLayoutStyles();
   const { confirm } = useConfirm();
 
   const [rules, setRules] = useState<PortForward[]>([]);
+  const [dmz, setDmz] = useState<PortForwardDMZ | null>(null);
+  const [dmzHost, setDmzHost] = useState('');
+  const [dmzSaving, setDmzSaving] = useState(false);
   const [hubIP, setHubIP] = useState('');
   const [hubPort, setHubPort] = useState(8443);
   const [loading, setLoading] = useState(true);
@@ -93,6 +165,7 @@ export default function ForwardPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<PortForward | null>(null);
   const [form, setForm] = useState<ForwardForm>(emptyForm);
+  const [formError, setFormError] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -100,6 +173,8 @@ export default function ForwardPage() {
     try {
       const data = await api.listPortForwards();
       setRules(data.rules);
+      setDmz(data.dmz);
+      setDmzHost(data.dmz.target_host ?? '');
       setHubIP(data.hub_ip);
       setHubPort(data.hub_port);
     } catch (e) {
@@ -116,6 +191,7 @@ export default function ForwardPage() {
   const openCreate = () => {
     setEditing(null);
     setForm(emptyForm());
+    setFormError('');
     setDialogOpen(true);
   };
 
@@ -125,13 +201,35 @@ export default function ForwardPage() {
       name: rule.name,
       listen_port: String(rule.listen_port),
       protocol: rule.protocol,
-      target_host: displayTargetHost(rule.target_host),
+      target_host: rule.target_host,
       target_port: String(rule.target_port),
     });
+    setFormError('');
     setDialogOpen(true);
   };
 
+  const validateForm = (): boolean => {
+    const hostErr = validateForwardTargetHost(form.target_host);
+    if (hostErr) {
+      setFormError(hostErr);
+      return false;
+    }
+    const listen = Number(form.listen_port);
+    const target = Number(form.target_port);
+    if (!Number.isInteger(listen) || listen < 1 || listen > 65535) {
+      setFormError('Listen port must be between 1 and 65535');
+      return false;
+    }
+    if (!Number.isInteger(target) || target < 1 || target > 65535) {
+      setFormError('Target port must be between 1 and 65535');
+      return false;
+    }
+    setFormError('');
+    return true;
+  };
+
   const submit = async () => {
+    if (!validateForm()) return;
     setSaving(true);
     setError('');
     try {
@@ -151,7 +249,7 @@ export default function ForwardPage() {
       setDialogOpen(false);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Save failed');
+      setFormError(e instanceof Error ? e.message : 'Save failed');
     } finally {
       setSaving(false);
     }
@@ -177,6 +275,37 @@ export default function ForwardPage() {
     }
   };
 
+  const saveDMZ = async (enabled: boolean) => {
+    const hostErr = validateForwardTargetHost(dmzHost);
+    if (hostErr) {
+      setError(hostErr);
+      return;
+    }
+    setDmzSaving(true);
+    setError('');
+    try {
+      const updated = await api.updatePortForwardDMZ({
+        target_host: dmzHost.trim(),
+        enabled,
+      });
+      setDmz(updated);
+      setDmzHost(updated.target_host ?? '');
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'DMZ save failed');
+    } finally {
+      setDmzSaving(false);
+    }
+  };
+
+  const toggleDMZ = async (enabled: boolean) => {
+    if (enabled && !dmzHost.trim()) {
+      setError('Set a DMZ target host before enabling');
+      return;
+    }
+    await saveDMZ(enabled);
+  };
+
   const remove = async (rule: PortForward) => {
     const ok = await confirm({
       title: 'Delete forward?',
@@ -192,105 +321,175 @@ export default function ForwardPage() {
     }
   };
 
+  const targetHostHint = `FQDN or IPv4 (e.g. peer.${DNS_DOMAIN}, 10.0.0.2)`;
+
   return (
-    <div className={pageLayout.page}>
+    <div className={`${pageLayout.page} ${styles.stack}`}>
       <PageHeader
         title="Forward"
-        description="Expose TCP/UDP ports on the hub VPN address and proxy traffic to a peer hostname or external host."
+        description="Proxy hub VPN ports to internal hosts. Explicit rules override DMZ on the same port."
       />
-      <div style={{ marginBottom: 16 }}>
-        <Button appearance="primary" icon={<AddRegular />} onClick={openCreate}>
-          Add forward
-        </Button>
-      </div>
 
       {hubIP && (
-        <Text className={styles.hint}>
-          Peers connect to <span className={styles.mono}>{hubIP}:&lt;listen port&gt;</span> (hub VPN IP).
-          Web UI uses port <span className={styles.mono}>{hubPort}</span>; DNS uses <span className={styles.mono}>53</span>.
-          Target host can be a peer name (e.g. <span className={styles.mono}>alice</span>),{' '}
-          <span className={styles.mono}>alice.{DNS_DOMAIN}</span>, or an external hostname.
-        </Text>
+        <div className={styles.infoBanner}>
+          Clients dial <span className={styles.mono}>{hubIP}:&lt;port&gt;</span> on the hub VPN
+          address. Reserved: DNS <span className={styles.mono}>:53</span>, Web/API{' '}
+          <span className={styles.mono}>:{hubPort}</span>.
+        </div>
       )}
 
-      {error && !dialogOpen && (
-        <Text style={{ color: tokens.colorPaletteRedForeground1 }}>{error}</Text>
-      )}
+      {error && !dialogOpen && <Text className={styles.error}>{error}</Text>}
 
       <Card className={styles.card}>
-        {loading ? (
-          <Spinner label="Loading forwards..." />
-        ) : rules.length === 0 ? (
-          <Text className={styles.hint}>No port forwards configured.</Text>
-        ) : (
-          <Table aria-label="Port forwards">
-            <TableHeader>
-              <TableRow>
-                <TableHeaderCell>Name</TableHeaderCell>
-                <TableHeaderCell>Listen</TableHeaderCell>
-                <TableHeaderCell>Target</TableHeaderCell>
-                <TableHeaderCell>Enabled</TableHeaderCell>
-                <TableHeaderCell />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rules.map((rule) => (
-                <TableRow key={rule.id}>
-                  <TableCell>
-                    <Text>{rule.name || '—'}</Text>
-                  </TableCell>
-                  <TableCell>
-                    <Text className={styles.mono}>
-                      {rule.protocol.toUpperCase()} :{rule.listen_port}
-                    </Text>
-                  </TableCell>
-                  <TableCell>
-                    <Text className={styles.mono}>{rule.target_display}</Text>
-                  </TableCell>
-                  <TableCell>
-                    <Switch
-                      checked={rule.enabled}
-                      disabled={togglingId === rule.id}
-                      onChange={(_, d) => void toggleEnabled(rule, d.checked)}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <div className={styles.actions}>
-                      <Button
-                        size="small"
-                        appearance="subtle"
-                        icon={<EditRegular />}
-                        onClick={() => openEdit(rule)}
-                      />
-                      <Button
-                        size="small"
-                        appearance="subtle"
-                        icon={<DeleteRegular />}
-                        onClick={() => void remove(rule)}
-                      />
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+        <div className={styles.cardHeader}>
+          <div className={styles.cardTitle}>
+            <Text weight="semibold" size={400}>
+              DMZ
+            </Text>
+            <Text className={styles.hint}>
+              Map every other hub port to the same port on the target host. Overridden by explicit
+              rules below.
+            </Text>
+          </div>
+        </div>
+        <div className={styles.dmzGrid}>
+          <Field
+            className={styles.dmzHostField}
+            label="Target host"
+            hint={targetHostHint}
+          >
+            <Input
+              value={dmzHost}
+              disabled={dmzSaving || loading}
+              placeholder={`peer.${DNS_DOMAIN}`}
+              onChange={(_, d) => setDmzHost(d.value)}
+            />
+          </Field>
+          <div className={styles.dmzActions}>
+            <Switch
+              checked={dmz?.enabled ?? false}
+              disabled={dmzSaving || loading}
+              label="Enabled"
+              labelPosition="before"
+              onChange={(_, d) => void toggleDMZ(d.checked)}
+            />
+            <Button
+              appearance="secondary"
+              disabled={dmzSaving || loading}
+              onClick={() => void saveDMZ(dmz?.enabled ?? false)}
+            >
+              {dmzSaving ? 'Saving…' : 'Save'}
+            </Button>
+          </div>
+        </div>
+        {dmz?.enabled && dmz.target_host && (
+          <Text className={styles.hint}>
+            Active — <span className={styles.mono}>{hubIP || 'hub'}:*</span> →{' '}
+            <span className={styles.mono}>{dmz.target_host}:*</span>
+          </Text>
         )}
       </Card>
 
-      <Dialog open={dialogOpen} onOpenChange={(_, data) => setDialogOpen(data.open)}>
-        <DialogSurface>
+      <Card className={styles.card}>
+        <div className={styles.cardHeader}>
+          <div className={styles.cardTitle}>
+            <Text weight="semibold" size={400}>
+              Port forwards
+            </Text>
+            <Text className={styles.hint}>Per-port TCP/UDP proxy rules on the hub VPN IP.</Text>
+          </div>
+          <Button appearance="primary" icon={<AddRegular />} onClick={openCreate}>
+            Add rule
+          </Button>
+        </div>
+
+        {loading ? (
+          <Spinner label="Loading…" />
+        ) : rules.length === 0 ? (
+          <Text className={styles.hint}>No rules yet. Add one or enable DMZ above.</Text>
+        ) : (
+          <div className={styles.tableWrap}>
+            <Table aria-label="Port forwards" className={styles.table}>
+              <TableHeader>
+                <TableRow>
+                  <TableHeaderCell>Name</TableHeaderCell>
+                  <TableHeaderCell className={styles.colListen}>Listen</TableHeaderCell>
+                  <TableHeaderCell>Target</TableHeaderCell>
+                  <TableHeaderCell className={styles.colEnabled}>On</TableHeaderCell>
+                  <TableHeaderCell className={styles.colActions} />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {rules.map((rule) => (
+                  <TableRow key={rule.id}>
+                    <TableCell>
+                      <Text>{rule.name || '—'}</Text>
+                    </TableCell>
+                    <TableCell>
+                      <Text className={styles.mono}>
+                        {hubIP
+                          ? formatListen(hubIP, rule.listen_port, rule.protocol)
+                          : `${rule.protocol}:${rule.listen_port}`}
+                      </Text>
+                    </TableCell>
+                    <TableCell>
+                      <Text className={styles.mono}>{rule.target_display}</Text>
+                    </TableCell>
+                    <TableCell>
+                      <Switch
+                        checked={rule.enabled}
+                        disabled={togglingId === rule.id}
+                        onChange={(_, d) => void toggleEnabled(rule, d.checked)}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <div className={styles.actions}>
+                        <Button
+                          size="small"
+                          appearance="subtle"
+                          icon={<EditRegular />}
+                          aria-label="Edit"
+                          onClick={() => openEdit(rule)}
+                        />
+                        <Button
+                          size="small"
+                          appearance="subtle"
+                          icon={<DeleteRegular />}
+                          aria-label="Delete"
+                          onClick={() => void remove(rule)}
+                        />
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+      </Card>
+
+      <Dialog
+        open={dialogOpen}
+        onOpenChange={(_, data) => {
+          setDialogOpen(data.open);
+          if (!data.open) setFormError('');
+        }}
+      >
+        <DialogSurface style={{ maxWidth: 480 }}>
           <DialogBody>
-            <DialogTitle>{editing ? 'Edit forward' : 'Add forward'}</DialogTitle>
-            <DialogContent style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <Field label="Name" hint="Optional label">
+            <DialogTitle>{editing ? 'Edit rule' : 'Add rule'}</DialogTitle>
+            <DialogContent className={styles.dialogGrid}>
+              <Field className={styles.dialogFull} label="Name" hint="Optional label">
                 <Input
                   value={form.name}
                   onChange={(_, d) => setForm((f) => ({ ...f, name: d.value }))}
                 />
               </Field>
-              <Field label="Listen port" required hint={`Hub VPN IP (${hubIP || 'hub'})`}>
+              <Field label="Listen port" required hint={hubIP ? `On ${hubIP}` : undefined}>
                 <Input
                   type="number"
+                  min={1}
+                  max={65535}
                   value={form.listen_port}
                   onChange={(_, d) => setForm((f) => ({ ...f, listen_port: d.value }))}
                 />
@@ -307,21 +506,24 @@ export default function ForwardPage() {
                   <Option value="udp">UDP</Option>
                 </Dropdown>
               </Field>
-              <Field label="Target host" required hint={`Peer name or hostname (e.g. peer.${DNS_DOMAIN})`}>
+              <Field className={styles.dialogFull} label="Target host" required hint={targetHostHint}>
                 <Input
                   value={form.target_host}
+                  placeholder={`peer.${DNS_DOMAIN}`}
                   onChange={(_, d) => setForm((f) => ({ ...f, target_host: d.value }))}
                 />
               </Field>
-              <Field label="Target port" required>
+              <Field className={styles.dialogFull} label="Target port" required>
                 <Input
                   type="number"
+                  min={1}
+                  max={65535}
                   value={form.target_port}
                   onChange={(_, d) => setForm((f) => ({ ...f, target_port: d.value }))}
                 />
               </Field>
-              {error && dialogOpen && (
-                <Text style={{ color: tokens.colorPaletteRedForeground1 }}>{error}</Text>
+              {formError && (
+                <Text className={`${styles.error} ${styles.dialogFull}`}>{formError}</Text>
               )}
             </DialogContent>
             <DialogActions>

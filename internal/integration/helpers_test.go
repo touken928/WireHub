@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/touken928/wirehub/internal/config"
 	"github.com/touken928/wirehub/internal/domain"
 	"github.com/touken928/wirehub/internal/vpn/filter"
 	"github.com/touken928/wirehub/internal/repo"
@@ -237,7 +238,12 @@ func (env *peerMeshEnv) syncPortForwards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := env.portProxy.Apply(toPortForwardRules(rules)); err != nil {
+	dmz, err := env.store.GetPortForwardDMZ()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dmzCfg := filter.DMZConfig{Enabled: dmz.Enabled, TargetHost: dmz.TargetHost}
+	if err := env.portProxy.Apply(toPortForwardRules(rules), dmzCfg, config.DefaultPort); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(100 * time.Millisecond)

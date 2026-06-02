@@ -7,6 +7,7 @@ import type {
   PeerGroup,
   PeerStatus,
   PortForward,
+  PortForwardDMZ,
   PortForwardList,
   Settings,
   SetupStatus,
@@ -130,6 +131,8 @@ export const api = {
     request<PortForward>(`/forwards/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   deletePortForward: (id: number) =>
     request<{ ok: boolean }>(`/forwards/${id}`, { method: 'DELETE' }),
+  updatePortForwardDMZ: (body: { target_host?: string; enabled?: boolean }) =>
+    request<PortForwardDMZ>('/forwards/dmz', { method: 'PUT', body: JSON.stringify(body) }),
 
   listPeers: () => request<Peer[]>('/peers'),
   createPeer: (body: { name: string; group_id: number }) =>

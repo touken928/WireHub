@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"net"
 	"strings"
-
-	"github.com/touken928/wirehub/internal/config"
 )
 
 const (
@@ -13,21 +11,14 @@ const (
 	ForwardProtoUDP = "udp"
 )
 
-// NormalizeForwardTargetHost accepts a peer label, wirehub FQDN, or external hostname.
-func NormalizeForwardTargetHost(host string) string {
-	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-	if host == "" {
-		return ""
-	}
-	if strings.Contains(host, ".") {
-		return host
-	}
-	return PeerFQDN(host)
+func normalizeForwardTargetHost(host string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
 }
 
-// ValidateForwardTargetHost checks the forward destination hostname or IPv4 address.
+// ValidateForwardTargetHost checks the forward destination FQDN or IPv4 address.
+// Peer usernames without a domain suffix are rejected.
 func ValidateForwardTargetHost(host string) (string, error) {
-	host = NormalizeForwardTargetHost(host)
+	host = normalizeForwardTargetHost(host)
 	if host == "" {
 		return "", fmt.Errorf("target host is required")
 	}
@@ -36,6 +27,9 @@ func ValidateForwardTargetHost(host string) (string, error) {
 			return "", fmt.Errorf("only IPv4 target addresses are supported")
 		}
 		return ip.String(), nil
+	}
+	if !strings.Contains(host, ".") {
+		return "", fmt.Errorf("target host must be a hostname or IPv4 address, not a peer username")
 	}
 	if len(host) > 253 {
 		return "", fmt.Errorf("target host too long")
@@ -85,15 +79,12 @@ func ValidateForwardListenPort(port int, hubWebPort int, protocol string) error 
 	return nil
 }
 
-// ForwardDisplayTarget returns host:port for UI, shortening internal wirehub names when helpful.
+// ForwardDisplayHost returns a normalized hostname for UI.
+func ForwardDisplayHost(host string) string {
+	return normalizeForwardTargetHost(host)
+}
+
+// ForwardDisplayTarget returns host:port for UI.
 func ForwardDisplayTarget(host string, port int) string {
-	host = strings.TrimSuffix(strings.ToLower(host), ".")
-	suffix := "." + config.DNSDomain
-	if strings.HasSuffix(host, suffix) {
-		label := strings.TrimSuffix(host, suffix)
-		if label != "" && !strings.Contains(label, ".") {
-			return fmt.Sprintf("%s:%d", label, port)
-		}
-	}
-	return fmt.Sprintf("%s:%d", host, port)
+	return fmt.Sprintf("%s:%d", ForwardDisplayHost(host), port)
 }

@@ -51,7 +51,7 @@ func (s *Store) openDB() error {
 func (s *Store) DB() *gorm.DB { return s.db }
 
 func (s *Store) migrate() error {
-	return s.db.AutoMigrate(&Admin{}, &Settings{}, &PeerGroup{}, &GroupLink{}, &Peer{}, &DNSRecord{}, &PortForward{})
+	return s.db.AutoMigrate(&Admin{}, &Settings{}, &PeerGroup{}, &GroupLink{}, &Peer{}, &DNSRecord{}, &PortForward{}, &PortForwardDMZ{})
 }
 
 func (s *Store) GetSettings() (*Settings, error) {

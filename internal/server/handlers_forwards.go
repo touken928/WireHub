@@ -37,8 +37,25 @@ func (s *Server) syncPortForwards(c *gin.Context) {
 	}
 }
 
+type portForwardDMZResponse struct {
+	repo.PortForwardDMZ
+	TargetDisplay string `json:"target_display"`
+}
+
+func toPortForwardDMZResponse(d repo.PortForwardDMZ) portForwardDMZResponse {
+	return portForwardDMZResponse{
+		PortForwardDMZ: d,
+		TargetDisplay:  domain.ForwardDisplayHost(d.TargetHost),
+	}
+}
+
 func (s *Server) handleListPortForwards(c *gin.Context) {
 	rules, err := s.Store.ListPortForwards()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	dmz, err := s.Store.GetPortForwardDMZ()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -54,6 +71,7 @@ func (s *Server) handleListPortForwards(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"rules":    out,
+		"dmz":      toPortForwardDMZResponse(*dmz),
 		"hub_ip":   hubIP,
 		"hub_port": s.hubWebPort(c),
 	})
@@ -134,6 +152,45 @@ func (s *Server) handleUpdatePortForward(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, toPortForwardResponse(*rule))
+}
+
+type portForwardDMZRequest struct {
+	TargetHost *string `json:"target_host"`
+	Enabled    *bool   `json:"enabled"`
+}
+
+func (s *Server) handleUpdatePortForwardDMZ(c *gin.Context) {
+	var req portForwardDMZRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	existing, err := s.Store.GetPortForwardDMZ()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	enabled := existing.Enabled
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	targetHost := existing.TargetHost
+	if req.TargetHost != nil {
+		targetHost = *req.TargetHost
+	}
+	row, err := s.Store.UpsertPortForwardDMZ(repo.PortForwardDMZInput{
+		TargetHost: targetHost,
+		Enabled:    enabled,
+	})
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	s.syncPortForwards(c)
+	if c.Writer.Written() {
+		return
+	}
+	c.JSON(http.StatusOK, toPortForwardDMZResponse(*row))
 }
 
 func (s *Server) handleDeletePortForward(c *gin.Context) {
