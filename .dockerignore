@@ -1,0 +1,10 @@
+.git
+.github
+data
+dist
+wirehub
+*.exe
+web/node_modules
+**/.cursor
+**/*.md
+!README.md

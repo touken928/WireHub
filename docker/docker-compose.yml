@@ -1,0 +1,15 @@
+services:
+  wirehub:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: wirehub
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+      - "8443:8443/udp"
+    volumes:
+      - wirehub-data:/app/data
+
+volumes:
+  wirehub-data:

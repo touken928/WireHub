@@ -1,0 +1,184 @@
+package integration
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/netip"
+	"testing"
+	"time"
+
+	"github.com/miekg/dns"
+	"github.com/touken928/wirehub/internal/network"
+	"github.com/touken928/wirehub/internal/store"
+	"github.com/touken928/wirehub/internal/wg"
+	"golang.zx2c4.com/wireguard/tun/netstack"
+)
+
+func freeUDPPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return ln.LocalAddr().(*net.UDPAddr).Port
+}
+
+func freeTCPPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+func mustAtoi(s string) int {
+	var n int
+	fmt.Sscanf(s, "%d", &n)
+	return n
+}
+
+func waitForHandshake(t *testing.T, mgr *wg.Manager, peerPubKey string, timeout time.Duration) error {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		stats, err := mgr.GetStats()
+		if err != nil {
+			return err
+		}
+		if s, ok := stats[peerPubKey]; ok && !s.LastHandshake.IsZero() {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("wireguard handshake timeout")
+}
+
+func queryA(tnet *netstack.Net, dnsIP, qname string) (string, error) {
+	msg := new(dns.Msg)
+	msg.SetQuestion(dns.Fqdn(qname), dns.TypeA)
+	pack, err := msg.Pack()
+	if err != nil {
+		return "", err
+	}
+	raddr := &net.UDPAddr{IP: net.ParseIP(dnsIP), Port: 53}
+	conn, err := tnet.DialUDP(nil, raddr)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	if _, err := conn.Write(pack); err != nil {
+		return "", err
+	}
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return "", err
+	}
+	resp := new(dns.Msg)
+	if err := resp.Unpack(buf[:n]); err != nil {
+		return "", err
+	}
+	if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) == 0 {
+		return "", fmt.Errorf("no answer for %s (rcode=%s)", qname, dns.RcodeToString[resp.Rcode])
+	}
+	if a, ok := resp.Answer[0].(*dns.A); ok {
+		return a.A.String(), nil
+	}
+	return "", fmt.Errorf("unexpected rr type")
+}
+
+func queryAOrFail(t *testing.T, tnet *netstack.Net, dnsIP, qname string) string {
+	t.Helper()
+	ip, err := queryA(tnet, dnsIP, qname)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ip
+}
+
+func httpViaNetstack(tnet *netstack.Net, dnsIP, hubIP string, req *http.Request) (*http.Response, error) {
+	host := req.URL.Hostname()
+	port := req.URL.Port()
+	if port == "" {
+		port = "80"
+	}
+	ip := hubIP
+	if host != hubIP {
+		var err error
+		ip, err = queryA(tnet, dnsIP, host)
+		if err != nil {
+			return nil, err
+		}
+	}
+	addr := net.JoinHostPort(ip, port)
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return tnet.DialContext(ctx, network, addr)
+		},
+	}
+	client := http.Client{Transport: transport, Timeout: 5 * time.Second}
+	return client.Do(req)
+}
+
+func peerHTTPGet(tnet *netstack.Net, url string, timeout time.Duration) (string, error) {
+	client := http.Client{
+		Transport: &http.Transport{DialContext: tnet.DialContext},
+		Timeout:   timeout,
+	}
+	resp, err := client.Get(url)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func startPeerHTTPServer(t *testing.T, tnet *netstack.Net, ip string, port int, response string) func() {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, response)
+	})
+	ln, err := tnet.ListenTCP(&net.TCPAddr{IP: net.ParseIP(ip), Port: port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go http.Serve(ln, mux)
+	return func() { _ = ln.Close() }
+}
+
+func applyAccessRules(hubMgr *wg.Manager, peers []store.Peer) error {
+	rules := network.NewAccessRuleSet()
+	for _, p := range peers {
+		if !p.Enabled || len(p.AccessExclude) == 0 {
+			continue
+		}
+		blocked, err := store.ResolveExcludeRules(peers, p, p.AccessExclude)
+		if err != nil {
+			return err
+		}
+		targets := make([]netip.Addr, 0, len(blocked))
+		for _, ipStr := range blocked {
+			if ip, err := netip.ParseAddr(ipStr); err == nil {
+				targets = append(targets, ip)
+			}
+		}
+		peerIP, err := netip.ParseAddr(p.WGIP)
+		if err != nil {
+			continue
+		}
+		rules.SetBlocked(peerIP, targets)
+	}
+	hubMgr.SetAccessRules(rules)
+	return nil
+}
