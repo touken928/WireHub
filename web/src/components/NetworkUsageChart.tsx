@@ -211,7 +211,7 @@ function NetworkUsageChart() {
   return (
     <Card className={styles.card}>
       <div className={styles.header}>
-        <Subtitle2>Network usage</Subtitle2>
+        <Subtitle2>Network</Subtitle2>
         <div className={styles.legend}>
           <div className={styles.legendItem}>
             <span className={`${styles.dot} ${styles.rxDot}`} />

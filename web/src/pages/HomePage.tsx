@@ -373,10 +373,6 @@ export default function HomePage({ dark, onToggleTheme }: HomePageProps) {
                 <Text className={styles.monoText}>{settings.wg_subnet}</Text>
               </div>
               <div className={styles.infoTile}>
-                <Text size={200} className={styles.label}>Hub / DNS</Text>
-                <Text className={styles.monoText}>{settings.hub_ip} / {settings.dns_ip}</Text>
-              </div>
-              <div className={styles.infoTile}>
                 <Text size={200} className={styles.label}>Endpoint</Text>
                 <Text className={styles.monoText}>{settings.endpoint}:{settings.listen_port}</Text>
               </div>
