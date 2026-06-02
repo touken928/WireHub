@@ -1,8 +1,23 @@
-# WireHub
+<h1 align="center">WireHub</h1>
 
-**[中文文档](README_zh.md)**
+<p align="center">
+  <strong>Centralized hub-and-spoke WireGuard management with a built-in web dashboard — one public hub endpoint, <a href="https://github.com/WireGuard/wireguard-go">userspace WireGuard</a> on the server, no kernel module required.</strong>
+</p>
 
-Centralized hub-and-spoke WireGuard management. One hub with a public IP manages every peer through a web dashboard.
+<p align="center">
+  <a href="docs/README_zh.md">中文说明</a>
+</p>
+
+<p align="center">
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.26+-00ADD8.svg?style=for-the-badge&logo=go&logoColor=white" alt="Go 1.26+"></a>
+  <a href="https://react.dev/"><img src="https://img.shields.io/badge/react-19-61DAFB.svg?style=for-the-badge&logo=react&logoColor=black" alt="React 19"></a>
+  <a href="https://www.docker.com/"><img src="https://img.shields.io/badge/docker-ready-2496ED.svg?style=for-the-badge&logo=docker&logoColor=white" alt="Docker"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue.svg?style=for-the-badge" alt="GPL-3.0"></a>
+</p>
+
+<p align="center">
+  <img src="docs/assets/screenshot.png" alt="WireHub dashboard" width="720">
+</p>
 
 ## Features
 
@@ -17,27 +32,21 @@ Centralized hub-and-spoke WireGuard management. One hub with a public IP manages
 
 ## How it works
 
-```
-                         Public Internet
-                               │
-              TCP :8443 (Web UI, CLI --port)
-              UDP :WG port (WireGuard, set at setup)
-                               │
-                    ┌──────────▼──────────┐
-  Admin browser ──► │  Web UI + REST API  │
-                    │  (Gin + React)      │
-                    └──────────┬──────────┘
-                               │
-              ┌────────────────▼────────────────┐
-              │            WireHub Hub            │
-              │   wireguard-go · userspace TUN    │
-              │   DNS (UDP 53) · access filter    │
-              └────────────────┬──────────────────┘
-                               │ WireGuard tunnel
-           ┌───────────────────┼───────────────────┐
-           │                   │                   │
-      Laptop peer         Server peer        Restricted peer
-      (same group)        (same group)      (other group)
+```mermaid
+flowchart TB
+  net([Public Internet])
+
+  net -->|TCP :8443 · Web UI| web["Web UI + REST API<br/>(Gin + React)"]
+  net -->|UDP · WireGuard port| hub
+
+  admin[Admin browser] --> web
+  web --> hub
+
+  hub["WireHub Hub<br/>wireguard-go · userspace TUN<br/>DNS UDP 53 · access filter"]
+
+  hub -->|WireGuard tunnel| p1["Laptop peer<br/>(same group)"]
+  hub -->|WireGuard tunnel| p2["Server peer<br/>(same group)"]
+  hub -->|WireGuard tunnel| p3["Restricted peer<br/>(other group)"]
 ```
 
 After setup, the hub listens on its VPN address for **TCP (web UI via tunnel)** and **UDP 53 (DNS)**. The **WireGuard UDP port** is stored in the database and written to client configs (`Endpoint = <public host>:<port>`). It is independent of the **web UI port** (`--port`, default `8443`).

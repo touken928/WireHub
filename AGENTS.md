@@ -1,0 +1,129 @@
+# AGENTS.md — WireHub
+
+Guidance for coding agents working in this repository.
+
+## Project
+
+WireHub is a single-binary WireGuard hub: userspace `wireguard-go` + gVisor netstack on the server, SQLite persistence, Gin REST API, React admin UI embedded via `go:embed`.
+
+- **Module:** `github.com/touken928/wirehub`
+- **Entry:** `cmd/wirehub/main.go`
+- **User docs:** `README.md` (English), `docs/README_zh.md` (中文)
+
+## Repository layout
+
+```
+cmd/wirehub/          # composition root
+internal/
+  domain/             # pure rules: HubConfig, group ACL, hostnames, client .conf template
+  service/            # use cases: Hub (peers, stats poller, VPN attach, ACL sync)
+  server/             # HTTP handlers + routes (Gin); embeds *service.Hub
+  repo/               # GORM/SQLite persistence
+  vpn/                # VPN stack
+    stack.go          # lifecycle (was runtime.Network)
+    wg/               # WireGuard manager
+    dns/              # authoritative *.wirehub DNS on netstack
+    filter/           # TUN ACL + gVisor forwarding + tunnel HTTP
+  auth/               # JWT login middleware
+  password/           # bcrypt helpers (shared by repo + auth; avoids import cycles)
+  config/             # CLI flags, defaults, subnet/DNS helpers
+  static/             # embedded SPA (built from web/)
+  integration/        # black-box Go tests
+web/                  # React + Vite + Fluent UI
+docs/                 # README_zh.md, assets/
+docker/               # Dockerfile, compose
+```
+
+**Ignore stale paths** if present locally (`internal/api`, `internal/store`, `internal/app`, `internal/runtime`, etc.) — canonical names are above.
+
+## Dependency direction
+
+```
+cmd → server, service, repo, vpn, auth, config, static
+server → service, repo, auth, password
+service → domain, repo, vpn/wg, vpn/dns
+vpn → service, repo, vpn/wg, vpn/dns, vpn/filter
+repo → domain, config, password
+domain → config, vpn/filter (ACL RuleSet only)
+auth → repo, password
+```
+
+Do not introduce `repo` → `auth` or `internal` → `cmd` imports.
+
+## Ports and configuration
+
+| Setting | Default | Where |
+|--------|---------|--------|
+| Web UI / API TCP | `8443` | CLI `--port` (`config.DefaultWebPort`) |
+| WireGuard UDP | `8443` at setup | DB `settings.listen_port` |
+| DNS domain suffix | `wirehub` | `config.DNSDomain` |
+| Data dir | `./data` | CLI `--data-dir` → `wirehub.db`, `.jwt_secret` |
+
+Web port and WireGuard port are **independent**.
+
+## Commands
+
+```bash
+# Full build (production-like)
+cd web && npm ci && npm run build && cd ..
+go build -o wirehub ./cmd/wirehub
+
+# Run hub
+./wirehub --data-dir ./data
+# or: go run ./cmd/wirehub --data-dir ./data
+
+# Backend tests
+go test ./...
+
+# Frontend only (proxies /api → :8080; run Go with --port 8080)
+cd web && npm run dev
+```
+
+Frontend build output: `internal/static/dist` (Vite `outDir`).
+
+## Backend conventions
+
+- **Thin HTTP layer:** `internal/server` handlers delegate peer/network work to `service.Hub` methods; avoid duplicating WG/DNS sync in handlers.
+- **Domain logic** stays in `internal/domain` (no GORM, no Gin).
+- **Group ACL:** `domain.BuildAccessRules` → `vpn/filter.RuleSet` → `wg.Manager.SetAccessRules`.
+- **Hostnames:** `domain.ValidateHostname`, `domain.PeerFQDN` — not a separate package.
+- **Passwords:** `password.Hash` / `password.Verify` only; never import `auth` from `repo`.
+- **VPN lifecycle:** `vpn.Stack` implements `service.NetworkRuntime`; call `service.Hub.AttachNetwork` / `DetachNetwork` from stack start/stop.
+- Prefer minimal diffs; match existing naming and file placement.
+- Do not commit unless the user asks. Do not commit `data/`, secrets, or local `.db` files.
+
+## Frontend conventions
+
+```
+web/src/
+  app/           # routes, guards, theme
+  api/           # fetch client, types
+  components/    # common/, groups/, layout/, peers/
+  pages/
+  hooks/
+  lib/
+```
+
+- Path alias: `@/*` → `./src/*` in `tsconfig.app.json` (no `baseUrl`; TS 6 style).
+- API base: `/api`; Vite dev proxy in `vite.config.ts`.
+- UI: Fluent UI v9; groups graph uses `@xyflow/react`.
+
+## Testing notes
+
+- `internal/integration/` spins real netstack/WG paths; can be slow; needs network/syscalls.
+- Package tests: `domain`, `repo`, `vpn/dns`, `vpn/filter`, `config`, etc.
+
+## When adding features
+
+1. Model/API types → `repo` + `server` handlers.
+2. Orchestration (DB + WG + DNS + ACL) → `service`.
+3. Validation / portable config / ACL math → `domain`.
+4. New REST routes → `server/router.go` + handler file by area (`handlers_peers.go`, `handlers_groups.go`, …).
+5. Update `web/src/api/types.ts` and pages if the UI exposes the feature.
+6. Run `go test ./...` and `cd web && npm run build` before finishing.
+
+## Docs and README
+
+- Centered HTML header + badges in `README.md` / `docs/README_zh.md`.
+- Architecture diagram: Mermaid in **How it works** / **工作原理**.
+- Screenshot: `docs/assets/screenshot.png`.

@@ -1,8 +1,23 @@
-# WireHub
+<h1 align="center">WireHub</h1>
 
-**[English](README.md)**
+<p align="center">
+  <strong>集中式 Hub-and-Spoke WireGuard 管理平台 — 一台公网 Hub、内置 Web 控制台，Hub 侧使用 <a href="https://github.com/WireGuard/wireguard-go">用户态 WireGuard</a>（wireguard-go + gVisor netstack），无需内核模块。</strong>
+</p>
 
-集中式 Hub-and-Spoke WireGuard 管理平台。只需一台拥有公网 IP 的 Hub，即可通过 Web 控制台管理所有客户端。
+<p align="center">
+  <a href="../README.md">English</a>
+</p>
+
+<p align="center">
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.26+-00ADD8.svg?style=for-the-badge&logo=go&logoColor=white" alt="Go 1.26+"></a>
+  <a href="https://react.dev/"><img src="https://img.shields.io/badge/react-19-61DAFB.svg?style=for-the-badge&logo=react&logoColor=black" alt="React 19"></a>
+  <a href="https://www.docker.com/"><img src="https://img.shields.io/badge/docker-ready-2496ED.svg?style=for-the-badge&logo=docker&logoColor=white" alt="Docker"></a>
+  <a href="../LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue.svg?style=for-the-badge" alt="GPL-3.0"></a>
+</p>
+
+<p align="center">
+  <img src="assets/screenshot.png" alt="WireHub 控制台" width="720">
+</p>
 
 ## 功能
 
@@ -17,27 +32,21 @@
 
 ## 工作原理
 
-```
-                         公网
-                           │
-        TCP :8443（Web UI，CLI --port）
-        UDP :WG 端口（WireGuard，在配置向导中设置）
-                           │
-                ┌──────────▼──────────┐
-  管理浏览器 ──► │  Web UI + REST API  │
-                │  (Gin + React)      │
-                └──────────┬──────────┘
-                           │
-            ┌──────────────▼──────────────┐
-            │          WireHub Hub        │
-            │  wireguard-go · 用户态 TUN   │
-            │  DNS (UDP 53) · 访问过滤     │
-            └──────────────┬──────────────┘
-                           │ WireGuard 隧道
-           ┌───────────────┼───────────────┐
-           │               │               │
-      笔记本 Peer      服务器 Peer      隔离 Peer
-     （同组互通）     （同组互通）     （其他组）
+```mermaid
+flowchart TB
+  net([公网])
+
+  net -->|TCP :8443 · Web UI| web["Web UI + REST API<br/>(Gin + React)"]
+  net -->|UDP · WireGuard 端口| hub
+
+  admin[管理浏览器] --> web
+  web --> hub
+
+  hub["WireHub Hub<br/>wireguard-go · 用户态 TUN<br/>DNS UDP 53 · 访问过滤"]
+
+  hub -->|WireGuard 隧道| p1["笔记本 Peer<br/>（同组互通）"]
+  hub -->|WireGuard 隧道| p2["服务器 Peer<br/>（同组互通）"]
+  hub -->|WireGuard 隧道| p3["隔离 Peer<br/>（其他组）"]
 ```
 
 完成初始化后，Hub 在 VPN 地址上提供 **TCP（经隧道的 Web UI）** 与 **UDP 53（DNS）**。**WireGuard UDP 端口** 保存在数据库中，并写入客户端配置（`Endpoint = <公网地址>:<端口>`），与 **Web UI 端口**（`--port`，默认 `8443`）相互独立。
@@ -235,4 +244,4 @@ go test ./...
 
 ## 许可证
 
-[GNU General Public License v3.0](LICENSE)
+[GNU General Public License v3.0](../LICENSE)
