@@ -19,6 +19,10 @@ export default defineConfig({
               name: 'fluent-ui',
               test: /[\\/]node_modules[\\/]@fluentui[\\/]/,
             },
+            {
+              name: 'xyflow',
+              test: /[\\/]node_modules[\\/]@xyflow[\\/]/,
+            },
           ],
         },
       },

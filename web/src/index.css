@@ -2,11 +2,38 @@
   box-sizing: border-box;
 }
 
-body {
-  margin: 0;
-  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+/* peerGroup nodes use a custom component; strip default built-in node chrome */
+.react-flow__node-peerGroup {
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  width: auto;
 }
 
+.react-flow__node-peerGroup.selectable:hover,
+.react-flow__node-peerGroup.selectable.selected,
+.react-flow__node-peerGroup.selectable:focus,
+.react-flow__node-peerGroup.selectable:focus-visible {
+  box-shadow: none;
+}
+
+html,
+body,
 #root {
-  min-height: 100vh;
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  overflow-y: auto;
+}
+
+/* Groups: lock viewport; member panel scrolls internally */
+html.layout-fill,
+html.layout-fill body,
+html.layout-fill #root {
+  height: 100%;
+  overflow: hidden;
 }

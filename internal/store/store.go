@@ -15,7 +15,8 @@ import (
 )
 
 type Store struct {
-	db *gorm.DB
+	db     *gorm.DB
+	dbPath string
 }
 
 func New(cfg *config.RuntimeConfig) (*Store, error) {
@@ -23,30 +24,34 @@ func New(cfg *config.RuntimeConfig) (*Store, error) {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
 
-	db, err := gorm.Open(gormsqlite.Open(cfg.DatabasePath), &gorm.Config{
+	s := &Store{dbPath: cfg.DatabasePath}
+	if err := s.openDB(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Store) openDB() error {
+	db, err := gorm.Open(gormsqlite.Open(s.dbPath), &gorm.Config{
 		Logger: logger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), logger.Config{
 			LogLevel:                  logger.Warn,
 			IgnoreRecordNotFoundError: true,
 		}),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
+		return fmt.Errorf("open database: %w", err)
 	}
-
-	s := &Store{db: db}
+	s.db = db
 	if err := s.migrate(); err != nil {
-		return nil, err
+		return err
 	}
-	if err := s.MigratePeerAccessDefaults(); err != nil {
-		return nil, err
-	}
-	return s, nil
+	return s.MigrateGroups()
 }
 
 func (s *Store) DB() *gorm.DB { return s.db }
 
 func (s *Store) migrate() error {
-	return s.db.AutoMigrate(&Admin{}, &Settings{}, &Peer{}, &DNSRecord{})
+	return s.db.AutoMigrate(&Admin{}, &Settings{}, &PeerGroup{}, &GroupLink{}, &Peer{}, &DNSRecord{})
 }
 
 func (s *Store) GetSettings() (*Settings, error) {

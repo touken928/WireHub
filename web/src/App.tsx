@@ -2,83 +2,89 @@ import {
   FluentProvider,
   webLightTheme,
   webDarkTheme,
-  makeStyles,
-  tokens,
   Spinner,
 } from '@fluentui/react-components';
-import { BrowserRouter, Routes, Route, Navigate, Outlet, useLocation } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { api, getToken } from './api/client';
+import AppLayout from './components/AppLayout';
+import { ConfirmProvider } from './components/ConfirmContext';
 
 const LoginPage = lazy(() => import('./pages/LoginPage'));
 const SetupPage = lazy(() => import('./pages/SetupPage'));
-const HomePage = lazy(() => import('./pages/HomePage'));
-
-const useStyles = makeStyles({
-  root: {
-    minHeight: '100vh',
-    backgroundColor: tokens.colorNeutralBackground2,
-  },
-});
-
-function PrivateRoute() {
-  if (!getToken()) {
-    return <Navigate to="/login" replace />;
-  }
-  return <Outlet />;
-}
+const DashboardPage = lazy(() => import('./pages/DashboardPage'));
+const GroupsPage = lazy(() => import('./pages/GroupsPage'));
+const UsersPage = lazy(() => import('./pages/UsersPage'));
+const SettingsPage = lazy(() => import('./pages/SettingsPage'));
 
 function SetupGate({ children }: { children: React.ReactNode }) {
-  const location = useLocation();
   const [configured, setConfigured] = useState<boolean | null>(null);
+  const path = window.location.pathname;
 
   useEffect(() => {
     api.getSetupStatus()
       .then((status) => setConfigured(status.configured))
       .catch(() => setConfigured(true));
-  }, [location.pathname]);
+  }, []);
 
   if (configured === null) {
     return <Spinner label="Loading..." />;
   }
-
-  if (!configured && location.pathname !== '/setup') {
+  if (!configured && path !== '/setup') {
     return <Navigate to="/setup" replace />;
   }
-  if (configured && location.pathname === '/setup') {
+  if (configured && path === '/setup') {
     return <Navigate to={getToken() ? '/' : '/login'} replace />;
   }
-
   return children;
 }
 
-export default function App() {
-  const styles = useStyles();
+function RequireAuth({ children }: { children: React.ReactNode }) {
+  if (!getToken()) {
+    return <Navigate to="/login" replace />;
+  }
+  return children;
+}
+
+function AppShell() {
   const [dark, setDark] = useState(false);
 
   return (
     <FluentProvider theme={dark ? webDarkTheme : webLightTheme}>
-      <div className={styles.root}>
-        <BrowserRouter>
-          <SetupGate>
-            <Suspense fallback={<Spinner label="Loading..." />}>
-              <Routes>
-                <Route path="/setup" element={<SetupPage />} />
-                <Route path="/login" element={<LoginPage />} />
-                <Route element={<PrivateRoute />}>
-                  <Route
-                    index
-                    element={
-                      <HomePage dark={dark} onToggleTheme={() => setDark(!dark)} />
-                    }
-                  />
-                </Route>
-                <Route path="*" element={<Navigate to="/" replace />} />
-              </Routes>
-            </Suspense>
-          </SetupGate>
-        </BrowserRouter>
-      </div>
+      <ConfirmProvider>
+        <AppLayout dark={dark} onToggleTheme={() => setDark(!dark)} />
+      </ConfirmProvider>
+    </FluentProvider>
+  );
+}
+
+export default function App() {
+  return (
+    <FluentProvider theme={webLightTheme}>
+      <BrowserRouter>
+        <SetupGate>
+          <Suspense fallback={<Spinner label="Loading..." />}>
+            <Routes>
+              <Route path="/setup" element={<SetupPage />} />
+              <Route path="/login" element={<LoginPage />} />
+              <Route
+                path="/"
+                element={
+                  <RequireAuth>
+                    <AppShell />
+                  </RequireAuth>
+                }
+              >
+                <Route index element={<DashboardPage />} />
+                <Route path="groups" element={<GroupsPage />} />
+                <Route path="users" element={<UsersPage />} />
+                <Route path="settings" element={<SettingsPage />} />
+              </Route>
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </Suspense>
+        </SetupGate>
+      </BrowserRouter>
     </FluentProvider>
   );
 }

@@ -33,7 +33,7 @@ func main() {
 	netRuntime := runtime.NewNetwork(cfg, st, apiSvc, r)
 	apiSvc.SetNetworkController(netRuntime)
 
-	api.RegisterRoutes(r, apiSvc, authSvc, cfg.Port)
+	api.RegisterRoutes(r, apiSvc, authSvc)
 	if err := static.Mount(r); err != nil {
 		log.Fatalf("static: %v", err)
 	}

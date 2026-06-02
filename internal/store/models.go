@@ -29,13 +29,27 @@ type Peer struct {
 	PublicKey     string    `gorm:"uniqueIndex;not null" json:"public_key"`
 	PrivateKey    string    `gorm:"not null" json:"-"`
 	WGIP          string    `gorm:"uniqueIndex;not null" json:"wg_ip"`
-	AccessExclude []string  `gorm:"serializer:json;column:access_hosts" json:"access_exclude"`
+	GroupID       uint      `gorm:"index;not null" json:"group_id"`
 	Enabled       bool      `gorm:"default:true" json:"enabled"`
 	DNSName       string    `json:"dns_name"`
 	LastHandshake int64     `json:"last_handshake"`
 	RxBytes       int64     `json:"rx_bytes"`
 	TxBytes       int64     `json:"tx_bytes"`
 	CreatedAt     time.Time `json:"created_at"`
+}
+
+type PeerGroup struct {
+	ID   uint    `gorm:"primaryKey" json:"id"`
+	Name string  `gorm:"uniqueIndex;not null" json:"name"`
+	PosX float64 `json:"pos_x"`
+	PosY float64 `json:"pos_y"`
+}
+
+// GroupLink is stored with FromGroupID < ToGroupID (undirected access).
+type GroupLink struct {
+	ID          uint `gorm:"primaryKey" json:"id"`
+	FromGroupID uint `gorm:"uniqueIndex:idx_group_link_pair;not null" json:"from_group_id"`
+	ToGroupID   uint `gorm:"uniqueIndex:idx_group_link_pair;not null" json:"to_group_id"`
 }
 
 type DNSRecord struct {

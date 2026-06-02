@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/netip"
 	"testing"
 	"time"
 
@@ -157,28 +156,23 @@ func startPeerHTTPServer(t *testing.T, tnet *netstack.Net, ip string, port int, 
 	return func() { _ = ln.Close() }
 }
 
-func applyAccessRules(hubMgr *wg.Manager, peers []store.Peer) error {
-	rules := network.NewAccessRuleSet()
-	for _, p := range peers {
-		if !p.Enabled || len(p.AccessExclude) == 0 {
-			continue
-		}
-		blocked, err := store.ResolveExcludeRules(peers, p, p.AccessExclude)
-		if err != nil {
-			return err
-		}
-		targets := make([]netip.Addr, 0, len(blocked))
-		for _, ipStr := range blocked {
-			if ip, err := netip.ParseAddr(ipStr); err == nil {
-				targets = append(targets, ip)
-			}
-		}
-		peerIP, err := netip.ParseAddr(p.WGIP)
-		if err != nil {
-			continue
-		}
-		rules.SetBlocked(peerIP, targets)
+func applyAccessRules(hubMgr *wg.Manager, st *store.Store) error {
+	rules, err := buildAccessRulesFromStore(st)
+	if err != nil {
+		return err
 	}
 	hubMgr.SetAccessRules(rules)
 	return nil
+}
+
+func buildAccessRulesFromStore(st *store.Store) (*network.AccessRuleSet, error) {
+	peers, err := st.ListPeers()
+	if err != nil {
+		return nil, err
+	}
+	links, err := st.ListGroupLinks()
+	if err != nil {
+		return nil, err
+	}
+	return store.BuildGroupAccessRules(peers, links)
 }

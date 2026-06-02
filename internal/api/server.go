@@ -18,6 +18,7 @@ var errNetworkUnavailable = errors.New("network runtime is not running")
 type NetworkController interface {
 	Start() error
 	Stop() error
+	ReloadSettings() error
 }
 
 type Server struct {
@@ -143,7 +144,7 @@ func buildClientConfig(settings *store.Settings, peer *store.Peer) (string, erro
 	fmt.Fprintf(&b, "PrivateKey = %s\n", peer.PrivateKey)
 	fmt.Fprintf(&b, "Address = %s/32\n", peer.WGIP)
 	fmt.Fprintf(&b, "DNS = %s\n", strings.Join(settings.ClientDNS(), ", "))
-	fmt.Fprintf(&b, "# Hub web UI: http://%s:%d\n\n", hostname.HubFQDN(), settings.ListenPort)
+	fmt.Fprintf(&b, "# Hub web UI: http://%s\n\n", hostname.HubFQDN())
 	fmt.Fprintf(&b, "[Peer]\n")
 	fmt.Fprintf(&b, "PublicKey = %s\n", settings.ServerPublicKey)
 	fmt.Fprintf(&b, "Endpoint = %s:%d\n", settings.Endpoint, settings.ListenPort)

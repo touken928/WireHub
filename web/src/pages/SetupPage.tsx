@@ -10,10 +10,13 @@ import {
   makeStyles,
   tokens,
 } from '@fluentui/react-components';
-import { useEffect, useState } from 'react';
+import { ArrowUploadRegular } from '@fluentui/react-icons';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, setToken } from '../api/client';
 import type { SetupDefaults } from '../api/client';
+import { textToUpstreamDns } from '../types/hubConfig';
+import { LAYOUT } from '../styles/layout';
 
 const useStyles = makeStyles({
   page: {
@@ -25,7 +28,7 @@ const useStyles = makeStyles({
     background: `linear-gradient(135deg, ${tokens.colorBrandBackground2} 0%, ${tokens.colorNeutralBackground2} 100%)`,
   },
   card: {
-    width: 'min(520px, 100%)',
+    width: `min(${LAYOUT.authPanelWidth}, calc(100vw - 48px))`,
     padding: '32px',
     display: 'flex',
     flexDirection: 'column',
@@ -36,14 +39,22 @@ const useStyles = makeStyles({
     flexDirection: 'column',
     gap: '14px',
   },
+  divider: {
+    borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
+    margin: '8px 0',
+  },
   error: {
     color: tokens.colorPaletteRedForeground1,
+  },
+  success: {
+    color: tokens.colorPaletteGreenForeground1,
   },
 });
 
 export default function SetupPage() {
   const styles = useStyles();
   const navigate = useNavigate();
+  const fileRef = useRef<HTMLInputElement>(null);
   const [defaults, setDefaults] = useState<SetupDefaults | null>(null);
   const [endpoint, setEndpoint] = useState('');
   const [subnet, setSubnet] = useState('');
@@ -51,9 +62,12 @@ export default function SetupPage() {
   const [adminPassword, setAdminPassword] = useState('');
   const [mtu, setMtu] = useState('');
   const [statusInterval, setStatusInterval] = useState('');
+  const [listenPort, setListenPort] = useState('');
   const [upstreamDns, setUpstreamDns] = useState('');
   const [error, setError] = useState('');
+  const [importOk, setImportOk] = useState('');
   const [loading, setLoading] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   useEffect(() => {
     api.getSetupStatus().then((status) => {
@@ -72,19 +86,36 @@ export default function SetupPage() {
     });
   }, [navigate]);
 
+  const handleImport = async (file: File) => {
+    setImporting(true);
+    setError('');
+    setImportOk('');
+    try {
+      await api.importDatabase(file);
+      setImportOk('Database imported. Sign in with your existing admin account.');
+      setTimeout(() => navigate('/login', { replace: true }), 800);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Import failed');
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError('');
+    setImportOk('');
     try {
       const { token } = await api.setup({
         endpoint: endpoint.trim(),
         subnet: subnet.trim() || defaults?.subnet,
         admin_username: adminUsername.trim() || defaults?.admin_username,
         admin_password: adminPassword,
+        listen_port: parseInt(listenPort, 10),
         mtu: parseInt(mtu, 10) || defaults?.mtu,
         status_interval: parseInt(statusInterval, 10) || defaults?.status_interval,
-        upstream_dns: upstreamDns.split('\n').map((line) => line.trim()).filter(Boolean),
+        upstream_dns: textToUpstreamDns(upstreamDns),
       });
       setToken(token);
       navigate('/', { replace: true });
@@ -108,18 +139,54 @@ export default function SetupPage() {
       <Card className={styles.card}>
         <Title1>WireHub Setup</Title1>
         <Text>
-          Configure your hub once. These settings are stored in the database and cannot be changed from the UI later.
+          Import an existing <Text weight="semibold">wirehub.db</Text> backup, or configure a new hub below.
         </Text>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".db,application/octet-stream"
+          hidden
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) void handleImport(file);
+            e.target.value = '';
+          }}
+        />
+        <Button
+          icon={<ArrowUploadRegular />}
+          disabled={importing}
+          onClick={() => fileRef.current?.click()}
+        >
+          {importing ? 'Importing...' : 'Import wirehub.db'}
+        </Button>
+        {importOk && <Text className={styles.success}>{importOk}</Text>}
+
+        <div className={styles.divider} />
+        <Text weight="semibold">New hub</Text>
+
         <form onSubmit={handleSubmit} className={styles.form}>
           <Field
             label="Public endpoint"
             required
-            hint="IP or hostname clients use to reach this hub (WireGuard Endpoint)"
+            hint="IP or hostname clients use in WireGuard Endpoint (before the port)"
           >
             <Input
               value={endpoint}
-              placeholder="203.0.113.10"
+              placeholder="example.com"
               onChange={(_, d) => setEndpoint(d.value)}
+            />
+          </Field>
+          <Field
+            label="WireGuard port"
+            required
+            hint="UDP port in client configs (default 8443)"
+          >
+            <Input
+              type="number"
+              required
+              value={listenPort}
+              placeholder="8443"
+              onChange={(_, d) => setListenPort(d.value)}
             />
           </Field>
           <Field
@@ -131,7 +198,7 @@ export default function SetupPage() {
           <Field label="Admin username" hint="Web UI login username">
             <Input value={adminUsername} onChange={(_, d) => setAdminUsername(d.value)} />
           </Field>
-          <Field label="Admin password" required hint="Web UI login password">
+          <Field label="Admin password" required hint="At least 8 characters">
             <Input
               type="password"
               value={adminPassword}
@@ -147,7 +214,7 @@ export default function SetupPage() {
           </Field>
           <Field
             label="Additional DNS servers"
-            hint="Public resolvers listed in client configs after the hub DNS IP; one address per line (default 1.2.4.8, 1.1.1.1). External queries are forwarded through the hub."
+            hint="Public resolvers in client configs after the hub DNS IP; one per line"
           >
             <Textarea
               value={upstreamDns}
@@ -166,7 +233,7 @@ export default function SetupPage() {
           <Button
             appearance="primary"
             type="submit"
-            disabled={loading || !endpoint.trim() || !adminPassword}
+            disabled={loading || !endpoint.trim() || !listenPort.trim() || !adminPassword}
           >
             {loading ? 'Setting up...' : 'Complete setup'}
           </Button>

@@ -159,3 +159,17 @@ func (n *Network) Running() bool {
 	defer n.mu.Unlock()
 	return n.wgMgr != nil
 }
+
+// ReloadSettings restarts the network stack so MTU and DNS upstream changes take effect.
+func (n *Network) ReloadSettings() error {
+	n.mu.Lock()
+	running := n.wgMgr != nil
+	n.mu.Unlock()
+	if !running {
+		return nil
+	}
+	if err := n.Stop(); err != nil {
+		return err
+	}
+	return n.Start()
+}

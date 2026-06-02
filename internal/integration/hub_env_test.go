@@ -43,11 +43,16 @@ type peerMeshEnv struct {
 	peers      []livePeer
 }
 
+type meshPeerSpec struct {
+	Name      string
+	GroupName string
+}
+
 func setupHub(t *testing.T) (*hubEnv, *netstack.Net, func()) {
 	t.Helper()
-	env, hubNet, cleanup := setupPeerMesh(t, []store.Peer{
-		{Name: "touken"},
-	})
+	env, hubNet, cleanup := setupPeerMesh(t, []meshPeerSpec{
+		{Name: "touken", GroupName: "default"},
+	}, nil)
 	if len(env.peers) != 1 {
 		t.Fatalf("expected 1 peer, got %d", len(env.peers))
 	}
@@ -64,7 +69,7 @@ func setupHub(t *testing.T) (*hubEnv, *netstack.Net, func()) {
 	return legacy, hubNet, cleanup
 }
 
-func setupPeerMesh(t *testing.T, specs []store.Peer) (*peerMeshEnv, *netstack.Net, func()) {
+func setupPeerMesh(t *testing.T, specs []meshPeerSpec, linkPairs [][2]string) (*peerMeshEnv, *netstack.Net, func()) {
 	t.Helper()
 	if len(specs) == 0 {
 		t.Fatal("at least one peer spec is required")
@@ -95,7 +100,7 @@ func setupPeerMesh(t *testing.T, specs []store.Peer) (*peerMeshEnv, *netstack.Ne
 		Endpoint:         "127.0.0.1",
 		Subnet:           config.DefaultSubnet,
 		AdminUsername:    "admin",
-		AdminPassword:    "admin",
+		AdminPassword:    "adminadmin",
 		MTU:              config.DefaultMTU,
 		StatusInterval:   config.DefaultStatusInterval,
 		ListenPort:       listenPort,
@@ -125,9 +130,35 @@ func setupPeerMesh(t *testing.T, specs []store.Peer) (*peerMeshEnv, *netstack.Ne
 	}
 
 	dnsServer := dnssvc.NewServer(st, settings.HubIP, settings.DNSIP, settings.UpstreamDNSOrDefault())
+	groupIDs := map[string]uint{}
+
+	ensureGroup := func(name string) uint {
+		if id, ok := groupIDs[name]; ok {
+			return id
+		}
+		groups, _ := st.ListGroups()
+		for _, g := range groups {
+			if g.Name == name {
+				groupIDs[name] = g.ID
+				return g.ID
+			}
+		}
+		g, err := st.CreateGroup(name, 0, 0)
+		if err != nil {
+			t.Fatalf("create group %q: %v", name, err)
+		}
+		groupIDs[name] = g.ID
+		return g.ID
+	}
 
 	live := make([]livePeer, 0, len(specs))
 	for i, spec := range specs {
+		groupName := spec.GroupName
+		if groupName == "" {
+			groupName = "default"
+		}
+		groupID := ensureGroup(groupName)
+
 		peerIP, err := config.NthHostIP(config.DefaultSubnet, i+2)
 		if err != nil {
 			t.Fatal(err)
@@ -137,16 +168,13 @@ func setupPeerMesh(t *testing.T, specs []store.Peer) (*peerMeshEnv, *netstack.Ne
 			t.Fatal(err)
 		}
 		peer := store.Peer{
-			Name:          spec.Name,
-			PublicKey:     peerPub,
-			PrivateKey:    peerPriv,
-			WGIP:          peerIP,
-			Enabled:       true,
-			DNSName:       spec.Name,
-			AccessExclude: append([]string(nil), spec.AccessExclude...),
-		}
-		if !spec.Enabled && spec.Name != "" {
-			peer.Enabled = spec.Enabled
+			Name:       spec.Name,
+			PublicKey:  peerPub,
+			PrivateKey: peerPriv,
+			WGIP:       peerIP,
+			GroupID:    groupID,
+			Enabled:    true,
+			DNSName:    spec.Name,
 		}
 		if err := st.CreatePeer(&peer); err != nil {
 			t.Fatal(err)
@@ -156,6 +184,14 @@ func setupPeerMesh(t *testing.T, specs []store.Peer) (*peerMeshEnv, *netstack.Ne
 			t.Fatal(err)
 		}
 		live = append(live, livePeer{Peer: peer})
+	}
+
+	for _, pair := range linkPairs {
+		a := ensureGroup(pair[0])
+		b := ensureGroup(pair[1])
+		if err := st.UpsertGroupLink(a, b); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	if err := reloadAccessRules(st, wgMgr); err != nil {
@@ -186,11 +222,7 @@ func setupPeerMesh(t *testing.T, specs []store.Peer) (*peerMeshEnv, *netstack.Ne
 }
 
 func reloadAccessRules(st *store.Store, wgMgr *wg.Manager) error {
-	peers, err := st.ListPeers()
-	if err != nil {
-		return err
-	}
-	return applyAccessRules(wgMgr, peers)
+	return applyAccessRules(wgMgr, st)
 }
 
 func (env *peerMeshEnv) connectPeers(t *testing.T) {

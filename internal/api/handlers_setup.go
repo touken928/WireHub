@@ -8,6 +8,7 @@ import (
 	"github.com/touken928/wirehub/internal/config"
 	"github.com/touken928/wirehub/internal/store"
 	"github.com/touken928/wirehub/internal/wg"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type setupStatusResponse struct {
@@ -18,6 +19,7 @@ type setupStatusResponse struct {
 type setupDefaultsResponse struct {
 	Subnet          string   `json:"subnet"`
 	AdminUsername   string   `json:"admin_username"`
+	ListenPort      int      `json:"listen_port"`
 	MTU             int      `json:"mtu"`
 	StatusInterval  int      `json:"status_interval"`
 	UpstreamDNS     []string `json:"upstream_dns"`
@@ -28,6 +30,7 @@ type setupRequest struct {
 	Subnet         string   `json:"subnet"`
 	AdminUsername  string   `json:"admin_username"`
 	AdminPassword  string   `json:"admin_password" binding:"required"`
+	ListenPort     int      `json:"listen_port"`
 	MTU            int      `json:"mtu"`
 	StatusInterval int      `json:"status_interval"`
 	UpstreamDNS    []string `json:"upstream_dns"`
@@ -44,6 +47,7 @@ func (s *Server) handleSetupStatus(c *gin.Context) {
 		Defaults: setupDefaultsResponse{
 			Subnet:         config.DefaultSubnet,
 			AdminUsername:  config.DefaultAdminUsername,
+			ListenPort:     config.DefaultListenPort,
 			MTU:            config.DefaultMTU,
 			StatusInterval: config.DefaultStatusInterval,
 			UpstreamDNS:    append([]string(nil), config.DefaultUpstreamDNS...),
@@ -68,11 +72,9 @@ func (s *Server) handleSetup(c *gin.Context) {
 		return
 	}
 
-	port := config.DefaultPort
-	if p, ok := c.Get("listen_port"); ok {
-		if listenPort, ok := p.(int); ok && listenPort > 0 {
-			port = listenPort
-		}
+	listenPort := req.ListenPort
+	if listenPort == 0 {
+		listenPort = config.DefaultListenPort
 	}
 
 	priv, pub, err := wg.GenerateKeyPair()
@@ -88,7 +90,7 @@ func (s *Server) handleSetup(c *gin.Context) {
 		AdminPassword:    req.AdminPassword,
 		MTU:              req.MTU,
 		StatusInterval:   req.StatusInterval,
-		ListenPort:       port,
+		ListenPort:       listenPort,
 		ServerPrivateKey: priv,
 		ServerPublicKey:  pub,
 		UpstreamDNS:      req.UpstreamDNS,
@@ -120,7 +122,32 @@ func (s *Server) handleSetup(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"token": token})
 }
 
+type resetRequest struct {
+	Password string `json:"password" binding:"required"`
+}
+
 func (s *Server) handleReset(c *gin.Context) {
+	var req resetRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	username, ok := c.Get("username")
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	admin, err := s.store.GetAdminByUsername(username.(string))
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "admin not found"})
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(admin.PasswordHash), []byte(req.Password)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "password is incorrect"})
+		return
+	}
+
 	if s.network == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "network controller unavailable"})
 		return

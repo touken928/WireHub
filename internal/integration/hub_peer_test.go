@@ -4,12 +4,13 @@ import (
 	"fmt"
 	"testing"
 	"time"
-
-	"github.com/touken928/wirehub/internal/store"
 )
 
 func TestPeerInterconnect(t *testing.T) {
-	env, _, cleanup := setupPeerMesh(t, peerSpecs("alice", "bob"))
+	env, _, cleanup := setupPeerMesh(t, []meshPeerSpec{
+		{Name: "alice", GroupName: "team"},
+		{Name: "bob", GroupName: "team"},
+	}, nil)
 	defer cleanup()
 	env.connectPeers(t)
 
@@ -33,12 +34,12 @@ func TestPeerInterconnect(t *testing.T) {
 	}
 }
 
-func TestPeerInterconnectExcluded(t *testing.T) {
-	env, _, cleanup := setupPeerMesh(t, []store.Peer{
-		{Name: "alice", AccessExclude: []string{"bob"}},
-		{Name: "bob"},
-		{Name: "charlie"},
-	})
+func TestPeerInterconnectGroupLinks(t *testing.T) {
+	env, _, cleanup := setupPeerMesh(t, []meshPeerSpec{
+		{Name: "alice", GroupName: "alice"},
+		{Name: "bob", GroupName: "bob"},
+		{Name: "charlie", GroupName: "charlie"},
+	}, [][2]string{{"bob", "charlie"}})
 	defer cleanup()
 	env.connectPeers(t)
 
@@ -60,7 +61,7 @@ func TestPeerInterconnectExcluded(t *testing.T) {
 	t.Run("alice blocked from bob", func(t *testing.T) {
 		url := fmt.Sprintf("http://%s:%d/", bob.Peer.WGIP, bobPort)
 		if _, err := peerHTTPGet(alice.Net, url, 2*time.Second); err == nil {
-			t.Fatal("expected alice -> bob to fail when bob is excluded")
+			t.Fatal("expected alice -> bob to fail without group link")
 		}
 	})
 
@@ -71,18 +72,14 @@ func TestPeerInterconnectExcluded(t *testing.T) {
 
 		url := fmt.Sprintf("http://%s:%d/", alice.Peer.WGIP, alicePort)
 		if _, err := peerHTTPGet(bob.Net, url, 2*time.Second); err == nil {
-			t.Fatal("expected bob -> alice to fail when alice excludes bob")
+			t.Fatal("expected bob -> alice to fail without group link")
 		}
 	})
 
-	t.Run("alice can reach charlie", func(t *testing.T) {
+	t.Run("alice blocked from charlie", func(t *testing.T) {
 		url := fmt.Sprintf("http://%s:%d/", charlie.Peer.WGIP, charliePort)
-		body, err := peerHTTPGet(alice.Net, url, 5*time.Second)
-		if err != nil {
-			t.Fatalf("alice -> charlie: %v", err)
-		}
-		if body != "charlie-ok" {
-			t.Fatalf("body = %q", body)
+		if _, err := peerHTTPGet(alice.Net, url, 2*time.Second); err == nil {
+			t.Fatal("expected alice -> charlie to fail without group link")
 		}
 	})
 
@@ -96,12 +93,4 @@ func TestPeerInterconnectExcluded(t *testing.T) {
 			t.Fatalf("body = %q", body)
 		}
 	})
-}
-
-func peerSpecs(names ...string) []store.Peer {
-	out := make([]store.Peer, len(names))
-	for i, name := range names {
-		out[i] = store.Peer{Name: name}
-	}
-	return out
 }

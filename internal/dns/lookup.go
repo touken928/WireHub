@@ -7,7 +7,7 @@ import (
 )
 
 // dnsSlug strips a leading www. prefix for alias resolution.
-// www.wirehub.internal -> hub (""); www.{name}.wirehub.internal -> {name}.
+// www.wirehub -> hub (""); www.{name}.wirehub -> {name}.
 func dnsSlug(slug string) string {
 	slug = strings.ToLower(strings.TrimSpace(slug))
 	if slug == "www" {

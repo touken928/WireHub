@@ -23,6 +23,11 @@ type Server struct {
 	server   *dns.Server
 }
 
+// SetUpstream replaces upstream resolver list used for external queries.
+func (s *Server) SetUpstream(upstream []string) {
+	s.upstream = append([]string(nil), upstream...)
+}
+
 func NewServer(st *store.Store, hubIP, dnsIP string, upstream []string) *Server {
 	up := append([]string(nil), upstream...)
 	return &Server{

@@ -10,6 +10,7 @@ import {
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, setToken } from '../api/client';
+import { LAYOUT } from '../styles/layout';
 
 const useStyles = makeStyles({
   page: {
@@ -20,7 +21,7 @@ const useStyles = makeStyles({
     background: `linear-gradient(135deg, ${tokens.colorBrandBackground2} 0%, ${tokens.colorNeutralBackground2} 100%)`,
   },
   card: {
-    width: '400px',
+    width: `min(${LAYOUT.authPanelWidth}, calc(100vw - 48px))`,
     padding: '32px',
     display: 'flex',
     flexDirection: 'column',

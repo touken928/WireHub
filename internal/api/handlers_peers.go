@@ -16,7 +16,8 @@ type loginRequest struct {
 
 type peerResponse struct {
 	store.Peer
-	FQDN string `json:"fqdn"`
+	FQDN      string `json:"fqdn"`
+	GroupName string `json:"group_name,omitempty"`
 }
 
 func toPeerResponse(p store.Peer) peerResponse {
@@ -26,10 +27,22 @@ func toPeerResponse(p store.Peer) peerResponse {
 	}
 }
 
-func toPeerResponses(peers []store.Peer) []peerResponse {
+func (s *Server) enrichPeerResponse(p store.Peer) peerResponse {
+	resp := toPeerResponse(p)
+	if g, err := s.store.GetGroup(p.GroupID); err == nil {
+		resp.GroupName = g.Name
+	}
+	return resp
+}
+
+func toPeerResponses(st *store.Store, peers []store.Peer) []peerResponse {
 	out := make([]peerResponse, 0, len(peers))
 	for _, p := range peers {
-		out = append(out, toPeerResponse(p))
+		resp := toPeerResponse(p)
+		if g, err := st.GetGroup(p.GroupID); err == nil {
+			resp.GroupName = g.Name
+		}
+		out = append(out, resp)
 	}
 	return out
 }
@@ -41,17 +54,23 @@ func (s *Server) handleStatus(c *gin.Context) {
 		return
 	}
 	settings, _ := s.store.GetSettings()
+	groups, _ := s.store.ListGroups()
+	groupNames := map[uint]string{}
+	for _, g := range groups {
+		groupNames[g.ID] = g.Name
+	}
 	type peerStatus struct {
-		ID            uint     `json:"id"`
-		Name          string   `json:"name"`
-		FQDN          string   `json:"fqdn"`
-		WGIP          string   `json:"wg_ip"`
-		AccessExclude []string `json:"access_exclude"`
-		Enabled       bool     `json:"enabled"`
-		LastHandshake int64    `json:"last_handshake"`
-		RxBytes       int64    `json:"rx_bytes"`
-		TxBytes       int64    `json:"tx_bytes"`
-		Online        bool     `json:"online"`
+		ID            uint   `json:"id"`
+		Name          string `json:"name"`
+		FQDN          string `json:"fqdn"`
+		WGIP          string `json:"wg_ip"`
+		GroupID       uint   `json:"group_id"`
+		GroupName     string `json:"group_name"`
+		Enabled       bool   `json:"enabled"`
+		LastHandshake int64  `json:"last_handshake"`
+		RxBytes       int64  `json:"rx_bytes"`
+		TxBytes       int64  `json:"tx_bytes"`
+		Online        bool   `json:"online"`
 	}
 	now := time.Now()
 	result := make([]peerStatus, 0)
@@ -60,16 +79,13 @@ func (s *Server) handleStatus(c *gin.Context) {
 		if p.LastHandshake > 0 {
 			online = now.Sub(time.Unix(p.LastHandshake, 0)) < 3*time.Minute
 		}
-		exclude := p.AccessExclude
-		if exclude == nil {
-			exclude = []string{}
-		}
 		result = append(result, peerStatus{
 			ID:            p.ID,
 			Name:          p.Name,
 			FQDN:          hostname.FQDN(p.Name),
 			WGIP:          p.WGIP,
-			AccessExclude: exclude,
+			GroupID:       p.GroupID,
+			GroupName:     groupNames[p.GroupID],
 			Enabled:       p.Enabled,
 			LastHandshake: p.LastHandshake,
 			RxBytes:       p.RxBytes,
@@ -92,12 +108,12 @@ func (s *Server) handleListPeers(c *gin.Context) {
 	if peers == nil {
 		peers = emptySlice[store.Peer]()
 	}
-	c.JSON(http.StatusOK, toPeerResponses(peers))
+	c.JSON(http.StatusOK, toPeerResponses(s.store, peers))
 }
 
 type createPeerRequest struct {
-	Name          string   `json:"name" binding:"required"`
-	AccessExclude []string `json:"access_exclude"`
+	Name    string `json:"name" binding:"required"`
+	GroupID uint   `json:"group_id" binding:"required"`
 }
 
 func (s *Server) handleCreatePeer(c *gin.Context) {
@@ -113,18 +129,17 @@ func (s *Server) handleCreatePeer(c *gin.Context) {
 		return
 	}
 
+	if _, err := s.store.GetGroup(req.GroupID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "group not found"})
+		return
+	}
+
 	existing, _ := s.store.ListPeers()
 	for _, p := range existing {
 		if p.Name == slug {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "hostname already exists"})
 			return
 		}
-	}
-
-	exclude := store.ParseExcludeLines(req.AccessExclude)
-	if err := validateExclude(existing, store.Peer{Name: slug}, exclude); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
 	}
 
 	settings, err := s.store.GetSettings()
@@ -146,13 +161,13 @@ func (s *Server) handleCreatePeer(c *gin.Context) {
 	}
 
 	peer := &store.Peer{
-		Name:          slug,
-		PublicKey:     pub,
-		PrivateKey:    priv,
-		WGIP:          ip,
-		AccessExclude: exclude,
-		Enabled:       true,
-		DNSName:       slug,
+		Name:       slug,
+		PublicKey:  pub,
+		PrivateKey: priv,
+		WGIP:       ip,
+		GroupID:    req.GroupID,
+		Enabled:    true,
+		DNSName:    slug,
 	}
 
 	if err := s.store.CreatePeer(peer); err != nil {
@@ -173,11 +188,11 @@ func (s *Server) handleCreatePeer(c *gin.Context) {
 	}
 	_ = s.store.UpdatePeer(peer)
 	s.syncAccessFilter()
-	c.JSON(http.StatusCreated, toPeerResponse(*peer))
+	c.JSON(http.StatusCreated, s.enrichPeerResponse(*peer))
 }
 
 type updatePeerRequest struct {
-	AccessExclude []string `json:"access_exclude"`
+	GroupID *uint `json:"group_id"`
 }
 
 func (s *Server) handleUpdatePeer(c *gin.Context) {
@@ -196,19 +211,15 @@ func (s *Server) handleUpdatePeer(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
-	exclude := store.ParseExcludeLines(req.AccessExclude)
-	if exclude == nil {
-		exclude = []string{}
-	}
-
-	all, _ := s.store.ListPeers()
-	if err := validateExclude(all, *peer, exclude); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	if req.GroupID == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "group_id is required"})
 		return
 	}
-
-	peer.AccessExclude = exclude
+	if _, err := s.store.GetGroup(*req.GroupID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "group not found"})
+		return
+	}
+	peer.GroupID = *req.GroupID
 
 	if err := s.store.UpdatePeer(peer); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -224,21 +235,7 @@ func (s *Server) handleUpdatePeer(c *gin.Context) {
 		return
 	}
 	s.syncAccessFilter()
-	c.JSON(http.StatusOK, toPeerResponse(*peer))
-}
-
-func validateExclude(peers []store.Peer, self store.Peer, lines []string) error {
-	for _, line := range lines {
-		pattern, _, err := store.ParseExcludePattern(line)
-		if err != nil {
-			return err
-		}
-		if err := store.ValidateExcludePattern(pattern); err != nil {
-			return err
-		}
-	}
-	_, err := store.ResolveExcludeRules(peers, self, lines)
-	return err
+	c.JSON(http.StatusOK, s.enrichPeerResponse(*peer))
 }
 
 func (s *Server) handleDeletePeer(c *gin.Context) {
@@ -294,7 +291,7 @@ func (s *Server) handleTogglePeer(c *gin.Context) {
 		_ = wgMgr.RemovePeer(peer.PublicKey)
 	}
 	s.syncAccessFilter()
-	c.JSON(http.StatusOK, toPeerResponse(*peer))
+	c.JSON(http.StatusOK, s.enrichPeerResponse(*peer))
 }
 
 func (s *Server) handlePeerConfig(c *gin.Context) {

@@ -9,9 +9,10 @@ Centralized hub-and-spoke WireGuard management. One hub with a public IP manages
 - **Hub-and-spoke topology** — only the hub needs a routable endpoint; peers connect outbound
 - **Web admin UI** — React + Fluent UI; embedded in the release binary
 - **Peer lifecycle** — create, edit, disable, delete; export `.conf` or scan a QR code
-- **Built-in DNS** — `{name}.wirehub.internal`; `www.{name}.wirehub.internal` is an alias (`www` → hub)
-- **Hostname access control** — gitignore-style exclude rules enforced at the IP layer between peers
+- **Built-in DNS** — `{name}.wirehub`; `www.{name}.wirehub` is an alias (`www` → hub)
+- **Group-based access control** — peers belong to one group; cross-group access is admin-controlled (default deny)
 - **Live status** — last handshake, RX/TX bytes, network usage charts
+- **Settings & backup** — edit runtime hub options, export/import full `wirehub.db`, password-protected reset
 - **Userspace WireGuard** — [wireguard-go](https://github.com/WireGuard/wireguard-go) + gVisor netstack; no kernel module on the hub
 
 ## How it works
@@ -19,7 +20,8 @@ Centralized hub-and-spoke WireGuard management. One hub with a public IP manages
 ```
                          Public Internet
                                │
-                    UDP/TCP :8443 (same port)
+              TCP :8443 (Web UI, CLI --port)
+              UDP :WG port (WireGuard, set at setup)
                                │
                     ┌──────────▼──────────┐
   Admin browser ──► │  Web UI + REST API  │
@@ -35,10 +37,23 @@ Centralized hub-and-spoke WireGuard management. One hub with a public IP manages
            ┌───────────────────┼───────────────────┐
            │                   │                   │
       Laptop peer         Server peer        Restricted peer
-     (full mesh)          (full mesh)         (exclude rules)
+      (same group)        (same group)      (other group)
 ```
 
-After setup, the hub listens on its VPN address for **TCP (web UI)** and **UDP 53 (DNS)**. Other services you run on peer machines are reached over the tunnel; peer-to-peer traffic is L3-forwarded and filtered by exclude rules. Traffic to the hub itself is not subject to peer exclude rules.
+After setup, the hub listens on its VPN address for **TCP (web UI via tunnel)** and **UDP 53 (DNS)**. The **WireGuard UDP port** is stored in the database and written to client configs (`Endpoint = <public host>:<port>`). It is independent of the **web UI port** (`--port`, default `8443`).
+
+Peer-to-peer traffic is L3-forwarded and filtered by group access rules. Traffic to the hub itself (web, DNS) is not subject to peer filtering.
+
+## Web UI
+
+| Page | Purpose |
+|------|---------|
+| **Dashboard** | Hub status, WireGuard endpoint, live traffic chart |
+| **Groups** | React Flow graph — drag links between groups for cross-group access; click a group to manage members |
+| **Users** | All peers with online status, config download, enable/disable, delete |
+| **Settings** | Editable hub options, password change, database export, danger-zone reset |
+
+Destructive actions (delete user/group, disconnect link, reset hub) require confirmation in the UI. Reset also requires your admin password.
 
 ## Requirements
 
@@ -58,9 +73,17 @@ Pull a release image from GitHub Container Registry:
 docker pull ghcr.io/touken928/wirehub:latest
 
 docker run -d --name wirehub \
-  -p 8443:8443 -p 8443:8443/udp \
+  -p 8443:8443 \
+  -p 8443:8443/udp \
   -v wirehub-data:/app/data \
   ghcr.io/touken928/wirehub:latest
+```
+
+If you set a **WireGuard port other than 8443** during setup, publish that UDP port as well (example for port `51820`):
+
+```bash
+  -p 8443:8443 \
+  -p 51820:51820/udp \
 ```
 
 Build locally with Compose:
@@ -98,23 +121,44 @@ The frontend build output is written to `internal/static/dist` and embedded via 
 
 On a fresh install the HTTP server starts immediately, but WireGuard and DNS start only after setup.
 
-1. Open **http://&lt;host&gt;:8443/setup**
-2. Fill in the wizard fields below
+1. Open **http://&lt;host&gt;:8443/setup** (or your `--port`)
+2. Optionally **Import wirehub.db** to restore a backup, **or** fill in the new-hub form
 3. Sign in with the admin account you created
 
-| Field | Default | Notes |
-|-------|---------|-------|
-| Endpoint | *(required)* | Public IP or hostname clients use in `Endpoint = …:8443` |
-| Subnet | `100.127.0.0/24` | VPN CIDR; hub and DNS always use the first host address (`.1`) |
-| Admin username | `admin` | Stored in SQLite |
-| Admin password | *(required)* | Stored as bcrypt hash |
-| MTU | `1420` | Applied to generated client configs |
-| Status interval | `1` | Seconds between peer status polls |
-| Additional DNS | `1.2.4.8`, `1.1.1.1` | Upstream resolvers in client configs; external queries are forwarded by the hub |
+### New hub wizard
 
-These values are persisted in SQLite and **cannot be changed in the UI** after setup. Use **Reset** in the dashboard to wipe all hub data and return to setup mode.
+| Field | Required | Notes |
+|-------|----------|-------|
+| Public endpoint | Yes | Hostname or IP in client `Endpoint` (before the port), e.g. `example.com` |
+| WireGuard port | Yes | UDP port in client configs (`Endpoint = host:port`); hint default **8443**, not pre-filled |
+| VPN subnet | No | Default `100.127.0.0/24`; hub and DNS use the first host (`.1`) |
+| Admin username | No | Default `admin` |
+| Admin password | Yes | At least 8 characters; bcrypt hash in SQLite |
+| MTU | No | Default `1420` |
+| Status interval | No | Default `1` second between peer status polls |
+| Additional DNS | No | Default `1.2.4.8`, `1.1.1.1` — upstream resolvers in client configs |
+
+### Import
+
+Upload a previously exported **wirehub.db** to restore groups, users, and hub settings, then sign in with the existing admin account.
 
 The JWT signing secret is created automatically on first launch and stored at `{data-dir}/.jwt_secret`.
+
+## Settings (after setup)
+
+Open **Settings** in the sidebar.
+
+| Section | Editable |
+|---------|----------|
+| Hub (read-only) | Public endpoint, VPN subnet, admin username |
+| Editable | WireGuard port, MTU, status interval, additional DNS |
+| Change password | Current + new password |
+| Export | Download full `wirehub.db` snapshot |
+| Danger zone | **Reset WireHub** — wipes all data; requires admin password |
+
+Changing **WireGuard port** or **MTU** restarts the hub network stack. **Reset** returns to setup mode.
+
+Fields fixed after setup: public endpoint, VPN subnet, admin username (set only in the wizard or via database import).
 
 ## CLI flags
 
@@ -122,7 +166,7 @@ Process-level settings only — not stored in the database:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--port` | `8443` | TCP (web UI) and UDP (WireGuard) share this port |
+| `--port` | `8443` | TCP port for the **web UI and REST API** only |
 | `--bind` | `0.0.0.0` | Address for the HTTP server |
 | `--data-dir` | `./data` | SQLite database, JWT secret, persistent state |
 
@@ -130,39 +174,35 @@ Process-level settings only — not stored in the database:
 ./wirehub --port 8443 --bind 0.0.0.0 --data-dir ./data
 ```
 
+The **WireGuard listen port** is configured in the setup wizard and **Settings**, not via `--port`.
+
 ## Client setup
 
 1. Sign in to the web UI
-2. Under **Users**, add a peer
+2. Under **Groups**, select a group and add a user — or use **Users** to manage peers
 3. Download the `.conf` file or scan the QR code
 4. Import into any WireGuard client and connect
 
-Each client config includes the hub endpoint, keys, allowed IPs, DNS (`hub IP` plus additional resolvers from setup), and MTU.
+Each client config includes `Endpoint = <public endpoint>:<WireGuard port>`, keys, allowed IPs, DNS (`hub IP` plus additional resolvers), and MTU.
 
 ## DNS
 
-WireHub runs a resolver on the hub VPN IP (UDP 53). Names under `wirehub.internal` are answered authoritatively; other queries are forwarded to the **additional DNS** servers configured at setup (default `1.2.4.8`, `1.1.1.1`).
+WireHub runs a resolver on the hub VPN IP (UDP 53). Names under `wirehub` are answered authoritatively; other queries are forwarded to the **additional DNS** servers configured at setup (default `1.2.4.8`, `1.1.1.1`).
 
 Client WireGuard configs list DNS as `{hub_ip}, {upstream…}` so peers resolve internal hostnames via the hub and can reach the public internet through upstream resolvers.
 
 | Name | Resolves to |
 |------|-------------|
-| `hub.wirehub.internal` | Hub VPN IP |
-| `www.wirehub.internal` | Hub VPN IP (alias) |
-| `{peer}.wirehub.internal` | Peer VPN IP |
-| `www.{peer}.wirehub.internal` | Peer VPN IP (alias) |
+| `wirehub` | Hub VPN IP |
+| `www.wirehub` | Hub VPN IP (alias) |
+| `{peer}.wirehub` | Peer VPN IP |
+| `www.{peer}.wirehub` | Peer VPN IP (alias) |
 
-The suffix `wirehub.internal` is fixed (`internal/config/config.go`). Avoid `.local` on macOS — the OS treats it as mDNS.
+The suffix `wirehub` is fixed (`internal/config/config.go`).
 
 ## Access control
 
-By default every peer can reach every other peer. Per-user **exclude rules** restrict peer-to-peer connectivity using hostname patterns:
-
-- One pattern per line; `#` starts a comment
-- Exact names (`alice`) or wildcards (`server-*`)
-- Prefix `!` to re-allow after a broader match (last matching rule wins)
-- Hostnames only — no domain suffix, no raw IPs
-- Cannot exclude your own hostname
+Peers are assigned to **groups** (one group per user). Users in the same group can reach each other. **Cross-group access** is controlled in **Groups** (React Flow): connect groups with an edge to allow traffic; groups without a link cannot reach each other (**default deny**).
 
 Rules are enforced in the hub's userspace forwarding path. They apply to **peer ↔ peer** traffic, not to reaching the hub web UI or DNS.
 
