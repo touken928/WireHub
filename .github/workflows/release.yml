@@ -99,6 +99,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          sbom: false
 
   release:
     name: Create GitHub Release
@@ -110,6 +112,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: wirehub-*
           merge-multiple: true
 
       - name: Package archives
