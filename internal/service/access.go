@@ -10,6 +10,8 @@ func peerEndpoints(peers []repo.Peer) []domain.PeerEndpoint {
 	for i, p := range peers {
 		out[i] = domain.PeerEndpoint{
 			ID:      p.ID,
+			Name:    p.Name,
+			DNSName: p.DNSName,
 			WGIP:    p.WGIP,
 			GroupID: p.GroupID,
 			Enabled: p.Enabled,
@@ -22,8 +24,9 @@ func groupLinkPairs(links []repo.GroupLink) []domain.GroupLinkPair {
 	out := make([]domain.GroupLinkPair, len(links))
 	for i, l := range links {
 		out[i] = domain.GroupLinkPair{
-			FromGroupID: l.FromGroupID,
-			ToGroupID:   l.ToGroupID,
+			FromGroupID:   l.FromGroupID,
+			ToGroupID:     l.ToGroupID,
+			Bidirectional: l.Bidirectional,
 		}
 	}
 	return out
@@ -38,7 +41,7 @@ func (h *Hub) buildAccessRules() error {
 	if err != nil {
 		return err
 	}
-	rules, err := domain.BuildAccessRules(peerEndpoints(peers), groupLinkPairs(links))
+	policy, err := domain.BuildAccessPolicy(peerEndpoints(peers), groupLinkPairs(links))
 	if err != nil {
 		return err
 	}
@@ -46,7 +49,7 @@ func (h *Hub) buildAccessRules() error {
 	if err != nil {
 		return err
 	}
-	wgMgr.SetAccessRules(rules)
+	wgMgr.SetAccessPolicy(policy)
 	return nil
 }
 

@@ -1,6 +1,6 @@
 import { Position, type Edge, type Node } from '@xyflow/react';
 import type { GroupGraphNode } from '@/api/types';
-import type { GroupNodeData } from '@/components/groups/types';
+import type { GroupLinkEdgeData, GroupNodeData } from '@/components/groups/types';
 
 export const GROUP_NODE_W = 140;
 export const GROUP_NODE_H = 70;
@@ -28,11 +28,44 @@ export function autoLayoutGroups(groups: GroupGraphNode[]): Map<number, { x: num
   return positions;
 }
 
+const SIDES = [Position.Top, Position.Right, Position.Bottom, Position.Left] as const;
+
 function nodeCenter(node: Node<GroupNodeData>) {
   return {
     x: node.position.x + GROUP_NODE_W / 2,
     y: node.position.y + GROUP_NODE_H / 2,
   };
+}
+
+function sideAnchor(node: Node<GroupNodeData>, side: Position) {
+  const c = nodeCenter(node);
+  switch (side) {
+    case Position.Top:
+      return { x: c.x, y: node.position.y };
+    case Position.Bottom:
+      return { x: c.x, y: node.position.y + GROUP_NODE_H };
+    case Position.Left:
+      return { x: node.position.x, y: c.y };
+    case Position.Right:
+      return { x: node.position.x + GROUP_NODE_W, y: c.y };
+    default:
+      return c;
+  }
+}
+
+/** Pick source/target handles on the sides closest to the peer node. */
+function nearestSide(node: Node<GroupNodeData>, toward: { x: number; y: number }): Position {
+  let best: Position = Position.Top;
+  let bestDist = Infinity;
+  for (const side of SIDES) {
+    const anchor = sideAnchor(node, side);
+    const dist = (anchor.x - toward.x) ** 2 + (anchor.y - toward.y) ** 2;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = side;
+    }
+  }
+  return best;
 }
 
 export function pickEdgeHandles(
@@ -49,42 +82,51 @@ export function pickEdgeHandles(
     };
   }
 
-  const s = nodeCenter(source);
-  const t = nodeCenter(target);
-  const dx = t.x - s.x;
-  const dy = t.y - s.y;
+  const tCenter = nodeCenter(target);
+  const sCenter = nodeCenter(source);
+  const srcSide = nearestSide(source, tCenter);
+  const tgtSide = nearestSide(target, sCenter);
+  return {
+    sourceHandle: handleId(srcSide, 'source'),
+    targetHandle: handleId(tgtSide, 'target'),
+  };
+}
 
-  if (Math.abs(dx) > Math.abs(dy)) {
-    return dx > 0
-      ? {
-          sourceHandle: handleId(Position.Right, 'source'),
-          targetHandle: handleId(Position.Left, 'target'),
-        }
-      : {
-          sourceHandle: handleId(Position.Left, 'source'),
-          targetHandle: handleId(Position.Right, 'target'),
-        };
+function directedEndpoints(edge: Edge): { sourceId: string; targetId: string } {
+  const data = edge.data as GroupLinkEdgeData | undefined;
+  if (data?.fromGroupId != null && data?.toGroupId != null && !data.bidirectional) {
+    return { sourceId: String(data.fromGroupId), targetId: String(data.toGroupId) };
   }
-  return dy > 0
-    ? {
-        sourceHandle: handleId(Position.Bottom, 'source'),
-        targetHandle: handleId(Position.Top, 'target'),
-      }
-    : {
-        sourceHandle: handleId(Position.Top, 'source'),
-        targetHandle: handleId(Position.Bottom, 'target'),
-      };
+  return { sourceId: edge.source, targetId: edge.target };
+}
+
+function withNearestHandles(
+  edge: Edge,
+  nodes: Node<GroupNodeData>[],
+): Edge {
+  const { sourceId, targetId } = directedEndpoints(edge);
+  const handles = pickEdgeHandles(sourceId, targetId, nodes);
+  const data = edge.data as GroupLinkEdgeData | undefined;
+  const uni = data && !data.bidirectional;
+  return {
+    ...edge,
+    ...(uni ? { source: sourceId, target: targetId } : {}),
+    sourceHandle: handles.sourceHandle,
+    targetHandle: handles.targetHandle,
+  };
 }
 
 export function applyEdgeHandles(edges: Edge[], nodes: Node<GroupNodeData>[]): Edge[] {
-  return edges.map((edge) => {
-    const handles = pickEdgeHandles(edge.source, edge.target, nodes);
-    return {
-      ...edge,
-      sourceHandle: handles.sourceHandle,
-      targetHandle: handles.targetHandle,
-    };
-  });
+  return edges.map((edge) => withNearestHandles(edge, nodes));
+}
+
+/** Recompute handles for every edge incident to nodeId (after drag). */
+export function rematchEdgesForNode(
+  edges: Edge[],
+  nodes: Node<GroupNodeData>[],
+  nodeId: string,
+): Edge[] {
+  return applyEdgeHandlesForNode(edges, nodes, nodeId);
 }
 
 export function applyEdgeHandlesForNode(
@@ -93,12 +135,8 @@ export function applyEdgeHandlesForNode(
   nodeId: string,
 ): Edge[] {
   return edges.map((edge) => {
-    if (edge.source !== nodeId && edge.target !== nodeId) return edge;
-    const handles = pickEdgeHandles(edge.source, edge.target, nodes);
-    return {
-      ...edge,
-      sourceHandle: handles.sourceHandle,
-      targetHandle: handles.targetHandle,
-    };
+    const { sourceId, targetId } = directedEndpoints(edge);
+    if (sourceId !== nodeId && targetId !== nodeId) return edge;
+    return withNearestHandles(edge, nodes);
   });
 }

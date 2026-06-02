@@ -25,9 +25,9 @@
 - **Web admin UI** — React + Fluent UI; embedded in the release binary
 - **Peer lifecycle** — create, edit, disable, delete; export `.conf` or scan a QR code
 - **Built-in DNS** — `{name}.wirehub`; `www.{name}.wirehub` is an alias (`www` → hub)
-- **Group-based access control** — peers belong to one group; cross-group access is admin-controlled (default deny)
+- **Group-based access control** — peers belong to one group; **bidirectional** links allow direct WG; **unidirectional** links use transparent hub SNAT (client dials target peer IP:port; hub picks ephemeral ports)
 - **Live status** — last handshake, RX/TX bytes, network usage charts
-- **Port forwarding** — per-port TCP/UDP proxy on the hub VPN IP; optional **DMZ** forwards all other ports (same port on target); explicit rules override DMZ
+- **Port forwarding** — per-port TCP/UDP proxy on the hub VPN IP
 - **Settings & backup** — edit runtime hub options, export/import full `wirehub.db`, password-protected reset
 - **Userspace WireGuard** — [wireguard-go](https://github.com/WireGuard/wireguard-go) + gVisor netstack; no kernel module on the hub
 
@@ -57,9 +57,9 @@ After setup, the hub serves tunnel web UI and DNS on the VPN address. Peer-to-pe
 | Page | Purpose |
 |------|---------|
 | **Dashboard** | Hub status, WireGuard endpoint, live traffic chart |
-| **Groups** | React Flow graph — drag links between groups for cross-group access; click a group to manage members |
+| **Groups** | React Flow graph — pick link type (bottom-left), drag between groups; click a group to manage members |
 | **Users** | All peers with online status, config download, enable/disable, delete |
-| **Forward** | Port forwards and DMZ on the hub VPN IP → FQDN (`*.wirehub` or external) or IPv4 |
+| **Forward** | Port forwards on the hub VPN IP → FQDN (`*.wirehub` or external) or IPv4 |
 | **Settings** | Editable hub options, password change, database export, danger-zone reset |
 
 Destructive actions (delete user/group, disconnect link, reset hub) require confirmation in the UI. Reset also requires your admin password.
@@ -172,17 +172,24 @@ Open **Forward** in the sidebar.
 
 **Explicit rules** listen on the **hub VPN IP** (`hub_ip` from settings) and proxy to a target host and port. Peers reach the service at `{hub_ip}:{listen_port}` over the tunnel.
 
-**DMZ** (optional) forwards every other hub VPN port to a single target using the **same port number** (`hub:8080` → `target:8080`). Reserved ports (`53`, hub `--port`) and any port with an enabled explicit rule are excluded; adding or enabling a forward on a port overrides DMZ for that port.
-
 | Target | Example | Resolution |
 |--------|---------|------------|
 | Peer FQDN | `alice.wirehub` | Hub authoritative DNS |
 | External hostname | `db.example.com` | Additional DNS from **Settings** (A record) |
 | IPv4 address | `10.0.0.5` | Used as-is (IPv4 only) |
 
-Target host must be a fully qualified domain name or IPv4 address (peer usernames without a domain suffix are not accepted). Toggle **Enabled** on rules or DMZ; changes apply without restarting the VPN stack.
+Target host must be a fully qualified domain name or IPv4 address (peer usernames without a domain suffix are not accepted). Toggle **Enabled** on a rule; changes apply without restarting the VPN stack.
 
-REST: `GET/POST /api/forwards`, `PUT/DELETE /api/forwards/:id`, `PUT /api/forwards/dmz`.
+REST: `GET/POST /api/forwards`, `PUT/DELETE /api/forwards/:id`.
+
+## Group links
+
+On **Groups**, choose **Both ways** or **One-way** in the bottom-left toolbar, then drag from source to target group.
+
+- **Bidirectional** — peers in linked groups may reach each other directly over WireGuard.
+- **Unidirectional** (`A → B`) — peers in `A` use **`B`’s WireGuard IP and service port** as usual; the hub SNATs outbound flows to ephemeral hub ports so `B` only sees the hub. Return traffic is rewritten so `A` still sees replies from `B`. Peers in `B` cannot initiate to `A`. Explicit **Forward** rules are separate hub listen ports for admin-defined proxies.
+
+REST: `POST/DELETE /api/groups/links` with `from_group_id`, `to_group_id`, `bidirectional`.
 
 ## CLI flags
 
@@ -224,7 +231,7 @@ The suffix `wirehub` is fixed (`internal/config/config.go`).
 
 ## Access control
 
-Peers are assigned to **groups** (one group per user). Users in the same group can reach each other. **Cross-group access** is controlled in **Groups** (React Flow): connect groups with an edge to allow traffic; groups without a link cannot reach each other (**default deny**).
+Peers are assigned to **groups** (one group per user). Users in the same group can reach each other. **Cross-group access** is controlled in **Groups** (React Flow): connect groups with a bidirectional or one-way edge; groups without a link cannot reach each other (**default deny**). See [Group links](#group-links).
 
 Rules are enforced in the hub's userspace forwarding path. They apply to **peer ↔ peer** traffic, not to reaching the hub web UI or DNS.
 

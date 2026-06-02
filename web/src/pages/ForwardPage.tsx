@@ -26,7 +26,7 @@ import {
 import { AddRegular, DeleteRegular, EditRegular } from '@fluentui/react-icons';
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/api';
-import type { PortForward, PortForwardDMZ } from '@/api/types';
+import type { PortForward } from '@/api/types';
 import { DNS_DOMAIN } from '@/constants';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { useConfirm } from '@/components/common/useConfirm';
@@ -77,23 +77,6 @@ const useStyles = makeStyles({
   error: {
     color: tokens.colorPaletteRedForeground1,
     fontSize: tokens.fontSizeBase300,
-  },
-  dmzGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'minmax(200px, 1fr) auto',
-    gap: '12px 16px',
-    alignItems: 'end',
-  },
-  dmzHostField: {
-    gridColumn: '1',
-  },
-  dmzActions: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '12px',
-    flexWrap: 'wrap',
-    gridColumn: '2',
-    justifyContent: 'flex-end',
   },
   tableWrap: {
     overflowX: 'auto',
@@ -153,9 +136,6 @@ export default function ForwardPage() {
   const { confirm } = useConfirm();
 
   const [rules, setRules] = useState<PortForward[]>([]);
-  const [dmz, setDmz] = useState<PortForwardDMZ | null>(null);
-  const [dmzHost, setDmzHost] = useState('');
-  const [dmzSaving, setDmzSaving] = useState(false);
   const [hubIP, setHubIP] = useState('');
   const [hubPort, setHubPort] = useState(8443);
   const [loading, setLoading] = useState(true);
@@ -173,8 +153,6 @@ export default function ForwardPage() {
     try {
       const data = await api.listPortForwards();
       setRules(data.rules);
-      setDmz(data.dmz);
-      setDmzHost(data.dmz.target_host ?? '');
       setHubIP(data.hub_ip);
       setHubPort(data.hub_port);
     } catch (e) {
@@ -275,37 +253,6 @@ export default function ForwardPage() {
     }
   };
 
-  const saveDMZ = async (enabled: boolean) => {
-    const hostErr = validateForwardTargetHost(dmzHost);
-    if (hostErr) {
-      setError(hostErr);
-      return;
-    }
-    setDmzSaving(true);
-    setError('');
-    try {
-      const updated = await api.updatePortForwardDMZ({
-        target_host: dmzHost.trim(),
-        enabled,
-      });
-      setDmz(updated);
-      setDmzHost(updated.target_host ?? '');
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'DMZ save failed');
-    } finally {
-      setDmzSaving(false);
-    }
-  };
-
-  const toggleDMZ = async (enabled: boolean) => {
-    if (enabled && !dmzHost.trim()) {
-      setError('Set a DMZ target host before enabling');
-      return;
-    }
-    await saveDMZ(enabled);
-  };
-
   const remove = async (rule: PortForward) => {
     const ok = await confirm({
       title: 'Delete forward?',
@@ -327,7 +274,7 @@ export default function ForwardPage() {
     <div className={`${pageLayout.page} ${styles.stack}`}>
       <PageHeader
         title="Forward"
-        description="Proxy hub VPN ports to internal hosts. Explicit rules override DMZ on the same port."
+        description="Proxy hub VPN ports to internal hosts on the hub VPN address."
       />
 
       {hubIP && (
@@ -339,56 +286,6 @@ export default function ForwardPage() {
       )}
 
       {error && !dialogOpen && <Text className={styles.error}>{error}</Text>}
-
-      <Card className={styles.card}>
-        <div className={styles.cardHeader}>
-          <div className={styles.cardTitle}>
-            <Text weight="semibold" size={400}>
-              DMZ
-            </Text>
-            <Text className={styles.hint}>
-              Map every other hub port to the same port on the target host. Overridden by explicit
-              rules below.
-            </Text>
-          </div>
-        </div>
-        <div className={styles.dmzGrid}>
-          <Field
-            className={styles.dmzHostField}
-            label="Target host"
-            hint={targetHostHint}
-          >
-            <Input
-              value={dmzHost}
-              disabled={dmzSaving || loading}
-              placeholder={`peer.${DNS_DOMAIN}`}
-              onChange={(_, d) => setDmzHost(d.value)}
-            />
-          </Field>
-          <div className={styles.dmzActions}>
-            <Switch
-              checked={dmz?.enabled ?? false}
-              disabled={dmzSaving || loading}
-              label="Enabled"
-              labelPosition="before"
-              onChange={(_, d) => void toggleDMZ(d.checked)}
-            />
-            <Button
-              appearance="secondary"
-              disabled={dmzSaving || loading}
-              onClick={() => void saveDMZ(dmz?.enabled ?? false)}
-            >
-              {dmzSaving ? 'Saving…' : 'Save'}
-            </Button>
-          </div>
-        </div>
-        {dmz?.enabled && dmz.target_host && (
-          <Text className={styles.hint}>
-            Active — <span className={styles.mono}>{hubIP || 'hub'}:*</span> →{' '}
-            <span className={styles.mono}>{dmz.target_host}:*</span>
-          </Text>
-        )}
-      </Card>
 
       <Card className={styles.card}>
         <div className={styles.cardHeader}>
@@ -406,7 +303,7 @@ export default function ForwardPage() {
         {loading ? (
           <Spinner label="Loading…" />
         ) : rules.length === 0 ? (
-          <Text className={styles.hint}>No rules yet. Add one or enable DMZ above.</Text>
+          <Text className={styles.hint}>No rules yet. Add one to get started.</Text>
         ) : (
           <div className={styles.tableWrap}>
             <Table aria-label="Port forwards" className={styles.table}>

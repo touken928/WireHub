@@ -34,11 +34,10 @@ type PortProxyManager struct {
 	tnet     *netstack.Net
 	hubIP    netip.Addr
 	resolver HostResolver
-	dmz      *dmzManager
 
-	mu      sync.Mutex
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	mu     sync.Mutex
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
 func NewPortProxyManager(tnet *netstack.Net, hubIP string, resolver HostResolver) (*PortProxyManager, error) {
@@ -50,20 +49,12 @@ func NewPortProxyManager(tnet *netstack.Net, hubIP string, resolver HostResolver
 		tnet:     tnet,
 		hubIP:    addr,
 		resolver: resolver,
-		dmz:      newDMZManager(tnet, addr, resolver),
 	}, nil
 }
 
-func (m *PortProxyManager) Apply(rules []PortForwardRule, dmz DMZConfig, hubWebPort int) error {
-	stk, err := stackFromNet(m.tnet)
-	if err != nil {
-		return err
-	}
-	m.dmz.install(stk)
-	m.dmz.configure(dmz, rules, hubWebPort)
-
+func (m *PortProxyManager) Apply(rules []PortForwardRule) error {
 	m.Stop()
-	if len(rules) == 0 && !dmz.Enabled {
+	if len(rules) == 0 {
 		return nil
 	}
 

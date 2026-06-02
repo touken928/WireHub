@@ -45,11 +45,13 @@ type PeerGroup struct {
 	PosY float64 `json:"pos_y"`
 }
 
-// GroupLink is stored with FromGroupID < ToGroupID (undirected access).
+// GroupLink connects two groups. Bidirectional links use FromGroupID < ToGroupID.
+// Unidirectional links store the actual source → target direction.
 type GroupLink struct {
-	ID          uint `gorm:"primaryKey" json:"id"`
-	FromGroupID uint `gorm:"uniqueIndex:idx_group_link_pair;not null" json:"from_group_id"`
-	ToGroupID   uint `gorm:"uniqueIndex:idx_group_link_pair;not null" json:"to_group_id"`
+	ID            uint `gorm:"primaryKey" json:"id"`
+	FromGroupID   uint `gorm:"uniqueIndex:idx_group_link_directed;not null" json:"from_group_id"`
+	ToGroupID     uint `gorm:"uniqueIndex:idx_group_link_directed;not null" json:"to_group_id"`
+	Bidirectional bool `gorm:"not null" json:"bidirectional"`
 }
 
 type DNSRecord struct {

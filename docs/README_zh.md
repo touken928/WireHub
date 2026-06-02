@@ -25,9 +25,9 @@
 - **Web 管理界面** — React + Fluent UI，发布版内嵌于单一二进制
 - **Peer 全生命周期** — 创建、编辑、禁用、删除；导出 `.conf` 或扫码导入
 - **内置 DNS** — `{name}.wirehub`；`www.{name}.wirehub` 为别名（`www` 指向 Hub）
-- **组访问控制** — 每个用户归属一个组；组间互通由管理员在 UI 中配置（默认拒绝）
+- **组访问控制** — 每个用户归属一个组；组间连线支持**双向**（直连 WG）或**单向**（透明 Hub SNAT：客户端仍访问目标 peer 的 IP:端口）
 - **在线状态** — 最近握手时间、收发流量、用量图表
-- **端口转发** — Hub VPN IP 上按端口 TCP/UDP 代理；可选 **DMZ** 将其余端口同号转发到单一目标；显式规则优先于 DMZ
+- **端口转发** — Hub VPN IP 上按端口 TCP/UDP 代理
 - **设置与备份** — 修改 Hub 运行参数、导出/导入完整 `wirehub.db`、密码确认的 Reset
 - **用户态 WireGuard** — [wireguard-go](https://github.com/WireGuard/wireguard-go) + gVisor netstack，Hub 侧无需内核模块
 
@@ -59,7 +59,7 @@ flowchart TB
 | **Dashboard** | Hub 状态、WireGuard Endpoint、实时流量图 |
 | **Groups** | React Flow 拓扑 — 组间拖线表示允许互通；点击组管理成员 |
 | **Users** | 全部 Peer 及在线状态、配置下载、启用/禁用、删除 |
-| **Forward** | Hub VPN IP 上的端口转发与 DMZ → FQDN（`*.wirehub` 或外网域名）或 IPv4 |
+| **Forward** | Hub VPN IP 上的端口转发 → FQDN（`*.wirehub` 或外网域名）或 IPv4 |
 | **Settings** | 可改 Hub 参数、修改密码、导出数据库、危险区 Reset |
 
 删除用户/组、断开组间连线、Reset Hub 等破坏性操作需在界面中确认；Reset 还需输入管理员密码。
@@ -172,17 +172,24 @@ JWT 签名密钥在首次启动时自动生成，保存在 `{data-dir}/.jwt_secr
 
 **显式规则**：在 **Hub VPN IP**（设置中的 `hub_ip`）上监听，将流量转到目标主机与端口。Peer 经隧道访问 `{hub_ip}:{监听端口}`。
 
-**DMZ**（可选）：将其余 Hub VPN 端口按**相同端口号**转发到单一目标（`hub:8080` → `target:8080`）。保留端口（`53`、Hub `--port`）以及已有启用显式规则的端口不参与 DMZ；在某端口上新增或启用显式规则会覆盖该端口的 DMZ。
-
 | 目标类型 | 示例 | 解析方式 |
 |----------|------|----------|
 | Peer FQDN | `alice.wirehub` | Hub 权威 DNS |
 | 公网域名 | `db.example.com` | **Settings** 中的额外 DNS（A 记录） |
 | IPv4 地址 | `10.0.0.5` | 直接使用（仅 IPv4） |
 
-目标主机须为 FQDN 或 IPv4（不接受无域后缀的 Peer 用户名）。在列表或 DMZ 中切换 **Enabled** 即可生效，无需重启 VPN 栈。
+目标主机须为 FQDN 或 IPv4（不接受无域后缀的 Peer 用户名）。在列表中切换 **Enabled** 即可生效，无需重启 VPN 栈。
 
-REST：`GET/POST /api/forwards`，`PUT/DELETE /api/forwards/:id`，`PUT /api/forwards/dmz`。
+REST：`GET/POST /api/forwards`，`PUT/DELETE /api/forwards/:id`。
+
+## 组连线
+
+在 **Groups** 页面左下角选择**双向**或**单向**，再从源组拖向目标组建边。
+
+- **双向** — 相连组内 Peer 可经 WireGuard 直连。
+- **单向**（`A → B`） — `A` 仍按平常方式访问 **`B` 的 WireGuard IP 与服务端口**；Hub 在出站路径上做 SNAT（随机高位 ephemeral 端口），`B` 侧只见 Hub。回程由 Hub 改写，使 `A` 仍认为来自 `B`。`B` 不能主动访问 `A`。管理端 **Forward** 为另行配置的 Hub 监听端口代理，与单向 SNAT 无关。
+
+REST：`POST/DELETE /api/groups/links`，字段 `from_group_id`、`to_group_id`、`bidirectional`。
 
 ## 命令行参数
 

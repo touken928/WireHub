@@ -191,7 +191,7 @@ func setupPeerMesh(t *testing.T, specs []meshPeerSpec, linkPairs [][2]string) (*
 	for _, pair := range linkPairs {
 		a := ensureGroup(pair[0])
 		b := ensureGroup(pair[1])
-		if err := st.UpsertGroupLink(a, b); err != nil {
+		if err := st.UpsertGroupLink(a, b, true); err != nil {
 			t.Fatal(err)
 		}
 	}

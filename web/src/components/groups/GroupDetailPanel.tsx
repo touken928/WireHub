@@ -8,8 +8,8 @@ import {
   tokens,
 } from '@fluentui/react-components';
 import { ArrowDownloadRegular, DeleteRegular, PowerRegular } from '@fluentui/react-icons';
-import { DNS_DOMAIN } from '@/constants';
 import type { GroupGraphNode } from '@/api/types';
+import { DNS_DOMAIN } from '@/constants';
 import { formatBytes, formatHandshake } from '@/lib/format';
 import { PeerStatusBadge } from '@/components/peers/PeerStatusBadge';
 import type { EnrichedPeer } from '@/pages/groups/utils';
@@ -155,10 +155,8 @@ export function GroupDetailPanel({
   return (
     <aside className={styles.panel}>
       <div className={styles.header}>
-        <div>
-          <Text weight="semibold" block>{group.name}</Text>
-          <Text size={200} className={mutedClassName}>{peers.length} member(s)</Text>
-        </div>
+        <Text weight="semibold" block>{group.name}</Text>
+        <Text size={200} className={mutedClassName}>{peers.length} member(s)</Text>
       </div>
       <div className={styles.memberList}>
         {peers.length === 0 ? (

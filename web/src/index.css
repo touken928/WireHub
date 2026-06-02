@@ -37,3 +37,8 @@ html.layout-fill #root {
   height: 100%;
   overflow: hidden;
 }
+
+/* Uni link dashes (static; path matches markerStart direction). */
+.react-flow__edge.group-link-uni .react-flow__edge-path {
+  stroke-dasharray: 6 4;
+}

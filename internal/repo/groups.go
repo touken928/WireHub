@@ -59,42 +59,74 @@ func (s *Store) ListGroupLinks() ([]GroupLink, error) {
 	return links, err
 }
 
-func (s *Store) UpsertGroupLink(fromID, toID uint) error {
+func normalizeLinkPair(fromID, toID uint, bidirectional bool) (uint, uint) {
+	if bidirectional && fromID > toID {
+		return toID, fromID
+	}
+	return fromID, toID
+}
+
+func (s *Store) deleteLinksBetween(tx *gorm.DB, a, b uint) error {
+	return tx.Where(
+		"(from_group_id = ? AND to_group_id = ?) OR (from_group_id = ? AND to_group_id = ?)",
+		a, b, b, a,
+	).Delete(&GroupLink{}).Error
+}
+
+func (s *Store) UpsertGroupLink(fromID, toID uint, bidirectional bool) error {
 	if fromID == toID {
 		return fmt.Errorf("cannot link a group to itself")
 	}
-	if fromID > toID {
-		fromID, toID = toID, fromID
+	fromID, toID = normalizeLinkPair(fromID, toID, bidirectional)
+
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := s.deleteLinksBetween(tx, fromID, toID); err != nil {
+			return err
+		}
+		return tx.Model(&GroupLink{}).Create(map[string]any{
+			"from_group_id": fromID,
+			"to_group_id":   toID,
+			"bidirectional": bidirectional,
+		}).Error
+	})
+}
+
+// linkConnectsGroups is true when l is any link (directed or bidirectional) between a and b.
+func linkConnectsGroups(l *GroupLink, a, b uint) bool {
+	if a == b {
+		return false
 	}
-	var count int64
-	if err := s.db.Model(&GroupLink{}).
-		Where("from_group_id = ? AND to_group_id = ?", fromID, toID).
-		Count(&count).Error; err != nil {
-		return err
+	return (l.FromGroupID == a && l.ToGroupID == b) || (l.FromGroupID == b && l.ToGroupID == a)
+}
+
+// FindGroupLink returns the single link between two groups, if any.
+func (s *Store) FindGroupLink(a, b uint) (*GroupLink, error) {
+	var links []GroupLink
+	if err := s.db.Find(&links).Error; err != nil {
+		return nil, err
 	}
-	if count > 0 {
-		return nil
+	for i := range links {
+		l := &links[i]
+		if linkConnectsGroups(l, a, b) {
+			return l, nil
+		}
 	}
-	link := GroupLink{FromGroupID: fromID, ToGroupID: toID}
-	return s.db.Create(&link).Error
+	return nil, nil
 }
 
 func (s *Store) HasGroupLink(fromID, toID uint) (bool, error) {
-	if fromID > toID {
-		fromID, toID = toID, fromID
+	l, err := s.FindGroupLink(fromID, toID)
+	if err != nil {
+		return false, err
 	}
-	var count int64
-	err := s.db.Model(&GroupLink{}).
-		Where("from_group_id = ? AND to_group_id = ?", fromID, toID).
-		Count(&count).Error
-	return count > 0, err
+	return l != nil, nil
 }
 
 func (s *Store) DeleteGroupLink(fromID, toID uint) error {
-	if fromID > toID {
-		fromID, toID = toID, fromID
-	}
-	return s.db.Where("from_group_id = ? AND to_group_id = ?", fromID, toID).Delete(&GroupLink{}).Error
+	return s.db.Where(
+		"(from_group_id = ? AND to_group_id = ?) OR (from_group_id = ? AND to_group_id = ?)",
+		fromID, toID, toID, fromID,
+	).Delete(&GroupLink{}).Error
 }
 
 func (s *Store) CountPeersInGroup(groupID uint) (int64, error) {
@@ -106,6 +138,12 @@ func (s *Store) CountPeersInGroup(groupID uint) (int64, error) {
 func (s *Store) MigrateGroups() error {
 	if err := s.db.AutoMigrate(&PeerGroup{}, &GroupLink{}); err != nil {
 		return err
+	}
+	if s.db.Migrator().HasColumn(&PeerGroup{}, "passive") {
+		_ = s.db.Migrator().DropColumn(&PeerGroup{}, "passive")
+	}
+	if s.db.Migrator().HasTable("port_forward_dmzs") {
+		_ = s.db.Migrator().DropTable("port_forward_dmzs")
 	}
 	if !s.db.Migrator().HasColumn(&Peer{}, "group_id") {
 		if err := s.db.Migrator().AddColumn(&Peer{}, "GroupID"); err != nil {

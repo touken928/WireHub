@@ -38,6 +38,11 @@ func (s *Store) CreatePortForward(hubWebPort int, in PortForwardInput) (*PortFor
 	if err != nil {
 		return nil, err
 	}
+	if taken, err := s.IsHubListenPortUsed(rule.ListenPort); err != nil {
+		return nil, err
+	} else if taken {
+		return nil, fmt.Errorf("listen port %d is already in use", rule.ListenPort)
+	}
 	if err := s.db.Create(rule).Error; err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "unique") {
 			return nil, ErrPortForwardConflict
@@ -55,6 +60,13 @@ func (s *Store) UpdatePortForward(id uint, hubWebPort int, in PortForwardInput) 
 	updated, err := normalizePortForward(in, hubWebPort)
 	if err != nil {
 		return nil, err
+	}
+	if updated.ListenPort != rule.ListenPort {
+		if taken, err := s.isHubListenPortUsed(updated.ListenPort, rule.ID); err != nil {
+			return nil, err
+		} else if taken {
+			return nil, fmt.Errorf("listen port %d is already in use", updated.ListenPort)
+		}
 	}
 	updated.ID = rule.ID
 	if err := s.db.Save(updated).Error; err != nil {

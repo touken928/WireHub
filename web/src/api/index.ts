@@ -7,7 +7,6 @@ import type {
   PeerGroup,
   PeerStatus,
   PortForward,
-  PortForwardDMZ,
   PortForwardList,
   Settings,
   SetupStatus,
@@ -91,10 +90,10 @@ export const api = {
   deleteGroup: (id: number) =>
     request<{ ok: boolean }>(`/groups/${id}`, { method: 'DELETE' }),
   getGroupGraph: () => request<GroupGraph>('/groups/graph'),
-  createGroupLink: (from_group_id: number, to_group_id: number) =>
+  createGroupLink: (body: { from_group_id: number; to_group_id: number; bidirectional?: boolean }) =>
     request<{ ok: boolean }>('/groups/links', {
       method: 'POST',
-      body: JSON.stringify({ from_group_id, to_group_id }),
+      body: JSON.stringify(body),
     }),
   deleteGroupLink: (from_group_id: number, to_group_id: number) =>
     request<{ ok: boolean }>('/groups/links', {
@@ -131,8 +130,6 @@ export const api = {
     request<PortForward>(`/forwards/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   deletePortForward: (id: number) =>
     request<{ ok: boolean }>(`/forwards/${id}`, { method: 'DELETE' }),
-  updatePortForwardDMZ: (body: { target_host?: string; enabled?: boolean }) =>
-    request<PortForwardDMZ>('/forwards/dmz', { method: 'PUT', body: JSON.stringify(body) }),
 
   listPeers: () => request<Peer[]>('/peers'),
   createPeer: (body: { name: string; group_id: number }) =>

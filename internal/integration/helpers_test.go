@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"github.com/touken928/wirehub/internal/config"
 	"github.com/touken928/wirehub/internal/domain"
 	"github.com/touken928/wirehub/internal/vpn/filter"
 	"github.com/touken928/wirehub/internal/repo"
@@ -202,11 +201,11 @@ func startPeerHTTPServer(t *testing.T, tnet *netstack.Net, ip string, port int, 
 }
 
 func applyAccessRules(hubMgr *wg.Manager, st *repo.Store) error {
-	rules, err := buildAccessRulesFromStore(st)
+	policy, err := buildAccessPolicyFromStore(st)
 	if err != nil {
 		return err
 	}
-	hubMgr.SetAccessRules(rules)
+	hubMgr.SetAccessPolicy(policy)
 	return nil
 }
 
@@ -238,18 +237,13 @@ func (env *peerMeshEnv) syncPortForwards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dmz, err := env.store.GetPortForwardDMZ()
-	if err != nil {
-		t.Fatal(err)
-	}
-	dmzCfg := filter.DMZConfig{Enabled: dmz.Enabled, TargetHost: dmz.TargetHost}
-	if err := env.portProxy.Apply(toPortForwardRules(rules), dmzCfg, config.DefaultPort); err != nil {
+	if err := env.portProxy.Apply(toPortForwardRules(rules)); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(100 * time.Millisecond)
 }
 
-func buildAccessRulesFromStore(st *repo.Store) (*filter.RuleSet, error) {
+func buildAccessPolicyFromStore(st *repo.Store) (*filter.AccessPolicy, error) {
 	peers, err := st.ListPeers()
 	if err != nil {
 		return nil, err
@@ -261,12 +255,15 @@ func buildAccessRulesFromStore(st *repo.Store) (*filter.RuleSet, error) {
 	eps := make([]domain.PeerEndpoint, len(peers))
 	for i, p := range peers {
 		eps[i] = domain.PeerEndpoint{
-			ID: p.ID, WGIP: p.WGIP, GroupID: p.GroupID, Enabled: p.Enabled,
+			ID: p.ID, Name: p.Name, DNSName: p.DNSName,
+			WGIP: p.WGIP, GroupID: p.GroupID, Enabled: p.Enabled,
 		}
 	}
 	pairs := make([]domain.GroupLinkPair, len(links))
 	for i, l := range links {
-		pairs[i] = domain.GroupLinkPair{FromGroupID: l.FromGroupID, ToGroupID: l.ToGroupID}
+		pairs[i] = domain.GroupLinkPair{
+			FromGroupID: l.FromGroupID, ToGroupID: l.ToGroupID, Bidirectional: l.Bidirectional,
+		}
 	}
-	return domain.BuildAccessRules(eps, pairs)
+	return domain.BuildAccessPolicy(eps, pairs)
 }

@@ -49,6 +49,7 @@ export interface GroupLink {
   id: number;
   from_group_id: number;
   to_group_id: number;
+  bidirectional: boolean;
 }
 
 export interface GroupGraphPeer {
@@ -100,16 +101,8 @@ export interface PortForward {
   target_display: string;
 }
 
-export interface PortForwardDMZ {
-  id: number;
-  target_host: string;
-  enabled: boolean;
-  target_display: string;
-}
-
 export interface PortForwardList {
   rules: PortForward[];
-  dmz: PortForwardDMZ;
   hub_ip: string;
   hub_port: number;
 }

@@ -13,6 +13,7 @@ import {
   type Connection,
   type Edge,
   type Node,
+  type EdgeTypes,
   type NodeTypes,
   type OnBeforeDelete,
   ConnectionMode,
@@ -21,17 +22,24 @@ import {
 import { Button } from '@fluentui/react-components';
 import { AddRegular, DeleteRegular, DismissRegular } from '@fluentui/react-icons';
 import GroupNode from '@/components/groups/GroupNode';
-import type { GroupNodeData } from '@/components/groups/types';
+import { LinkDrawToolbar } from '@/components/groups/LinkDrawToolbar';
+import type { GroupNodeData, LinkDrawMode } from '@/components/groups/types';
 import {
   appendGroupEdge,
+  connectionLinkEnds,
   hasGroupLink,
   linkEdgeId,
 } from '@/components/groups/groupGraph';
-import { applyEdgeHandlesForNode } from '@/components/groups/groupLayout';
+import GroupLinkEdge from '@/components/groups/GroupLinkEdge';
+import { rematchEdgesForNode } from '@/components/groups/groupLayout';
 import { getErrorMessage } from '@/lib/error';
 
 const nodeTypes: NodeTypes = {
   peerGroup: GroupNode,
+};
+
+const edgeTypes: EdgeTypes = {
+  groupLink: GroupLinkEdge,
 };
 
 const defaultEdgeOptions = {
@@ -45,10 +53,9 @@ type GroupsCanvasProps = {
   initialNodes: Node<GroupNodeData>[];
   initialEdges: Edge[];
   selectedGroupId: number | null;
-  onConnectLink: (from: number, to: number) => Promise<void>;
+  onConnectLink: (from: number, to: number, bidirectional: boolean) => Promise<void>;
   onDisconnectLinks: (edges: Edge[]) => Promise<void>;
   onLayoutChange: (nodes: Node<GroupNodeData>[]) => Promise<void>;
-  onEdgeContextMenu: (event: React.MouseEvent, edge: Edge) => void;
   onNodeContextMenu: (event: React.MouseEvent, node: Node<GroupNodeData>) => void;
   onNodeClick: (event: React.MouseEvent, node: Node<GroupNodeData>) => void;
   onDeleteGroup: (groupId: number) => void;
@@ -73,7 +80,6 @@ function GroupsCanvasInner({
   onConnectLink,
   onDisconnectLinks,
   onLayoutChange,
-  onEdgeContextMenu,
   onNodeContextMenu,
   onNodeClick,
   onDeleteGroup,
@@ -83,6 +89,7 @@ function GroupsCanvasInner({
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
   const [selectedEdgeIds, setSelectedEdgeIds] = useState<string[]>([]);
+  const [linkMode, setLinkMode] = useState<LinkDrawMode>('bidirectional');
 
   const disconnectEdges = useCallback(async (toRemove: Edge[]) => {
     if (toRemove.length === 0) return;
@@ -104,25 +111,25 @@ function GroupsCanvasInner({
   }, [disconnectEdges]);
 
   const onConnect = useCallback(async (connection: Connection) => {
-    const from = Number(connection.source);
-    const to = Number(connection.target);
+    const { from, to } = connectionLinkEnds(connection);
     if (!from || !to || from === to) return;
 
+    const bidirectional = linkMode === 'bidirectional';
     let shouldConnect = false;
     const currentNodes = getNodes() as Node<GroupNodeData>[];
     setEdges((eds) => {
       if (hasGroupLink(eds, from, to)) return eds;
       shouldConnect = true;
-      return appendGroupEdge(eds, currentNodes, from, to, connection);
+      return appendGroupEdge(eds, currentNodes, from, to, bidirectional);
     });
     if (!shouldConnect) return;
 
     try {
-      await onConnectLink(from, to);
+      await onConnectLink(from, to, bidirectional);
     } catch {
-      setEdges((eds) => eds.filter((e) => e.id !== linkEdgeId(from, to)));
+      setEdges((eds) => eds.filter((e) => e.id !== linkEdgeId(from, to, bidirectional)));
     }
-  }, [onConnectLink, setEdges, getNodes]);
+  }, [linkMode, onConnectLink, setEdges, getNodes]);
 
   const isValidConnection = useCallback((connection: Connection | Edge) => {
     const from = Number(connection.source);
@@ -131,11 +138,37 @@ function GroupsCanvasInner({
     return !hasGroupLink(edges, from, to);
   }, [edges]);
 
-  const onNodeDragStop = useCallback((_event: MouseEvent | TouchEvent, draggedNode: Node<GroupNodeData>) => {
-    const allNodes = getNodes() as Node<GroupNodeData>[];
-    setEdges((eds) => applyEdgeHandlesForNode(eds, allNodes, draggedNode.id));
-    void onLayoutChange(allNodes);
-  }, [getNodes, onLayoutChange, setEdges]);
+  const nodesWithDragged = useCallback(
+    (draggedNode: Node<GroupNodeData>) => {
+      const live = getNodes() as Node<GroupNodeData>[];
+      return live.map((n) => (n.id === draggedNode.id ? draggedNode : n));
+    },
+    [getNodes],
+  );
+
+  const rematchDraggedNodeEdges = useCallback(
+    (draggedNode: Node<GroupNodeData>) => {
+      const allNodes = nodesWithDragged(draggedNode);
+      setEdges((eds) => rematchEdgesForNode(eds, allNodes, draggedNode.id));
+    },
+    [nodesWithDragged, setEdges],
+  );
+
+  const onNodeDrag = useCallback(
+    (_event: MouseEvent | TouchEvent, draggedNode: Node<GroupNodeData>) => {
+      rematchDraggedNodeEdges(draggedNode);
+    },
+    [rematchDraggedNodeEdges],
+  );
+
+  const onNodeDragStop = useCallback(
+    (_event: MouseEvent | TouchEvent, draggedNode: Node<GroupNodeData>) => {
+      const allNodes = nodesWithDragged(draggedNode);
+      setEdges((eds) => rematchEdgesForNode(eds, allNodes, draggedNode.id));
+      void onLayoutChange(allNodes);
+    },
+    [nodesWithDragged, onLayoutChange, setEdges],
+  );
 
   const onSelectionChange = useCallback(({ edges: selected }: { edges: Edge[] }) => {
     const ids = selected.map((e) => e.id);
@@ -167,8 +200,8 @@ function GroupsCanvasInner({
         onConnect={onConnect}
         isValidConnection={isValidConnection}
         onBeforeDelete={onBeforeDelete}
+        onNodeDrag={onNodeDrag}
         onNodeDragStop={onNodeDragStop}
-        onEdgeContextMenu={onEdgeContextMenu}
         onNodeContextMenu={onNodeContextMenu}
         onNodeClick={onNodeClick}
         onSelectionChange={onSelectionChange}
@@ -176,6 +209,7 @@ function GroupsCanvasInner({
         nodesConnectable
         elementsSelectable
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         connectionMode={ConnectionMode.Loose}
         defaultEdgeOptions={defaultEdgeOptions}
         edgesReconnectable={false}
@@ -185,6 +219,9 @@ function GroupsCanvasInner({
       >
         <Background gap={20} size={1} />
         <FitViewOnMount />
+        <Panel position="bottom-left">
+          <LinkDrawToolbar mode={linkMode} onModeChange={setLinkMode} />
+        </Panel>
         {(selectedEdgeIds.length > 0 || selectedGroupId != null) && (
           <Panel position="top-left">
             {selectedEdgeIds.length > 0 ? (

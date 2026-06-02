@@ -17,7 +17,7 @@ import { DeleteRegular } from '@fluentui/react-icons';
 import { api } from '@/api';
 import type { GroupGraphNode, PeerStatus } from '@/api/types';
 import GroupsCanvas from '@/components/groups/GroupsCanvas';
-import { graphToFlow } from '@/components/groups/groupGraph';
+import { edgeLinkEndpoints, graphToFlow } from '@/components/groups/groupGraph';
 import type { GroupNodeData } from '@/components/groups/types';
 import { ContextMenu } from '@/components/groups/ContextMenu';
 import { CreateGroupDialog } from '@/components/groups/CreateGroupDialog';
@@ -69,7 +69,6 @@ export default function GroupsPage() {
   const [detailGroupId, setDetailGroupId] = useState<number | null>(null);
   const [newUserName, setNewUserName] = useState('');
   const [createUserError, setCreateUserError] = useState('');
-  const [edgeContextMenu, setEdgeContextMenu] = useState<{ x: number; y: number; edge: Edge } | null>(null);
   const [nodeContextMenu, setNodeContextMenu] = useState<{ x: number; y: number; groupId: number } | null>(null);
 
   const detailGroup = useMemo(
@@ -125,10 +124,7 @@ export default function GroupsPage() {
   }, [load]);
 
   useEffect(() => {
-    const close = () => {
-      setEdgeContextMenu(null);
-      setNodeContextMenu(null);
-    };
+    const close = () => setNodeContextMenu(null);
     window.addEventListener('click', close);
     return () => window.removeEventListener('click', close);
   }, []);
@@ -150,17 +146,17 @@ export default function GroupsPage() {
     setPeerStatus(status.peers ?? []);
   };
 
-  const onConnectLink = useCallback(async (from: number, to: number) => {
-    await api.createGroupLink(from, to);
+  const onConnectLink = useCallback(async (from: number, to: number, bidirectional: boolean) => {
+    await api.createGroupLink({ from_group_id: from, to_group_id: to, bidirectional });
   }, []);
 
   const onDisconnectLinks = useCallback(async (toRemove: Edge[]) => {
     if (toRemove.length === 0) return;
     if (!(await confirmDisconnectLinks(toRemove.length))) return;
     for (const edge of toRemove) {
-      await api.deleteGroupLink(Number(edge.source), Number(edge.target));
+      const { from, to } = edgeLinkEndpoints(edge);
+      await api.deleteGroupLink(from, to);
     }
-    setEdgeContextMenu(null);
   }, [confirmDisconnectLinks]);
 
   const onLayoutChange = useCallback(async (nodes: Node<GroupNodeData>[]) => {
@@ -173,17 +169,10 @@ export default function GroupsPage() {
     );
   }, []);
 
-  const onEdgeContextMenu = useCallback((event: React.MouseEvent, edge: Edge) => {
-    event.preventDefault();
-    setEdgeContextMenu({ x: event.clientX, y: event.clientY, edge });
-    setNodeContextMenu(null);
-  }, []);
-
   const onNodeContextMenu = useCallback((event: React.MouseEvent, node: Node<GroupNodeData>) => {
     event.preventDefault();
     selectGroup(node.data.groupId);
     setNodeContextMenu({ x: event.clientX, y: event.clientY, groupId: node.data.groupId });
-    setEdgeContextMenu(null);
   }, []);
 
   const handleCreateGroup = async () => {
@@ -239,7 +228,7 @@ export default function GroupsPage() {
     <div className={`${pageLayout.page} ${pageLayout.pageFill}`}>
       <PageHeader
         title="Groups"
-        description="Drag between groups to allow access. Click a group to manage members. Right-click a group or link for actions."
+        description="Drag between groups to connect. Use the switch at bottom-left for one-way links."
       />
 
       <div className={styles.workspace}>
@@ -252,7 +241,6 @@ export default function GroupsPage() {
             onConnectLink={onConnectLink}
             onDisconnectLinks={onDisconnectLinks}
             onLayoutChange={onLayoutChange}
-            onEdgeContextMenu={onEdgeContextMenu}
             onNodeContextMenu={onNodeContextMenu}
             onNodeClick={(_, node) => selectGroup(node.data.groupId)}
             onDeleteGroup={(id) => void handleDeleteGroup(id)}
@@ -273,14 +261,6 @@ export default function GroupsPage() {
           onDeletePeer={(id, name) => void handleDeletePeer(id, name)}
         />
       </div>
-
-      {edgeContextMenu && (
-        <ContextMenu x={edgeContextMenu.x} y={edgeContextMenu.y}>
-          <Button appearance="subtle" onClick={() => onDisconnectLinks([edgeContextMenu.edge]).then(load)}>
-            Disconnect
-          </Button>
-        </ContextMenu>
-      )}
 
       {nodeContextMenu && (
         <ContextMenu x={nodeContextMenu.x} y={nodeContextMenu.y}>

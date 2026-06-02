@@ -37,7 +37,6 @@ func RegisterRoutes(r *gin.Engine, svc *Server, authSvc *auth.Service) {
 			protected.PUT("/groups/layout", svc.handleUpdateGroupLayout)
 			protected.GET("/forwards", svc.handleListPortForwards)
 			protected.POST("/forwards", svc.handleCreatePortForward)
-			protected.PUT("/forwards/dmz", svc.handleUpdatePortForwardDMZ)
 			protected.PUT("/forwards/:id", svc.handleUpdatePortForward)
 			protected.DELETE("/forwards/:id", svc.handleDeletePortForward)
 			protected.GET("/peers", svc.handleListPeers)

@@ -1,11 +1,11 @@
-import { addEdge, type Connection, type Edge, type Node } from '@xyflow/react';
+import { addEdge, MarkerType, type Connection, type Edge, type Node } from '@xyflow/react';
 import type { GroupGraph, GroupGraphNode } from '@/api/types';
 import {
   applyEdgeHandles,
   autoLayoutGroups,
   pickEdgeHandles,
 } from '@/components/groups/groupLayout';
-import type { GroupNodeData } from '@/components/groups/types';
+import type { GroupLinkEdgeData, GroupNodeData } from '@/components/groups/types';
 
 const defaultEdgeOptions = {
   deletable: true,
@@ -13,12 +13,77 @@ const defaultEdgeOptions = {
   interactionWidth: 24,
 };
 
-export function linkEdgeId(a: number, b: number) {
-  return `${Math.min(a, b)}-${Math.max(a, b)}`;
+export function linkEdgeId(from: number, to: number, bidirectional: boolean) {
+  if (bidirectional) {
+    const low = Math.min(from, to);
+    const high = Math.max(from, to);
+    return `${low}-${high}-bi`;
+  }
+  return `${from}-${to}-uni`;
 }
 
+export function edgeLinkEndpoints(edge: Edge): { from: number; to: number; bidirectional: boolean } {
+  const data = edge.data as GroupLinkEdgeData | undefined;
+  if (data?.fromGroupId != null && data?.toGroupId != null) {
+    return {
+      from: data.fromGroupId,
+      to: data.toGroupId,
+      bidirectional: data.bidirectional,
+    };
+  }
+  return {
+    from: Number(edge.source),
+    to: Number(edge.target),
+    bidirectional: true,
+  };
+}
+
+/** True if any link already exists between the two groups (at most one edge per pair). */
 export function hasGroupLink(edges: Edge[], a: number, b: number) {
-  return edges.some((e) => e.id === linkEdgeId(a, b));
+  return edges.some((e) => {
+    const { from, to } = edgeLinkEndpoints(e);
+    return (from === a && to === b) || (from === b && to === a);
+  });
+}
+
+function linkEdgeAppearance(
+  bidirectional: boolean,
+): Pick<Edge, 'type' | 'className' | 'markerStart' | 'markerEnd' | 'style' | 'animated'> {
+  const arrow = { type: MarkerType.ArrowClosed, width: 14, height: 14 };
+  if (bidirectional) {
+    return {
+      type: 'groupLink',
+      markerStart: arrow,
+      markerEnd: arrow,
+      animated: false,
+      style: { strokeWidth: 1.5 },
+    };
+  }
+  return {
+    type: 'groupLink',
+    className: 'group-link-uni',
+    markerStart: { ...arrow, width: 16, height: 16 },
+    animated: false,
+    style: { strokeWidth: 1.5 },
+  };
+}
+
+/**
+ * Maps a new canvas connection to DB policy direction.
+ * Must match repo GroupLink (from_group_id → to_group_id) and domain.LinkAllowsInit.
+ */
+export function connectionLinkEnds(connection: Connection): { from: number; to: number } {
+  return {
+    from: Number(connection.source),
+    to: Number(connection.target),
+  };
+}
+
+/** True when edge policy direction matches React Flow source → target (uni links). */
+export function edgeMatchesPolicyDirection(edge: Edge): boolean {
+  const data = edge.data as GroupLinkEdgeData | undefined;
+  if (!data || data.bidirectional) return true;
+  return edge.source === String(data.fromGroupId) && edge.target === String(data.toGroupId);
 }
 
 export function graphToFlow(
@@ -42,14 +107,20 @@ export function graphToFlow(
     deletable: false,
   }));
   const rawEdges: Edge[] = links.map((l) => {
-    const low = Math.min(l.from_group_id, l.to_group_id);
-    const high = Math.max(l.from_group_id, l.to_group_id);
+    const bidirectional = l.bidirectional ?? true;
+    const from = bidirectional ? Math.min(l.from_group_id, l.to_group_id) : l.from_group_id;
+    const to = bidirectional ? Math.max(l.from_group_id, l.to_group_id) : l.to_group_id;
     return {
-      id: `${low}-${high}`,
-      source: String(low),
-      target: String(high),
-      animated: true,
+      id: linkEdgeId(l.from_group_id, l.to_group_id, bidirectional),
+      source: String(from),
+      target: String(to),
+      data: {
+        fromGroupId: l.from_group_id,
+        toGroupId: l.to_group_id,
+        bidirectional,
+      } satisfies GroupLinkEdgeData,
       ...defaultEdgeOptions,
+      ...linkEdgeAppearance(bidirectional),
     };
   });
   const edges = applyEdgeHandles(rawEdges, nodes);
@@ -66,21 +137,21 @@ export function appendGroupEdge(
   nodes: Node<GroupNodeData>[],
   from: number,
   to: number,
-  connection?: Pick<Connection, 'sourceHandle' | 'targetHandle'>,
+  bidirectional: boolean,
 ) {
   if (hasGroupLink(edges, from, to)) return edges;
-  const low = Math.min(from, to);
-  const high = Math.max(from, to);
-  const handles = connection?.sourceHandle && connection?.targetHandle
-    ? { sourceHandle: connection.sourceHandle, targetHandle: connection.targetHandle }
-    : pickEdgeHandles(String(low), String(high), nodes);
-  return addEdge({
-    id: linkEdgeId(from, to),
-    source: String(low),
-    target: String(high),
+  const source = bidirectional ? Math.min(from, to) : from;
+  const target = bidirectional ? Math.max(from, to) : to;
+  const handles = pickEdgeHandles(String(source), String(target), nodes);
+  const edge: Edge = {
+    id: linkEdgeId(from, to, bidirectional),
+    source: String(source),
+    target: String(target),
     sourceHandle: handles.sourceHandle,
     targetHandle: handles.targetHandle,
-    animated: true,
+    data: { fromGroupId: from, toGroupId: to, bidirectional } satisfies GroupLinkEdgeData,
     ...defaultEdgeOptions,
-  }, edges);
+    ...linkEdgeAppearance(bidirectional),
+  };
+  return addEdge(edge, edges);
 }

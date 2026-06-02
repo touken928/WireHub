@@ -11,14 +11,18 @@ func addr(s string) netip.Addr {
 	return netip.MustParseAddr(s)
 }
 
-// peersCanReach mirrors TUN filtering: both directions must be allowed.
+// peerCanSend mirrors TUN filtering: each packet is allowed only when src→dst is permitted.
+func peerCanSend(rules *filter.RuleSet, from, to string) bool {
+	return rules.CanAccess(addr(from), addr(to))
+}
+
+// peersCanReach is true when both peers can send to each other (active↔active or same group).
 func peersCanReach(rules *filter.RuleSet, from, to string) bool {
-	a, b := addr(from), addr(to)
-	return rules.CanAccess(a, b) && rules.CanAccess(b, a)
+	return peerCanSend(rules, from, to) && peerCanSend(rules, to, from)
 }
 
 func TestGroupsCanAccess(t *testing.T) {
-	links := []GroupLinkPair{{FromGroupID: 2, ToGroupID: 3}}
+	links := []GroupLinkPair{{FromGroupID: 2, ToGroupID: 3, Bidirectional: true}}
 
 	tests := []struct {
 		name string
@@ -94,7 +98,7 @@ func TestBuildAccessRules_LinkedGroupsInterconnect(t *testing.T) {
 		{ID: 2, WGIP: "100.127.0.3", GroupID: 2, Enabled: true},
 		{ID: 3, WGIP: "100.127.0.4", GroupID: 3, Enabled: true},
 	}
-	links := []GroupLinkPair{{FromGroupID: 2, ToGroupID: 3}}
+	links := []GroupLinkPair{{FromGroupID: 2, ToGroupID: 3, Bidirectional: true}}
 
 	rules, err := BuildAccessRules(peers, links)
 	if err != nil {
@@ -119,8 +123,8 @@ func TestBuildAccessRules_LinkIsNotTransitive(t *testing.T) {
 		{ID: 3, WGIP: "100.127.0.4", GroupID: 3, Enabled: true},
 	}
 	links := []GroupLinkPair{
-		{FromGroupID: 1, ToGroupID: 2},
-		{FromGroupID: 2, ToGroupID: 3},
+		{FromGroupID: 1, ToGroupID: 2, Bidirectional: true},
+		{FromGroupID: 2, ToGroupID: 3, Bidirectional: true},
 	}
 
 	rules, err := BuildAccessRules(peers, links)
@@ -185,8 +189,8 @@ func TestBuildAccessRules_MultipleLinks(t *testing.T) {
 		{ID: 4, WGIP: "100.127.0.5", GroupID: 4, Enabled: true},
 	}
 	links := []GroupLinkPair{
-		{FromGroupID: 1, ToGroupID: 2},
-		{FromGroupID: 3, ToGroupID: 4},
+		{FromGroupID: 1, ToGroupID: 2, Bidirectional: true},
+		{FromGroupID: 3, ToGroupID: 4, Bidirectional: true},
 	}
 
 	rules, err := BuildAccessRules(peers, links)
@@ -219,7 +223,7 @@ func TestBuildAccessRules(t *testing.T) {
 		{ID: 2, WGIP: "100.127.0.3", GroupID: 2, Enabled: true},
 		{ID: 3, WGIP: "100.127.0.4", GroupID: 3, Enabled: true},
 	}
-	links := []GroupLinkPair{{FromGroupID: 2, ToGroupID: 3}}
+	links := []GroupLinkPair{{FromGroupID: 2, ToGroupID: 3, Bidirectional: true}}
 
 	rules, err := BuildAccessRules(peers, links)
 	if err != nil {
@@ -242,3 +246,35 @@ func TestGroupsCanAccessSameGroup(t *testing.T) {
 		t.Fatal("same group should always connect")
 	}
 }
+
+func TestLinkAllowsInit_Unidirectional(t *testing.T) {
+	links := []GroupLinkPair{{FromGroupID: 1, ToGroupID: 2, Bidirectional: false}}
+
+	if !LinkAllowsInit(1, 2, links) {
+		t.Fatal("source group should reach target")
+	}
+	if LinkAllowsInit(2, 1, links) {
+		t.Fatal("reverse direction must be blocked")
+	}
+}
+
+func TestBuildAccessRules_UnidirectionalSNATPath(t *testing.T) {
+	peers := []PeerEndpoint{
+		{ID: 1, Name: "client", WGIP: "100.127.0.2", GroupID: 1, Enabled: true},
+		{ID: 2, Name: "svc", WGIP: "100.127.0.3", GroupID: 2, Enabled: true},
+	}
+	links := []GroupLinkPair{{FromGroupID: 1, ToGroupID: 2, Bidirectional: false}}
+
+	policy, err := BuildAccessPolicy(peers, links)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Raw WG IP path is not blocked; hub SNAT handles client → service.
+	if !peerCanSend(policy.Rules, "100.127.0.2", "100.127.0.3") {
+		t.Fatal("client should not be blocked toward service (SNAT applies on hub TUN)")
+	}
+	if peerCanSend(policy.Rules, "100.127.0.3", "100.127.0.2") {
+		t.Fatal("service must not reach client")
+	}
+}
+

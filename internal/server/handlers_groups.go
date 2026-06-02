@@ -94,6 +94,7 @@ func (s *Server) handleUpdateGroup(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	s.SyncAccessFilter()
 	resp, _ := toGroupResponse(s.Store, *g)
 	c.JSON(http.StatusOK, resp)
 }
@@ -151,8 +152,16 @@ func (s *Server) handleGroupGraph(c *gin.Context) {
 }
 
 type groupLinkRequest struct {
-	FromGroupID uint `json:"from_group_id" binding:"required"`
-	ToGroupID   uint `json:"to_group_id" binding:"required"`
+	FromGroupID   uint  `json:"from_group_id" binding:"required"`
+	ToGroupID     uint  `json:"to_group_id" binding:"required"`
+	Bidirectional *bool `json:"bidirectional"`
+}
+
+func linkBidirectional(req groupLinkRequest) bool {
+	if req.Bidirectional == nil {
+		return true
+	}
+	return *req.Bidirectional
 }
 
 func (s *Server) handleCreateGroupLink(c *gin.Context) {
@@ -182,11 +191,12 @@ func (s *Server) handleCreateGroupLink(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 		return
 	}
-	if err := s.Store.UpsertGroupLink(req.FromGroupID, req.ToGroupID); err != nil {
+	if err := s.Store.UpsertGroupLink(req.FromGroupID, req.ToGroupID, linkBidirectional(req)); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	s.SyncAccessFilter()
+	s.SyncPortForwards()
 	c.JSON(http.StatusCreated, gin.H{"ok": true})
 }
 
@@ -201,6 +211,7 @@ func (s *Server) handleDeleteGroupLink(c *gin.Context) {
 		return
 	}
 	s.SyncAccessFilter()
+	s.SyncPortForwards()
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
