@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/touken928/wirehub/internal/config"
-	dnssvc "github.com/touken928/wirehub/internal/dns"
-	"github.com/touken928/wirehub/internal/network"
-	"github.com/touken928/wirehub/internal/store"
-	"github.com/touken928/wirehub/internal/wg"
+	dnssvc "github.com/touken928/wirehub/internal/vpn/dns"
+	"github.com/touken928/wirehub/internal/vpn/filter"
+	"github.com/touken928/wirehub/internal/repo"
+	"github.com/touken928/wirehub/internal/vpn/wg"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun/netstack"
@@ -29,7 +29,7 @@ type hubEnv struct {
 }
 
 type livePeer struct {
-	Peer store.Peer
+	Peer repo.Peer
 	Dev  *device.Device
 	Net  *netstack.Net
 }
@@ -39,7 +39,7 @@ type peerMeshEnv struct {
 	hubIP      string
 	hubPubKey  string
 	listenPort int
-	store      *store.Store
+	store      *repo.Store
 	peers      []livePeer
 }
 
@@ -80,14 +80,14 @@ func setupPeerMesh(t *testing.T, specs []meshPeerSpec, linkPairs [][2]string) (*
 
 	cfg := &config.RuntimeConfig{
 		Bind:         "0.0.0.0",
-		Port:         config.DefaultPort,
+		Port:         config.DefaultWebPort,
 		DataDir:      dir,
-		ListenAddr:   fmt.Sprintf("0.0.0.0:%d", config.DefaultPort),
+		ListenAddr:   fmt.Sprintf("0.0.0.0:%d", config.DefaultWebPort),
 		DatabasePath: filepath.Join(dir, "wirehub.db"),
 		JWTSecret:    "test-jwt-secret",
 	}
 
-	st, err := store.New(cfg)
+	st, err := repo.New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func setupPeerMesh(t *testing.T, specs []meshPeerSpec, linkPairs [][2]string) (*
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Setup(store.SetupInput{
+	if err := st.Setup(repo.SetupInput{
 		Endpoint:         "127.0.0.1",
 		Subnet:           config.DefaultSubnet,
 		AdminUsername:    "admin",
@@ -125,7 +125,7 @@ func setupPeerMesh(t *testing.T, specs []meshPeerSpec, linkPairs [][2]string) (*
 	if err := wgMgr.Up(); err != nil {
 		t.Fatal(err)
 	}
-	if err := network.EnableForwarding(wgMgr.Net()); err != nil {
+	if err := filter.EnableForwarding(wgMgr.Net()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -167,7 +167,7 @@ func setupPeerMesh(t *testing.T, specs []meshPeerSpec, linkPairs [][2]string) (*
 		if err != nil {
 			t.Fatal(err)
 		}
-		peer := store.Peer{
+		peer := repo.Peer{
 			Name:       spec.Name,
 			PublicKey:  peerPub,
 			PrivateKey: peerPriv,
@@ -221,7 +221,7 @@ func setupPeerMesh(t *testing.T, specs []meshPeerSpec, linkPairs [][2]string) (*
 	}
 }
 
-func reloadAccessRules(st *store.Store, wgMgr *wg.Manager) error {
+func reloadAccessRules(st *repo.Store, wgMgr *wg.Manager) error {
 	return applyAccessRules(wgMgr, st)
 }
 
@@ -249,7 +249,7 @@ func (env *peerMeshEnv) peerNamed(name string) *livePeer {
 	return nil
 }
 
-func startWireGuardClient(hubIP, hubPubKey string, listenPort int, peer store.Peer) (*device.Device, *netstack.Net, error) {
+func startWireGuardClient(hubIP, hubPubKey string, listenPort int, peer repo.Peer) (*device.Device, *netstack.Net, error) {
 	clientTun, clientNet, err := netstack.CreateNetTUN(
 		[]netip.Addr{netip.MustParseAddr(peer.WGIP)},
 		[]netip.Addr{netip.MustParseAddr(hubIP)},
@@ -285,7 +285,7 @@ persistent_keepalive_interval=1
 
 func startWireGuardClientLegacy(t *testing.T, env *hubEnv) (*device.Device, *netstack.Net, error) {
 	t.Helper()
-	return startWireGuardClient(env.hubIP, env.hubPubKey, env.listenPort, store.Peer{
+	return startWireGuardClient(env.hubIP, env.hubPubKey, env.listenPort, repo.Peer{
 		PrivateKey: env.peerPrivKey,
 		PublicKey:  env.peerPubKey,
 		WGIP:       env.peerIP,

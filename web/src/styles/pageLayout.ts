@@ -1,5 +1,5 @@
 import { makeStyles, tokens } from '@fluentui/react-components';
-import { LAYOUT } from './layout';
+import { LAYOUT } from '@/styles/layout';
 
 /** Shared shell for Dashboard, Groups, Users, Settings. */
 export const usePageLayoutStyles = makeStyles({

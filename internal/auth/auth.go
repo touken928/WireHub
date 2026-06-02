@@ -5,8 +5,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/touken928/wirehub/internal/store"
-	"golang.org/x/crypto/bcrypt"
+	passwd "github.com/touken928/wirehub/internal/password"
+	"github.com/touken928/wirehub/internal/repo"
 )
 
 type Claims struct {
@@ -17,10 +17,10 @@ type Claims struct {
 
 type Service struct {
 	secret string
-	store  *store.Store
+	store  *repo.Store
 }
 
-func NewService(secret string, st *store.Store) *Service {
+func NewService(secret string, st *repo.Store) *Service {
 	return &Service{secret: secret, store: st}
 }
 
@@ -29,13 +29,13 @@ func (s *Service) Login(username, password string) (string, error) {
 	if err != nil {
 		return "", errors.New("invalid credentials")
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(admin.PasswordHash), []byte(password)); err != nil {
+	if err := passwd.Verify(admin.PasswordHash, password); err != nil {
 		return "", errors.New("invalid credentials")
 	}
 	return s.issueToken(admin)
 }
 
-func (s *Service) issueToken(admin *store.Admin) (string, error) {
+func (s *Service) issueToken(admin *repo.Admin) (string, error) {
 	claims := Claims{
 		AdminID:  admin.ID,
 		Username: admin.Username,

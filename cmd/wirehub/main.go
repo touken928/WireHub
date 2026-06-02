@@ -4,12 +4,12 @@ import (
 	"log"
 
 	"github.com/gin-gonic/gin"
-	"github.com/touken928/wirehub/internal/api"
 	"github.com/touken928/wirehub/internal/auth"
 	"github.com/touken928/wirehub/internal/config"
-	"github.com/touken928/wirehub/internal/runtime"
+	"github.com/touken928/wirehub/internal/repo"
+	"github.com/touken928/wirehub/internal/server"
 	"github.com/touken928/wirehub/internal/static"
-	"github.com/touken928/wirehub/internal/store"
+	"github.com/touken928/wirehub/internal/vpn"
 )
 
 func main() {
@@ -18,22 +18,22 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
-	st, err := store.New(cfg)
+	st, err := repo.New(cfg)
 	if err != nil {
-		log.Fatalf("store: %v", err)
+		log.Fatalf("repo: %v", err)
 	}
 
-	apiSvc := api.New(st)
+	svc := server.New(st)
 	authSvc := auth.NewService(cfg.JWTSecret, st)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery(), gin.Logger())
 
-	netRuntime := runtime.NewNetwork(cfg, st, apiSvc, r)
-	apiSvc.SetNetworkController(netRuntime)
+	stack := vpn.NewStack(cfg, st, svc.Hub, r)
+	svc.SetNetworkRuntime(stack)
 
-	api.RegisterRoutes(r, apiSvc, authSvc)
+	server.RegisterRoutes(r, svc, authSvc)
 	if err := static.Mount(r); err != nil {
 		log.Fatalf("static: %v", err)
 	}
@@ -43,8 +43,8 @@ func main() {
 		log.Fatalf("setup check: %v", err)
 	}
 	if configured {
-		if err := netRuntime.Start(); err != nil {
-			log.Fatalf("network runtime: %v", err)
+		if err := stack.Start(); err != nil {
+			log.Fatalf("vpn stack: %v", err)
 		}
 	} else {
 		log.Printf("WireHub setup required — open http://%s/setup", cfg.ListenAddr)

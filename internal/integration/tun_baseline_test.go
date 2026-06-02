@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/touken928/wirehub/internal/network"
-	"github.com/touken928/wirehub/internal/store"
-	"github.com/touken928/wirehub/internal/wg"
+	"github.com/touken928/wirehub/internal/vpn/filter"
+	"github.com/touken928/wirehub/internal/repo"
+	"github.com/touken928/wirehub/internal/vpn/wg"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun/netstack"
@@ -127,11 +127,11 @@ func TestWireGuardTCPWithFilterAndForwarding(t *testing.T) {
 	}
 	defer hubMgr.Down()
 
-	if err := hubMgr.SyncPeer(&store.Peer{PublicKey: peerPub, WGIP: "10.8.0.2", Enabled: true}); err != nil {
+	if err := hubMgr.SyncPeer(&repo.Peer{PublicKey: peerPub, WGIP: "10.8.0.2", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := network.EnableForwarding(hubMgr.Net()); err != nil {
+	if err := filter.EnableForwarding(hubMgr.Net()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -139,7 +139,7 @@ func TestWireGuardTCPWithFilterAndForwarding(t *testing.T) {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "filtered-ok")
 	})
-	if _, err := network.StartHubWebServer(hubMgr.Net(), "10.8.0.1", 18082, mux); err != nil {
+	if _, err := filter.StartHubWebServer(hubMgr.Net(), "10.8.0.1", 18082, mux); err != nil {
 		t.Fatal(err)
 	}
 
@@ -206,7 +206,7 @@ func TestWireGuardTCPWithEnableForwardingOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := network.EnableForwarding(hubNet); err != nil {
+	if err := filter.EnableForwarding(hubNet); err != nil {
 		t.Fatal(err)
 	}
 	hubDev := device.NewDevice(hubTun, conn.NewDefaultBind(), device.NewLogger(device.LogLevelError, ""))

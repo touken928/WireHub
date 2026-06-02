@@ -8,11 +8,12 @@ import {
   tokens,
 } from '@fluentui/react-components';
 import { useCallback, useEffect, useState } from 'react';
-import { api, DNS_DOMAIN } from '../api/client';
-import type { Settings } from '../api/client';
-import NetworkUsageChart from '../components/NetworkUsageChart';
-import PageHeader from '../components/PageHeader';
-import { usePageLayoutStyles } from '../styles/pageLayout';
+import { api } from '@/api';
+import type { Settings } from '@/api/types';
+import { DNS_DOMAIN } from '@/constants';
+import NetworkUsageChart from '@/components/common/NetworkUsageChart';
+import { PageHeader } from '@/components/layout/PageHeader';
+import { usePageLayoutStyles } from '@/styles/pageLayout';
 
 const useStyles = makeStyles({
   hubCard: {
@@ -57,10 +58,12 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(() => {
-    api.getStatus().then((d) => {
-      setSettings(d.settings);
-      setLoading(false);
-    }).catch(() => setLoading(false));
+    api.getStatus()
+      .then((data) => {
+        setSettings(data.settings);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
   }, []);
 
   useEffect(() => {

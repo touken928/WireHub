@@ -10,9 +10,10 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"github.com/touken928/wirehub/internal/network"
-	"github.com/touken928/wirehub/internal/store"
-	"github.com/touken928/wirehub/internal/wg"
+	"github.com/touken928/wirehub/internal/domain"
+	"github.com/touken928/wirehub/internal/vpn/filter"
+	"github.com/touken928/wirehub/internal/repo"
+	"github.com/touken928/wirehub/internal/vpn/wg"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
@@ -156,7 +157,7 @@ func startPeerHTTPServer(t *testing.T, tnet *netstack.Net, ip string, port int, 
 	return func() { _ = ln.Close() }
 }
 
-func applyAccessRules(hubMgr *wg.Manager, st *store.Store) error {
+func applyAccessRules(hubMgr *wg.Manager, st *repo.Store) error {
 	rules, err := buildAccessRulesFromStore(st)
 	if err != nil {
 		return err
@@ -165,7 +166,7 @@ func applyAccessRules(hubMgr *wg.Manager, st *store.Store) error {
 	return nil
 }
 
-func buildAccessRulesFromStore(st *store.Store) (*network.AccessRuleSet, error) {
+func buildAccessRulesFromStore(st *repo.Store) (*filter.RuleSet, error) {
 	peers, err := st.ListPeers()
 	if err != nil {
 		return nil, err
@@ -174,5 +175,15 @@ func buildAccessRulesFromStore(st *store.Store) (*network.AccessRuleSet, error) 
 	if err != nil {
 		return nil, err
 	}
-	return store.BuildGroupAccessRules(peers, links)
+	eps := make([]domain.PeerEndpoint, len(peers))
+	for i, p := range peers {
+		eps[i] = domain.PeerEndpoint{
+			ID: p.ID, WGIP: p.WGIP, GroupID: p.GroupID, Enabled: p.Enabled,
+		}
+	}
+	pairs := make([]domain.GroupLinkPair, len(links))
+	for i, l := range links {
+		pairs[i] = domain.GroupLinkPair{FromGroupID: l.FromGroupID, ToGroupID: l.ToGroupID}
+	}
+	return domain.BuildAccessRules(eps, pairs)
 }

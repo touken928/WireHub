@@ -17,12 +17,13 @@ import {
 } from '@fluentui/react-components';
 import { ArrowDownloadRegular, ArrowResetRegular, SaveRegular } from '@fluentui/react-icons';
 import { useCallback, useEffect, useState } from 'react';
-import { api, clearToken } from '../api/client';
-import type { HubSettings } from '../api/client';
-import { textToUpstreamDns, upstreamDnsToText } from '../types/hubConfig';
-import PageHeader from '../components/PageHeader';
-import { downloadBlob } from '../utils/download';
-import { usePageLayoutStyles } from '../styles/pageLayout';
+import { api, clearToken } from '@/api';
+import type { HubSettings } from '@/api/types';
+import { PageHeader } from '@/components/layout/PageHeader';
+import { getErrorMessage } from '@/lib/error';
+import { textToUpstreamDns, upstreamDnsToText } from '@/lib/hubConfig';
+import { downloadBlob } from '@/lib/download';
+import { usePageLayoutStyles } from '@/styles/pageLayout';
 
 const useStyles = makeStyles({
   card: {
@@ -80,24 +81,34 @@ export default function SettingsPage() {
   const [resetting, setResetting] = useState(false);
 
   const load = useCallback(async () => {
-    const s = await api.getSettings();
+    const settings = await api.getSettings();
     setReadOnly({
-      endpoint: s.endpoint,
-      subnet: s.subnet,
-      admin_username: s.admin_username,
+      endpoint: settings.endpoint,
+      subnet: settings.subnet,
+      admin_username: settings.admin_username,
     });
-    setListenPort(String(s.listen_port));
-    setMtu(String(s.mtu));
-    setStatusInterval(String(s.status_interval));
-    setUpstreamDns(upstreamDnsToText(s.upstream_dns));
+    setListenPort(String(settings.listen_port));
+    setMtu(String(settings.mtu));
+    setStatusInterval(String(settings.status_interval));
+    setUpstreamDns(upstreamDnsToText(settings.upstream_dns));
     setLoading(false);
   }, []);
 
   useEffect(() => {
-    load().catch((err) => {
-      setError(err instanceof Error ? err.message : 'Failed to load settings');
-      setLoading(false);
-    });
+    let cancelled = false;
+    void (async () => {
+      try {
+        await load();
+      } catch (err) {
+        if (!cancelled) {
+          setError(getErrorMessage(err, 'Failed to load settings'));
+          setLoading(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [load]);
 
   const handleSave = async () => {
@@ -125,13 +136,13 @@ export default function SettingsPage() {
         upstream_dns: textToUpstreamDns(upstreamDns),
       });
 
-      if (result.restart_required) {
-        setMessage('Settings saved. Network stack was restarted to apply changes.');
-      } else {
-        setMessage('Settings saved.');
-      }
+      setMessage(
+        result.restart_required
+          ? 'Settings saved. Network stack was restarted to apply changes.'
+          : 'Settings saved.',
+      );
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Save failed');
+      setError(getErrorMessage(err, 'Save failed'));
     } finally {
       setSaving(false);
     }
@@ -156,7 +167,7 @@ export default function SettingsPage() {
       clearToken();
       window.location.href = '/setup';
     } catch (err) {
-      setResetError(err instanceof Error ? err.message : 'Reset failed');
+      setResetError(getErrorMessage(err, 'Reset failed'));
       setResetting(false);
     }
   };
@@ -167,7 +178,7 @@ export default function SettingsPage() {
       const blob = await api.exportDatabase();
       downloadBlob('wirehub.db', blob);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Export failed');
+      setError(getErrorMessage(err, 'Export failed'));
     }
   };
 
@@ -199,19 +210,19 @@ export default function SettingsPage() {
           label="WireGuard port"
           hint="UDP port in peer configs (default 8443). Changing this restarts the hub network stack."
         >
-          <Input type="number" value={listenPort} onChange={(_, d) => setListenPort(d.value)} />
+          <Input type="number" value={listenPort} onChange={(_, data) => setListenPort(data.value)} />
         </Field>
         <Field label="MTU" hint="Changing MTU restarts the hub network stack">
-          <Input type="number" value={mtu} onChange={(_, d) => setMtu(d.value)} />
+          <Input type="number" value={mtu} onChange={(_, data) => setMtu(data.value)} />
         </Field>
         <Field label="Status interval (seconds)" hint="How often peer traffic stats are polled">
-          <Input type="number" value={statusInterval} onChange={(_, d) => setStatusInterval(d.value)} />
+          <Input type="number" value={statusInterval} onChange={(_, data) => setStatusInterval(data.value)} />
         </Field>
         <Field
           label="Additional DNS servers"
           hint="Listed in client configs after the hub DNS IP; one address per line"
         >
-          <Textarea rows={3} value={upstreamDns} onChange={(_, d) => setUpstreamDns(d.value)} />
+          <Textarea rows={3} value={upstreamDns} onChange={(_, data) => setUpstreamDns(data.value)} />
         </Field>
       </Card>
 
@@ -221,17 +232,17 @@ export default function SettingsPage() {
           <Input
             type="password"
             value={currentPassword}
-            onChange={(_, d) => setCurrentPassword(d.value)}
+            onChange={(_, data) => setCurrentPassword(data.value)}
           />
         </Field>
         <Field label="New password" hint="At least 8 characters">
-          <Input type="password" value={newPassword} onChange={(_, d) => setNewPassword(d.value)} />
+          <Input type="password" value={newPassword} onChange={(_, data) => setNewPassword(data.value)} />
         </Field>
         <Field label="Confirm new password">
           <Input
             type="password"
             value={confirmPassword}
-            onChange={(_, d) => setConfirmPassword(d.value)}
+            onChange={(_, data) => setConfirmPassword(data.value)}
           />
         </Field>
       </Card>
@@ -273,8 +284,8 @@ export default function SettingsPage() {
 
       <Dialog
         open={resetOpen}
-        onOpenChange={(_, d) => {
-          if (!d.open) closeResetDialog();
+        onOpenChange={(_, data) => {
+          if (!data.open) closeResetDialog();
         }}
       >
         <DialogSurface>
@@ -289,7 +300,7 @@ export default function SettingsPage() {
                   type="password"
                   value={resetPassword}
                   autoComplete="current-password"
-                  onChange={(_, d) => setResetPassword(d.value)}
+                  onChange={(_, data) => setResetPassword(data.value)}
                 />
               </Field>
               {resetError && <Text className={styles.error}>{resetError}</Text>}

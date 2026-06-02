@@ -1,5 +1,4 @@
 import {
-  Badge,
   Button,
   Card,
   Dialog,
@@ -22,18 +21,21 @@ import {
   PeopleTeamRegular,
   PowerRegular,
 } from '@fluentui/react-icons';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import {
   api,
   formatBytes,
   formatHandshake,
-  DNS_DOMAIN,
-} from '../api/client';
-import type { PeerGroup, PeerStatus } from '../api/client';
-import ConfigDialog from '../components/ConfigDialog';
-import PageHeader from '../components/PageHeader';
-import { useDestructiveConfirm } from '../hooks/useDestructiveConfirm';
-import { usePageLayoutStyles } from '../styles/pageLayout';
+} from '@/api';
+import type { PeerGroup, PeerStatus } from '@/api/types';
+import { DNS_DOMAIN } from '@/constants';
+import { ConfigDialog } from '@/components/peers/ConfigDialog';
+import { PeerStatusBadge } from '@/components/peers/PeerStatusBadge';
+import { PageHeader } from '@/components/layout/PageHeader';
+import { useDestructiveConfirm } from '@/hooks/useDestructiveConfirm';
+import { usePeerConfig, runPeerAction } from '@/hooks/usePeerConfig';
+import { usePolling } from '@/hooks/usePolling';
+import { usePageLayoutStyles } from '@/styles/pageLayout';
 
 const useStyles = makeStyles({
   list: {
@@ -111,12 +113,11 @@ export default function UsersPage() {
   const styles = useStyles();
   const pageLayout = usePageLayoutStyles();
   const { confirmDeletePeer } = useDestructiveConfirm();
+  const peerConfig = usePeerConfig();
+
   const [peers, setPeers] = useState<PeerStatus[]>([]);
   const [groups, setGroups] = useState<PeerGroup[]>([]);
   const [loading, setLoading] = useState(true);
-  const [configOpen, setConfigOpen] = useState(false);
-  const [configText, setConfigText] = useState('');
-  const [configFile, setConfigFile] = useState('peer.conf');
   const [moveOpen, setMoveOpen] = useState(false);
   const [movePeer, setMovePeer] = useState<PeerStatus | null>(null);
   const [moveGroupId, setMoveGroupId] = useState('');
@@ -131,18 +132,7 @@ export default function UsersPage() {
       .catch(() => setLoading(false));
   }, []);
 
-  useEffect(() => {
-    load();
-    const t = setInterval(load, 5000);
-    return () => clearInterval(t);
-  }, [load]);
-
-  const showConfig = async (id: number) => {
-    const { config, filename } = await api.getPeerConfig(id);
-    setConfigText(config);
-    setConfigFile(filename);
-    setConfigOpen(true);
-  };
+  usePolling(load, 5000);
 
   const openMove = (peer: PeerStatus) => {
     setMovePeer(peer);
@@ -160,12 +150,10 @@ export default function UsersPage() {
 
   const handleDeletePeer = async (peer: PeerStatus) => {
     if (!(await confirmDeletePeer(peer.name))) return;
-    try {
+    await runPeerAction(async () => {
       await api.deletePeer(peer.id);
       load();
-    } catch (e) {
-      alert(e instanceof Error ? e.message : 'Delete failed');
-    }
+    });
   };
 
   if (loading) return <Spinner label="Loading users..." />;
@@ -183,58 +171,57 @@ export default function UsersPage() {
         </div>
       ) : (
         <div className={styles.list}>
-          {peers.map((p) => (
-              <Card key={p.id} className={styles.userCard}>
-                <div className={styles.identity}>
-                  <div className={styles.nameRow}>
-                    <Text weight="semibold">{p.name}</Text>
-                    <Badge
-                      size="small"
-                      appearance={p.enabled && p.online ? 'filled' : 'outline'}
-                      color={!p.enabled ? 'danger' : p.online ? 'success' : 'informative'}
-                    >
-                      {!p.enabled ? 'Disabled' : p.online ? 'Online' : 'Offline'}
-                    </Badge>
-                  </div>
-                  <span className={styles.groupTag}>
-                    <PeopleTeamRegular fontSize={14} />
-                    {p.group_name || '—'}
-                  </span>
+          {peers.map((peer) => (
+            <Card key={peer.id} className={styles.userCard}>
+              <div className={styles.identity}>
+                <div className={styles.nameRow}>
+                  <Text weight="semibold">{peer.name}</Text>
+                  <PeerStatusBadge enabled={peer.enabled} online={peer.online} />
                 </div>
-                <div className={styles.stat}>
-                  <span className={styles.statLabel}>WireGuard IP</span>
-                  <span className={`${styles.statValue} ${styles.mono}`}>{p.wg_ip}</span>
-                </div>
-                <div className={styles.stat}>
-                  <span className={styles.statLabel}>DNS</span>
-                  <span className={`${styles.statValue} ${styles.mono}`}>{p.fqdn || `${p.name}.${DNS_DOMAIN}`}</span>
-                </div>
-                <div className={styles.stat}>
-                  <span className={styles.statLabel}>Last handshake</span>
-                  <span className={styles.statValue}>{formatHandshake(p.last_handshake)}</span>
-                </div>
-                <div className={styles.stat}>
-                  <span className={styles.statLabel}>Traffic</span>
-                  <span className={styles.statValue}>{formatBytes(p.rx_bytes)} / {formatBytes(p.tx_bytes)}</span>
-                </div>
-                <div className={styles.actions}>
-                  <Button size="small" icon={<ArrowDownloadRegular />} onClick={() => showConfig(p.id)}>
-                    Config
-                  </Button>
-                  <Button size="small" onClick={() => openMove(p)}>Group</Button>
-                  <Button size="small" icon={<PowerRegular />} onClick={() => api.togglePeer(p.id).then(load)}>
-                    Toggle
-                  </Button>
-                  <Button size="small" icon={<DeleteRegular />} appearance="subtle" onClick={() => void handleDeletePeer(p)} />
-                </div>
-              </Card>
-            ))}
+                <span className={styles.groupTag}>
+                  <PeopleTeamRegular fontSize={14} />
+                  {peer.group_name || '—'}
+                </span>
+              </div>
+              <div className={styles.stat}>
+                <span className={styles.statLabel}>WireGuard IP</span>
+                <span className={`${styles.statValue} ${styles.mono}`}>{peer.wg_ip}</span>
+              </div>
+              <div className={styles.stat}>
+                <span className={styles.statLabel}>DNS</span>
+                <span className={`${styles.statValue} ${styles.mono}`}>{peer.fqdn || `${peer.name}.${DNS_DOMAIN}`}</span>
+              </div>
+              <div className={styles.stat}>
+                <span className={styles.statLabel}>Last handshake</span>
+                <span className={styles.statValue}>{formatHandshake(peer.last_handshake)}</span>
+              </div>
+              <div className={styles.stat}>
+                <span className={styles.statLabel}>Traffic</span>
+                <span className={styles.statValue}>{formatBytes(peer.rx_bytes)} / {formatBytes(peer.tx_bytes)}</span>
+              </div>
+              <div className={styles.actions}>
+                <Button size="small" icon={<ArrowDownloadRegular />} onClick={() => void peerConfig.showConfig(peer.id)}>
+                  Config
+                </Button>
+                <Button size="small" onClick={() => openMove(peer)}>Group</Button>
+                <Button size="small" icon={<PowerRegular />} onClick={() => api.togglePeer(peer.id).then(load)}>
+                  Toggle
+                </Button>
+                <Button size="small" icon={<DeleteRegular />} appearance="subtle" onClick={() => void handleDeletePeer(peer)} />
+              </div>
+            </Card>
+          ))}
         </div>
       )}
 
-      <ConfigDialog open={configOpen} config={configText} filename={configFile} onClose={() => setConfigOpen(false)} />
+      <ConfigDialog
+        open={peerConfig.open}
+        config={peerConfig.config}
+        filename={peerConfig.filename}
+        onClose={peerConfig.close}
+      />
 
-      <Dialog open={moveOpen} onOpenChange={(_, d) => setMoveOpen(d.open)}>
+      <Dialog open={moveOpen} onOpenChange={(_, data) => setMoveOpen(data.open)}>
         <DialogSurface>
           <DialogBody>
             <DialogTitle>Change group</DialogTitle>
@@ -243,16 +230,16 @@ export default function UsersPage() {
                 <Input value={movePeer?.name ?? ''} readOnly />
               </Field>
               <Field label="Group">
-                <Select value={moveGroupId} onChange={(_, d) => setMoveGroupId(d.value)}>
-                  {groups.map((g) => (
-                    <option key={g.id} value={String(g.id)}>{g.name}</option>
+                <Select value={moveGroupId} onChange={(_, data) => setMoveGroupId(data.value)}>
+                  {groups.map((group) => (
+                    <option key={group.id} value={String(group.id)}>{group.name}</option>
                   ))}
                 </Select>
               </Field>
             </DialogContent>
             <DialogActions>
               <Button onClick={() => setMoveOpen(false)}>Cancel</Button>
-              <Button appearance="primary" onClick={handleMove}>Save</Button>
+              <Button appearance="primary" onClick={() => void handleMove()}>Save</Button>
             </DialogActions>
           </DialogBody>
         </DialogSurface>

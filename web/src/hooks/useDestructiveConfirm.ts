@@ -1,5 +1,5 @@
 import { useCallback } from 'react';
-import { useConfirm } from '../components/ConfirmContext';
+import { useConfirm } from '@/components/common/useConfirm';
 
 export function useDestructiveConfirm() {
   const { confirm } = useConfirm();

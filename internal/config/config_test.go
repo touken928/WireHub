@@ -25,8 +25,8 @@ func TestParseFlagsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Port != DefaultPort {
-		t.Fatalf("port = %d, want %d", cfg.Port, DefaultPort)
+	if cfg.Port != DefaultWebPort {
+		t.Fatalf("port = %d, want %d", cfg.Port, DefaultWebPort)
 	}
 	if cfg.Bind != DefaultBind {
 		t.Fatalf("bind = %q, want %q", cfg.Bind, DefaultBind)
