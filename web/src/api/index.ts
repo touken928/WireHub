@@ -6,6 +6,8 @@ import type {
   Peer,
   PeerGroup,
   PeerStatus,
+  PortForward,
+  PortForwardList,
   Settings,
   SetupStatus,
 } from '@/api/types';
@@ -104,6 +106,31 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ groups }),
     }),
+
+  listPortForwards: () => request<PortForwardList>('/forwards'),
+  createPortForward: (body: {
+    name?: string;
+    listen_port: number;
+    protocol: string;
+    target_host: string;
+    target_port: number;
+    enabled?: boolean;
+  }) =>
+    request<PortForward>('/forwards', { method: 'POST', body: JSON.stringify(body) }),
+  updatePortForward: (
+    id: number,
+    body: {
+      name?: string;
+      listen_port: number;
+      protocol: string;
+      target_host: string;
+      target_port: number;
+      enabled?: boolean;
+    },
+  ) =>
+    request<PortForward>(`/forwards/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  deletePortForward: (id: number) =>
+    request<{ ok: boolean }>(`/forwards/${id}`, { method: 'DELETE' }),
 
   listPeers: () => request<Peer[]>('/peers'),
   createPeer: (body: { name: string; group_id: number }) =>

@@ -93,6 +93,13 @@ func (h *Hub) StopStatusPoller() {
 	}
 }
 
+func (h *Hub) SyncPortForwards() error {
+	if h.network == nil {
+		return nil
+	}
+	return h.network.SyncPortForwards()
+}
+
 func (h *Hub) pollPeerStats() {
 	wgMgr, err := h.wgManager()
 	if err != nil {

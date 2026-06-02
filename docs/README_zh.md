@@ -27,6 +27,7 @@
 - **内置 DNS** — `{name}.wirehub`；`www.{name}.wirehub` 为别名（`www` 指向 Hub）
 - **组访问控制** — 每个用户归属一个组；组间互通由管理员在 UI 中配置（默认拒绝）
 - **在线状态** — 最近握手时间、收发流量、用量图表
+- **端口转发** — 在 Hub VPN IP 上暴露 TCP/UDP 端口，代理到 Peer、域名或外部地址
 - **设置与备份** — 修改 Hub 运行参数、导出/导入完整 `wirehub.db`、密码确认的 Reset
 - **用户态 WireGuard** — [wireguard-go](https://github.com/WireGuard/wireguard-go) + gVisor netstack，Hub 侧无需内核模块
 
@@ -58,6 +59,7 @@ flowchart TB
 | **Dashboard** | Hub 状态、WireGuard Endpoint、实时流量图 |
 | **Groups** | React Flow 拓扑 — 组间拖线表示允许互通；点击组管理成员 |
 | **Users** | 全部 Peer 及在线状态、配置下载、启用/禁用、删除 |
+| **Forward** | Hub VPN IP 上的 TCP/UDP 转发 → Peer、`*.wirehub` 或外部主机 |
 | **Settings** | 可改 Hub 参数、修改密码、导出数据库、危险区 Reset |
 
 删除用户/组、断开组间连线、Reset Hub 等破坏性操作需在界面中确认；Reset 还需输入管理员密码。
@@ -163,6 +165,20 @@ JWT 签名密钥在首次启动时自动生成，保存在 `{data-dir}/.jwt_secr
 修改 **MTU** 会重启 VPN 栈。**Reset** 后回到配置向导。
 
 初始化后不可在 UI 修改的项：公网 Endpoint、VPN 网段、管理员用户名（仅在向导或导入数据库时确定）。
+
+## 端口转发
+
+侧栏 **Forward** 管理规则：在 **Hub VPN IP**（设置中的 `hub_ip`）上监听，将流量转到目标主机与端口。Peer 经隧道访问 `{hub_ip}:{监听端口}`。
+
+| 目标类型 | 示例 | 解析方式 |
+|----------|------|----------|
+| Peer | `alice` 或 `alice.wirehub` | Hub 权威 DNS |
+| 公网域名 | `db.example.com` | **Settings** 中的额外 DNS（A 记录） |
+| IPv4 地址 | `10.0.0.5` | 直接使用（仅 IPv4） |
+
+无点号的单标签（如 `app`）视为 Peer 名（`app.wirehub`），不是公网主机名。监听端口 `53` 与 Hub 的 `--port` 保留不可用。在列表中切换 **Enabled** 即可生效，无需重启 VPN 栈。
+
+REST：`GET/POST /api/forwards`，`PUT/DELETE /api/forwards/:id`。
 
 ## 命令行参数
 

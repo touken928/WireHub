@@ -1,17 +1,16 @@
 import { Spinner } from '@fluentui/react-components';
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
-import { api, getToken } from '@/api';
+import { getToken } from '@/api';
+import { useSetupStatus } from '@/app/setupStatusContext';
 
 export function SetupGate({ children }: { children: ReactNode }) {
-  const [configured, setConfigured] = useState<boolean | null>(null);
+  const { configured, refresh } = useSetupStatus();
   const { pathname } = useLocation();
 
   useEffect(() => {
-    api.getSetupStatus()
-      .then((status) => setConfigured(status.configured))
-      .catch(() => setConfigured(true));
-  }, []);
+    void refresh();
+  }, [pathname, refresh]);
 
   if (configured === null) {
     return <Spinner label="Loading..." />;

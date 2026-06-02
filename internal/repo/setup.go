@@ -125,6 +125,9 @@ func (s *Store) ResetAll() error {
 		if err := tx.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&Settings{}).Error; err != nil {
 			return err
 		}
+		if err := tx.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&PortForward{}).Error; err != nil {
+			return err
+		}
 		return nil
 	})
 }

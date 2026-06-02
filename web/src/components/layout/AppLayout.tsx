@@ -10,6 +10,7 @@ import {
   BoardRegular,
   PeopleTeamRegular,
   PersonRegular,
+  ArrowRoutingRegular,
   SettingsRegular,
   SignOutRegular,
 } from '@fluentui/react-icons';
@@ -125,6 +126,7 @@ const NAV_ITEMS = [
   { path: '/', label: 'Dashboard', icon: BoardRegular, exact: true },
   { path: '/groups', label: 'Groups', icon: PeopleTeamRegular, exact: false },
   { path: '/users', label: 'Users', icon: PersonRegular, exact: false },
+  { path: '/forward', label: 'Forward', icon: ArrowRoutingRegular, exact: false },
   { path: '/settings', label: 'Settings', icon: SettingsRegular, exact: false },
 ] as const;
 

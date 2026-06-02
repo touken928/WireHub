@@ -23,9 +23,10 @@ type Stack struct {
 	repo        *repo.Store
 	hub         *service.Hub
 	httpHandler http.Handler
-	wgMgr       *wg.Manager
-	dnsServer   *vpndns.Server
-	tunnelSrv   *http.Server
+	wgMgr        *wg.Manager
+	dnsServer    *vpndns.Server
+	tunnelSrv    *http.Server
+	portProxies  *filter.PortProxyManager
 }
 
 func NewStack(cfg *config.RuntimeConfig, st *repo.Store, hub *service.Hub, handler http.Handler) *Stack {
@@ -108,8 +109,65 @@ func (s *Stack) Start() error {
 	s.wgMgr = wgMgr
 	s.dnsServer = dnsServer
 	s.tunnelSrv = tunnelSrv
+
+	if err := s.applyPortForwards(settings.HubIP); err != nil {
+		s.hub.DetachNetwork()
+		_ = dnsServer.Stop()
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = tunnelSrv.Shutdown(shutCtx)
+		shutCancel()
+		_ = wgMgr.Close()
+		s.wgMgr = nil
+		s.dnsServer = nil
+		s.tunnelSrv = nil
+		return fmt.Errorf("port forwards: %w", err)
+	}
+
 	log.Printf("WireHub VPN stack started (WG UDP port %d, client endpoint port %d)", wgPort, settings.ListenPort)
 	return nil
+}
+
+func (s *Stack) HubListenPort() int {
+	return s.cfg.Port
+}
+
+func (s *Stack) SyncPortForwards() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wgMgr == nil || s.dnsServer == nil {
+		return nil
+	}
+	settings, err := s.repo.GetSettings()
+	if err != nil {
+		return err
+	}
+	return s.applyPortForwards(settings.HubIP)
+}
+
+func (s *Stack) applyPortForwards(hubIP string) error {
+	rules, err := s.repo.ListPortForwards()
+	if err != nil {
+		return err
+	}
+	if s.portProxies == nil {
+		m, err := filter.NewPortProxyManager(s.wgMgr.Net(), hubIP, s.dnsServer)
+		if err != nil {
+			return err
+		}
+		s.portProxies = m
+	}
+	runtimeRules := make([]filter.PortForwardRule, 0, len(rules))
+	for _, r := range rules {
+		runtimeRules = append(runtimeRules, filter.PortForwardRule{
+			ID:         r.ID,
+			ListenPort: r.ListenPort,
+			Protocol:   r.Protocol,
+			TargetHost: r.TargetHost,
+			TargetPort: r.TargetPort,
+			Enabled:    r.Enabled,
+		})
+	}
+	return s.portProxies.Apply(runtimeRules)
 }
 
 func (s *Stack) Stop() error {
@@ -136,6 +194,11 @@ func (s *Stack) Stop() error {
 		_ = s.tunnelSrv.Shutdown(ctx)
 		cancel()
 		s.tunnelSrv = nil
+	}
+
+	if s.portProxies != nil {
+		s.portProxies.Stop()
+		s.portProxies = nil
 	}
 
 	s.closeWireGuard()

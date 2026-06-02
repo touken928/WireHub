@@ -5,4 +5,6 @@ type NetworkRuntime interface {
 	Start() error
 	Stop() error
 	ReloadSettings() error
+	SyncPortForwards() error
+	HubListenPort() int
 }

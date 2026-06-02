@@ -10,8 +10,9 @@ import {
 import { ArrowUploadRegular } from '@fluentui/react-icons';
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api, setToken } from '@/api';
+import { api, getToken, setToken } from '@/api';
 import type { SetupDefaults } from '@/api/types';
+import { useSetupStatus } from '@/app/setupStatusContext';
 import { AuthLayout } from '@/components/layout/AuthLayout';
 import { getErrorMessage } from '@/lib/error';
 import { textToUpstreamDns } from '@/lib/hubConfig';
@@ -20,8 +21,10 @@ import { useAuthLayoutStyles } from '@/styles/authLayout';
 export default function SetupPage() {
   const styles = useAuthLayoutStyles();
   const navigate = useNavigate();
+  const { refresh } = useSetupStatus();
   const fileRef = useRef<HTMLInputElement>(null);
   const [defaults, setDefaults] = useState<SetupDefaults | null>(null);
+  const [loadError, setLoadError] = useState('');
   const [endpoint, setEndpoint] = useState('');
   const [subnet, setSubnet] = useState('');
   const [adminUsername, setAdminUsername] = useState('');
@@ -36,21 +39,30 @@ export default function SetupPage() {
   const [importing, setImporting] = useState(false);
 
   useEffect(() => {
-    api.getSetupStatus().then((status) => {
-      if (status.configured) {
-        navigate('/login', { replace: true });
-        return;
-      }
-      setDefaults(status.defaults);
-      setSubnet(status.defaults.subnet);
-      setAdminUsername(status.defaults.admin_username);
-      setMtu(String(status.defaults.mtu));
-      setStatusInterval(String(status.defaults.status_interval));
-      setUpstreamDns(status.defaults.upstream_dns.join('\n'));
-    }).catch((err) => {
-      setError(getErrorMessage(err, 'Failed to load setup defaults'));
-    });
-  }, [navigate]);
+    let cancelled = false;
+    refresh()
+      .then((status) => {
+        if (cancelled) return;
+        if (status.configured) {
+          navigate(getToken() ? '/' : '/login', { replace: true });
+          return;
+        }
+        setDefaults(status.defaults);
+        setSubnet(status.defaults.subnet);
+        setAdminUsername(status.defaults.admin_username);
+        setMtu(String(status.defaults.mtu));
+        setStatusInterval(String(status.defaults.status_interval));
+        setUpstreamDns(status.defaults.upstream_dns.join('\n'));
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setLoadError(getErrorMessage(err, 'Failed to load setup defaults'));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [navigate, refresh]);
 
   const handleImport = async (file: File) => {
     setImporting(true);
@@ -58,6 +70,7 @@ export default function SetupPage() {
     setImportOk('');
     try {
       await api.importDatabase(file);
+      await refresh();
       setImportOk('Database imported. Sign in with your existing admin account.');
       setTimeout(() => navigate('/login', { replace: true }), 800);
     } catch (err) {
@@ -84,6 +97,7 @@ export default function SetupPage() {
         upstream_dns: textToUpstreamDns(upstreamDns),
       });
       setToken(token);
+      await refresh();
       navigate('/', { replace: true });
     } catch (err) {
       setError(getErrorMessage(err, 'Setup failed'));
@@ -91,6 +105,17 @@ export default function SetupPage() {
       setLoading(false);
     }
   };
+
+  if (loadError) {
+    return (
+      <div className={styles.page}>
+        <Text className={styles.error}>{loadError}</Text>
+        <Button appearance="primary" onClick={() => window.location.reload()}>
+          Retry
+        </Button>
+      </div>
+    );
+  }
 
   if (!defaults) {
     return (

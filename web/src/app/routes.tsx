@@ -9,6 +9,7 @@ const SetupPage = lazy(() => import('@/pages/SetupPage'));
 const DashboardPage = lazy(() => import('@/pages/DashboardPage'));
 const GroupsPage = lazy(() => import('@/pages/GroupsPage'));
 const UsersPage = lazy(() => import('@/pages/UsersPage'));
+const ForwardPage = lazy(() => import('@/pages/ForwardPage'));
 const SettingsPage = lazy(() => import('@/pages/SettingsPage'));
 
 export function AppRoutes() {
@@ -28,6 +29,7 @@ export function AppRoutes() {
           <Route index element={<DashboardPage />} />
           <Route path="groups" element={<GroupsPage />} />
           <Route path="users" element={<UsersPage />} />
+          <Route path="forward" element={<ForwardPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />

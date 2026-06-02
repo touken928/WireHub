@@ -59,3 +59,14 @@ type DNSRecord struct {
 	PeerID   *uint  `json:"peer_id"`
 	Manual   bool   `json:"manual"`
 }
+
+// PortForward exposes a TCP/UDP port on the hub VPN address and proxies to a target host:port.
+type PortForward struct {
+	ID         uint   `gorm:"primaryKey" json:"id"`
+	Name       string `json:"name"`
+	ListenPort int    `gorm:"not null;uniqueIndex:idx_forward_listen" json:"listen_port"`
+	Protocol   string `gorm:"not null;uniqueIndex:idx_forward_listen" json:"protocol"` // tcp or udp
+	TargetHost string `gorm:"not null" json:"target_host"`
+	TargetPort int    `gorm:"not null" json:"target_port"`
+	Enabled    bool   `gorm:"not null" json:"enabled"`
+}

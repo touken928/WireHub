@@ -15,7 +15,7 @@ WireHub is a single-binary WireGuard hub: userspace `wireguard-go` + gVisor nets
 ```
 cmd/wirehub/          # composition root
 internal/
-  domain/             # pure rules: HubConfig, group ACL, hostnames, client .conf template
+  domain/             # pure rules: HubConfig, group ACL, hostnames, port-forward targets, client .conf
   service/            # use cases: Hub (peers, stats poller, VPN attach, ACL sync)
   server/             # HTTP handlers + routes (Gin); embeds *service.Hub
   repo/               # GORM/SQLite persistence
@@ -23,7 +23,7 @@ internal/
     stack.go          # lifecycle (was runtime.Network)
     wg/               # WireGuard manager
     dns/              # authoritative *.wirehub DNS on netstack
-    filter/           # TUN ACL + gVisor forwarding + tunnel HTTP
+    filter/           # TUN ACL + gVisor forwarding + tunnel HTTP + hub port proxy (portproxy.go)
   auth/               # JWT login middleware
   password/           # bcrypt helpers (shared by repo + auth; avoids import cycles)
   config/             # CLI flags, defaults, subnet/DNS helpers
@@ -87,8 +87,9 @@ Frontend build output: `internal/static/dist` (Vite `outDir`).
 - **Domain logic** stays in `internal/domain` (no GORM, no Gin).
 - **Group ACL:** `domain.BuildAccessRules` → `vpn/filter.RuleSet` → `wg.Manager.SetAccessRules`.
 - **Hostnames:** `domain.ValidateHostname`, `domain.PeerFQDN` — not a separate package.
+- **Port forwards:** `repo.PortForward`; validate with `domain.ValidateForward*`; resolve targets via `vpn/dns.Server.ResolveHost` (peer / `*.wirehub` / upstream A / IPv4). Runtime proxy in `vpn/filter.PortProxyManager`; `vpn.Stack.SyncPortForwards()` after CRUD (no full stack reload). API: `handlers_forwards.go`, routes under `/api/forwards`.
 - **Passwords:** `password.Hash` / `password.Verify` only; never import `auth` from `repo`.
-- **VPN lifecycle:** `vpn.Stack` implements `service.NetworkRuntime`; call `service.Hub.AttachNetwork` / `DetachNetwork` from stack start/stop.
+- **VPN lifecycle:** `vpn.Stack` implements `service.NetworkRuntime` (`SyncPortForwards`, `HubListenPort`); call `service.Hub.AttachNetwork` / `DetachNetwork` from stack start/stop.
 - Prefer minimal diffs; match existing naming and file placement.
 - Do not commit unless the user asks. Do not commit `data/`, secrets, or local `.db` files.
 
@@ -118,7 +119,7 @@ web/src/
 1. Model/API types → `repo` + `server` handlers.
 2. Orchestration (DB + WG + DNS + ACL) → `service`.
 3. Validation / portable config / ACL math → `domain`.
-4. New REST routes → `server/router.go` + handler file by area (`handlers_peers.go`, `handlers_groups.go`, …).
+4. New REST routes → `server/router.go` + handler file by area (`handlers_peers.go`, `handlers_groups.go`, `handlers_forwards.go`, …).
 5. Update `web/src/api/types.ts` and pages if the UI exposes the feature.
 6. Run `go test ./...` and `cd web && npm run build` before finishing.
 

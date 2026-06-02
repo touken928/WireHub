@@ -27,6 +27,7 @@
 - **Built-in DNS** — `{name}.wirehub`; `www.{name}.wirehub` is an alias (`www` → hub)
 - **Group-based access control** — peers belong to one group; cross-group access is admin-controlled (default deny)
 - **Live status** — last handshake, RX/TX bytes, network usage charts
+- **Port forwarding** — expose TCP/UDP ports on the hub VPN IP and proxy to a peer, hostname, or external target
 - **Settings & backup** — edit runtime hub options, export/import full `wirehub.db`, password-protected reset
 - **Userspace WireGuard** — [wireguard-go](https://github.com/WireGuard/wireguard-go) + gVisor netstack; no kernel module on the hub
 
@@ -58,6 +59,7 @@ After setup, the hub serves tunnel web UI and DNS on the VPN address. Peer-to-pe
 | **Dashboard** | Hub status, WireGuard endpoint, live traffic chart |
 | **Groups** | React Flow graph — drag links between groups for cross-group access; click a group to manage members |
 | **Users** | All peers with online status, config download, enable/disable, delete |
+| **Forward** | TCP/UDP port forwards on the hub VPN IP → peer, `*.wirehub`, or external host |
 | **Settings** | Editable hub options, password change, database export, danger-zone reset |
 
 Destructive actions (delete user/group, disconnect link, reset hub) require confirmation in the UI. Reset also requires your admin password.
@@ -163,6 +165,20 @@ Open **Settings** in the sidebar.
 Changing **MTU** restarts the VPN stack. **Reset** returns to setup mode.
 
 Fields fixed after setup: public endpoint, VPN subnet, admin username (set only in the wizard or via database import).
+
+## Port forwarding
+
+Open **Forward** in the sidebar. Each rule listens on the **hub VPN IP** (`hub_ip` from settings) and proxies to a target host and port. Peers reach the service at `{hub_ip}:{listen_port}` over the tunnel.
+
+| Target | Example | Resolution |
+|--------|---------|------------|
+| Peer | `alice` or `alice.wirehub` | Hub authoritative DNS |
+| External hostname | `db.example.com` | Additional DNS from **Settings** (A record) |
+| IPv4 address | `10.0.0.5` | Used as-is (IPv4 only) |
+
+A single label without a dot (e.g. `app`) is treated as a peer name (`app.wirehub`), not a public hostname. Listen ports `53` and the hub `--port` are reserved. Toggle **Enabled** in the list; changes apply without restarting the VPN stack.
+
+REST: `GET/POST /api/forwards`, `PUT/DELETE /api/forwards/:id`.
 
 ## CLI flags
 

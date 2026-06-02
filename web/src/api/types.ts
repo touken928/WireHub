@@ -89,6 +89,23 @@ export interface Peer {
   created_at: string;
 }
 
+export interface PortForward {
+  id: number;
+  name: string;
+  listen_port: number;
+  protocol: 'tcp' | 'udp';
+  target_host: string;
+  target_port: number;
+  enabled: boolean;
+  target_display: string;
+}
+
+export interface PortForwardList {
+  rules: PortForward[];
+  hub_ip: string;
+  hub_port: number;
+}
+
 export interface PeerStatus {
   id: number;
   name: string;

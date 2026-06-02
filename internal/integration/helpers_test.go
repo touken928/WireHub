@@ -143,6 +143,49 @@ func peerHTTPGet(tnet *netstack.Net, url string, timeout time.Duration) (string,
 	return string(body), nil
 }
 
+func startPeerUDPEcho(t *testing.T, tnet *netstack.Net, ip string, port int) func() {
+	t.Helper()
+	pc, err := tnet.ListenUDP(&net.UDPAddr{IP: net.ParseIP(ip), Port: port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, addr, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if _, err := pc.WriteTo(buf[:n], addr); err != nil {
+				return
+			}
+		}
+	}()
+	return func() { _ = pc.Close() }
+}
+
+func udpRoundTrip(tnet *netstack.Net, addr, payload string) (string, error) {
+	raddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return "", err
+	}
+	conn, err := tnet.DialUDP(nil, raddr)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte(payload)); err != nil {
+		return "", err
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 2048)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return "", err
+	}
+	return string(buf[:n]), nil
+}
+
 func startPeerHTTPServer(t *testing.T, tnet *netstack.Net, ip string, port int, response string) func() {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -164,6 +207,40 @@ func applyAccessRules(hubMgr *wg.Manager, st *repo.Store) error {
 	}
 	hubMgr.SetAccessRules(rules)
 	return nil
+}
+
+func toPortForwardRules(rules []repo.PortForward) []filter.PortForwardRule {
+	out := make([]filter.PortForwardRule, 0, len(rules))
+	for _, r := range rules {
+		out = append(out, filter.PortForwardRule{
+			ID:         r.ID,
+			ListenPort: r.ListenPort,
+			Protocol:   r.Protocol,
+			TargetHost: r.TargetHost,
+			TargetPort: r.TargetPort,
+			Enabled:    r.Enabled,
+		})
+	}
+	return out
+}
+
+func (env *peerMeshEnv) syncPortForwards(t *testing.T) {
+	t.Helper()
+	if env.portProxy == nil {
+		mgr, err := filter.NewPortProxyManager(env.wgMgr.Net(), env.hubIP, env.dnsServer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		env.portProxy = mgr
+	}
+	rules, err := env.store.ListPortForwards()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.portProxy.Apply(toPortForwardRules(rules)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
 }
 
 func buildAccessRulesFromStore(st *repo.Store) (*filter.RuleSet, error) {
