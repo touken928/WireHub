@@ -82,7 +82,7 @@ const useStyles = makeStyles({
     overflowX: 'auto',
   },
   table: {
-    minWidth: '640px',
+    minWidth: '720px',
   },
   colActions: {
     width: '88px',
@@ -92,7 +92,27 @@ const useStyles = makeStyles({
     width: '72px',
   },
   colListen: {
-    width: '120px',
+    minWidth: '200px',
+    paddingRight: tokens.spacingHorizontalL,
+  },
+  colTarget: {
+    minWidth: '200px',
+  },
+  colArrow: {
+    width: '32px',
+    textAlign: 'center',
+    color: tokens.colorNeutralForeground3,
+    paddingLeft: 0,
+    paddingRight: 0,
+  },
+  endpoint: {
+    whiteSpace: 'nowrap',
+  },
+  reservedPorts: {
+    display: 'inline-flex',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: '6px',
   },
   actions: {
     display: 'flex',
@@ -280,8 +300,12 @@ export default function ForwardPage() {
       {hubIP && (
         <div className={styles.infoBanner}>
           Clients dial <span className={styles.mono}>{hubIP}:&lt;port&gt;</span> on the hub VPN
-          address. Reserved: DNS <span className={styles.mono}>:53</span>, Web/API{' '}
-          <span className={styles.mono}>:{hubPort}</span>.
+          address. Reserved:{' '}
+          <span className={styles.reservedPorts}>
+            <span className={styles.mono}>DNS :53</span>
+            <span className={styles.mono}>Web/API :{hubPort}</span>
+          </span>
+          .
         </div>
       )}
 
@@ -311,7 +335,8 @@ export default function ForwardPage() {
                 <TableRow>
                   <TableHeaderCell>Name</TableHeaderCell>
                   <TableHeaderCell className={styles.colListen}>Listen</TableHeaderCell>
-                  <TableHeaderCell>Target</TableHeaderCell>
+                  <TableHeaderCell className={styles.colArrow} aria-hidden />
+                  <TableHeaderCell className={styles.colTarget}>Target</TableHeaderCell>
                   <TableHeaderCell className={styles.colEnabled}>On</TableHeaderCell>
                   <TableHeaderCell className={styles.colActions} />
                 </TableRow>
@@ -322,15 +347,20 @@ export default function ForwardPage() {
                     <TableCell>
                       <Text>{rule.name || '—'}</Text>
                     </TableCell>
-                    <TableCell>
-                      <Text className={styles.mono}>
+                    <TableCell className={styles.colListen}>
+                      <Text className={`${styles.mono} ${styles.endpoint}`}>
                         {hubIP
                           ? formatListen(hubIP, rule.listen_port, rule.protocol)
                           : `${rule.protocol}:${rule.listen_port}`}
                       </Text>
                     </TableCell>
-                    <TableCell>
-                      <Text className={styles.mono}>{rule.target_display}</Text>
+                    <TableCell className={styles.colArrow}>
+                      <Text>→</Text>
+                    </TableCell>
+                    <TableCell className={styles.colTarget}>
+                      <Text className={`${styles.mono} ${styles.endpoint}`}>
+                        {rule.target_display}
+                      </Text>
                     </TableCell>
                     <TableCell>
                       <Switch

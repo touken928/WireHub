@@ -14,8 +14,8 @@ import { useAuthLayoutStyles } from '@/styles/authLayout';
 export default function LoginPage() {
   const styles = useAuthLayoutStyles();
   const navigate = useNavigate();
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('admin');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -38,16 +38,20 @@ export default function LoginPage() {
     <AuthLayout>
       <Title1>WireHub</Title1>
       <Text>Centralized WireGuard Hub Manager</Text>
-      <form onSubmit={handleSubmit} className={styles.form}>
+      <form onSubmit={handleSubmit} className={styles.form} autoComplete="off">
         <Input
+          name="username"
           placeholder="Username"
           value={username}
+          autoComplete="off"
           onChange={(_, data) => setUsername(data.value)}
         />
         <Input
+          name="password"
           type="password"
           placeholder="Password"
           value={password}
+          autoComplete="new-password"
           onChange={(_, data) => setPassword(data.value)}
         />
         {error && <Text className={styles.error}>{error}</Text>}
