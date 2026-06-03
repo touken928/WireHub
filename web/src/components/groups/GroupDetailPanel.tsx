@@ -84,6 +84,12 @@ const useStyles = makeStyles({
     justifyContent: 'space-between',
     gap: '8px',
   },
+  peerHeaderActions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '2px',
+    flexShrink: 0,
+  },
   peerTop: {
     flex: 1,
     minWidth: 0,
@@ -112,7 +118,7 @@ const useStyles = makeStyles({
   },
   peerActions: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+    gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
     gap: '6px',
   },
   actionButton: {
@@ -292,13 +298,22 @@ export function GroupDetailPanel({
                   <Text weight="semibold">{peer.name}</Text>
                   <PeerStatusBadge enabled={peer.enabled} online={peer.online} />
                 </div>
-                <Button
-                  size="small"
-                  icon={<DeleteRegular />}
-                  appearance="subtle"
-                  aria-label="Delete peer"
-                  onClick={() => onDeletePeer(peer.id, peer.name)}
-                />
+                <div className={styles.peerHeaderActions}>
+                  <Button
+                    size="small"
+                    icon={<EditRegular />}
+                    appearance="subtle"
+                    aria-label="Rename peer"
+                    onClick={() => openPeerRename(peer.id, peer.name)}
+                  />
+                  <Button
+                    size="small"
+                    icon={<DeleteRegular />}
+                    appearance="subtle"
+                    aria-label="Delete peer"
+                    onClick={() => onDeletePeer(peer.id, peer.name)}
+                  />
+                </div>
               </div>
               <div className={styles.peerMeta}>
                 <div className={styles.metaItem}>
@@ -321,9 +336,6 @@ export function GroupDetailPanel({
                 </div>
               </div>
               <div className={styles.peerActions}>
-                <Button className={styles.actionButton} size="small" icon={<EditRegular />} onClick={() => openPeerRename(peer.id, peer.name)}>
-                  Rename
-                </Button>
                 <Button
                   className={styles.actionButton}
                   size="small"
