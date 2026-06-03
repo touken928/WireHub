@@ -84,6 +84,8 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 	m.Authoritative = true
 
 	var external []dns.Question
+	internalFound := false
+	internalMissing := false
 	for _, q := range r.Question {
 		name := strings.TrimSuffix(strings.ToLower(q.Name), ".")
 		if !s.isInternalName(name) {
@@ -97,17 +99,21 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 		if strings.HasSuffix(name, "."+domain) {
 			slug = strings.TrimSuffix(name, "."+domain)
 			if slug == "" {
+				internalMissing = true
 				continue
 			}
 			ok = true
 		} else {
+			internalMissing = true
 			continue
 		}
 
 		ip, resolved := s.lookupIP(slug, ok)
 		if !resolved {
+			internalMissing = true
 			continue
 		}
+		internalFound = true
 
 		switch q.Qtype {
 		case dns.TypeA:
@@ -144,7 +150,11 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	if len(m.Answer) == 0 && m.Rcode == dns.RcodeSuccess {
-		m.Rcode = dns.RcodeNameError
+		// NXDOMAIN only when the name is unknown. IPv4-only names must answer
+		// AAAA with NOERROR NODATA so getaddrinfo/curl on macOS can fall back to A.
+		if internalMissing && !internalFound {
+			m.Rcode = dns.RcodeNameError
+		}
 	}
 	_ = w.WriteMsg(m)
 }

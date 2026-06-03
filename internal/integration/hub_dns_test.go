@@ -3,6 +3,7 @@ package integration
 import (
 	"testing"
 
+	"github.com/miekg/dns"
 	"github.com/touken928/wirehub/internal/config"
 	"github.com/touken928/wirehub/internal/domain"
 )
@@ -29,5 +30,32 @@ func TestHubDNSHubAndPeer(t *testing.T) {
 	}
 	if got := queryAOrFail(t, tnet, env.dnsIP, "www.touken."+config.DNSDomain); got != env.peerIP {
 		t.Fatalf("www peer fqdn = %s, want %s", got, env.peerIP)
+	}
+}
+
+func TestHubDNSAAAANODATA(t *testing.T) {
+	env, tnet, cleanup := setupHub(t)
+	defer cleanup()
+
+	hubFQDN := domain.HubFQDN()
+	rcode, err := queryRcode(tnet, env.dnsIP, hubFQDN, dns.TypeAAAA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rcode != dns.RcodeSuccess {
+		t.Fatalf("AAAA %s rcode = %s, want NOERROR (NODATA for IPv4-only hub)", hubFQDN, dns.RcodeToString[rcode])
+	}
+}
+
+func TestHubDNSUnknownNXDOMAIN(t *testing.T) {
+	env, tnet, cleanup := setupHub(t)
+	defer cleanup()
+
+	rcode, err := queryRcode(tnet, env.dnsIP, "nosuch."+config.DNSDomain, dns.TypeA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rcode != dns.RcodeNameError {
+		t.Fatalf("unknown name rcode = %s, want NXDOMAIN", dns.RcodeToString[rcode])
 	}
 }

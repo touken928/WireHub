@@ -103,6 +103,34 @@ func queryAOrFail(t *testing.T, tnet *netstack.Net, dnsIP, qname string) string 
 	return ip
 }
 
+func queryRcode(tnet *netstack.Net, dnsIP, qname string, qtype uint16) (int, error) {
+	msg := new(dns.Msg)
+	msg.SetQuestion(dns.Fqdn(qname), qtype)
+	pack, err := msg.Pack()
+	if err != nil {
+		return 0, err
+	}
+	raddr := &net.UDPAddr{IP: net.ParseIP(dnsIP), Port: 53}
+	conn, err := tnet.DialUDP(nil, raddr)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	if _, err := conn.Write(pack); err != nil {
+		return 0, err
+	}
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return 0, err
+	}
+	resp := new(dns.Msg)
+	if err := resp.Unpack(buf[:n]); err != nil {
+		return 0, err
+	}
+	return resp.Rcode, nil
+}
+
 func httpViaNetstack(tnet *netstack.Net, dnsIP, hubIP string, req *http.Request) (*http.Response, error) {
 	host := req.URL.Hostname()
 	port := req.URL.Port()
