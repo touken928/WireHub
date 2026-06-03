@@ -21,24 +21,33 @@ type HostResolver interface {
 
 // ForwardProxy listens on hub VPN IP ports and relays to configured targets (admin Forward rules).
 type ForwardProxy struct {
-	tnet     *netstack.Net
-	hubIP    netip.Addr
-	resolver HostResolver
+	tnet      *netstack.Net
+	hubIP     netip.Addr
+	vpnPrefix netip.Prefix
+	resolver  HostResolver
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
-func NewForwardProxy(tnet *netstack.Net, hubIP string, resolver HostResolver) (*ForwardProxy, error) {
+func NewForwardProxy(tnet *netstack.Net, hubIP, vpnSubnet string, resolver HostResolver) (*ForwardProxy, error) {
 	addr, err := netip.ParseAddr(hubIP)
 	if err != nil {
 		return nil, fmt.Errorf("parse hub ip: %w", err)
 	}
+	prefix, err := netip.ParsePrefix(vpnSubnet)
+	if err != nil {
+		return nil, fmt.Errorf("parse vpn subnet: %w", err)
+	}
+	if !prefix.IsValid() {
+		return nil, fmt.Errorf("invalid vpn subnet %q", vpnSubnet)
+	}
 	return &ForwardProxy{
-		tnet:     tnet,
-		hubIP:    addr,
-		resolver: resolver,
+		tnet:      tnet,
+		hubIP:     addr,
+		vpnPrefix: prefix,
+		resolver:  resolver,
 	}, nil
 }
 
@@ -127,7 +136,7 @@ func (m *ForwardProxy) proxyTCP(ctx context.Context, client net.Conn, targetHost
 		return
 	}
 	target := netip.AddrPortFrom(addr, uint16(targetPort))
-	remote, err := m.tnet.DialContext(ctx, "tcp", target.String())
+	remote, err := m.dialTarget(ctx, "tcp", addr, targetPort)
 	if err != nil {
 		log.Printf("forward tcp dial %s: %v", target, err)
 		return
@@ -211,7 +220,7 @@ func (m *ForwardProxy) runUDP(ctx context.Context, rule ForwardRule) error {
 				continue
 			}
 			target := netip.AddrPortFrom(addr, uint16(rule.TargetPort))
-			backend, dialErr := m.tnet.DialContext(ctx, "udp", target.String())
+			backend, dialErr := m.dialTarget(ctx, "udp", addr, rule.TargetPort)
 			if dialErr != nil {
 				mu.Unlock()
 				log.Printf("forward udp dial %s: %v", target, dialErr)
@@ -246,4 +255,15 @@ func (m *ForwardProxy) runUDP(ctx context.Context, rule ForwardRule) error {
 			mu.Unlock()
 		}
 	}
+}
+
+// dialTarget connects to a forward destination. VPN subnet addresses use gVisor netstack;
+// external addresses use the host network because netstack has no default route to the internet.
+func (m *ForwardProxy) dialTarget(ctx context.Context, network string, addr netip.Addr, port int) (net.Conn, error) {
+	target := netip.AddrPortFrom(addr, uint16(port)).String()
+	if m.vpnPrefix.Contains(addr) {
+		return m.tnet.DialContext(ctx, network, target)
+	}
+	var d net.Dialer
+	return d.DialContext(ctx, network, target)
 }

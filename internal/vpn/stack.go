@@ -147,7 +147,11 @@ func (s *Stack) SyncPortForwards() error {
 
 func (s *Stack) applyPortForwards(hubIP string) error {
 	if s.forwardProxy == nil {
-		m, err := l4.NewForwardProxy(s.wgMgr.Net(), hubIP, s.dnsServer)
+		settings, err := s.repo.GetSettings()
+		if err != nil {
+			return err
+		}
+		m, err := l4.NewForwardProxy(s.wgMgr.Net(), hubIP, settings.WGSubnet, s.dnsServer)
 		if err != nil {
 			return err
 		}

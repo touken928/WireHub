@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
 	"testing"
@@ -30,7 +31,7 @@ func TestForwardProxyTCPRelay(t *testing.T) {
 		fmt.Fprint(w, "forward-target-ok")
 	}))
 
-	proxy, err := NewForwardProxy(tnet, hub.String(), staticHostResolver{
+	proxy, err := NewForwardProxy(tnet, hub.String(), "100.127.0.0/24", staticHostResolver{
 		hosts: map[string]netip.Addr{backend.String(): backend},
 	})
 	if err != nil {
@@ -71,7 +72,7 @@ func TestForwardProxySkipsDisabledRules(t *testing.T) {
 	tnet, cleanup := newTestNetstack(t, hub)
 	defer cleanup()
 
-	proxy, err := NewForwardProxy(tnet, hub.String(), staticHostResolver{hosts: nil})
+	proxy, err := NewForwardProxy(tnet, hub.String(), "100.127.0.0/24", staticHostResolver{hosts: nil})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +101,7 @@ func TestForwardProxyRejectsUnsupportedProtocol(t *testing.T) {
 	tnet, cleanup := newTestNetstack(t, hub)
 	defer cleanup()
 
-	proxy, err := NewForwardProxy(tnet, hub.String(), staticHostResolver{hosts: nil})
+	proxy, err := NewForwardProxy(tnet, hub.String(), "100.127.0.0/24", staticHostResolver{hosts: nil})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,5 +123,57 @@ func TestForwardProxyRejectsUnsupportedProtocol(t *testing.T) {
 	defer cancel()
 	if _, err := tnet.DialContext(ctx, "tcp", netip.AddrPortFrom(hub, 19004).String()); err == nil {
 		t.Fatal("unsupported protocol must not open listener")
+	}
+}
+
+func TestForwardProxyTCPToExternalTarget(t *testing.T) {
+	hub := netip.MustParseAddr("100.127.0.1")
+	const listenPort = 19005
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	backendPort := ln.Addr().(*net.TCPAddr).Port
+	go http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "external-target-ok")
+	}))
+
+	tnet, cleanup := newTestNetstack(t, hub)
+	defer cleanup()
+
+	external := netip.MustParseAddr("127.0.0.1")
+	proxy, err := NewForwardProxy(tnet, hub.String(), "100.127.0.0/24", staticHostResolver{
+		hosts: map[string]netip.Addr{external.String(): external},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Stop()
+
+	if err := proxy.Apply([]ForwardRule{{
+		ListenPort: listenPort,
+		Protocol:   "tcp",
+		TargetHost: external.String(),
+		TargetPort: backendPort,
+		Enabled:    true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	url := fmt.Sprintf("http://%s/", netip.AddrPortFrom(hub, listenPort))
+	resp, err := testHTTPClient(tnet).Get(url)
+	if err != nil {
+		t.Fatalf("GET hub forward listen port: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "external-target-ok" {
+		t.Fatalf("body = %q", body)
 	}
 }

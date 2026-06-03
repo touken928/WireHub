@@ -2,6 +2,8 @@ package integration
 
 import (
 	"fmt"
+	"net"
+	"net/http"
 	"testing"
 	"time"
 
@@ -253,6 +255,51 @@ func TestPortForwardReapplyAfterUpdate(t *testing.T) {
 		t.Fatalf("after enable: %v", err)
 	}
 	if body != "enabled" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestPortForwardTCPToExternalIP(t *testing.T) {
+	env, _, cleanup := setupPeerMesh(t, []meshPeerSpec{
+		{Name: "app", GroupName: "default"},
+	}, nil)
+	defer cleanup()
+	env.connectPeers(t)
+
+	app := env.peerNamed("app")
+	if app == nil {
+		t.Fatal("missing peer app")
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	backendPort := ln.Addr().(*net.TCPAddr).Port
+	go http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "external-host-ok")
+	}))
+	defer ln.Close()
+
+	listenPort := freeTCPPort(t)
+	hubWebPort := config.DefaultPort
+	if _, err := env.store.CreatePortForward(hubWebPort, repo.PortForwardInput{
+		ListenPort: listenPort,
+		Protocol:   domain.ForwardProtoTCP,
+		TargetHost: "127.0.0.1",
+		TargetPort: backendPort,
+		Enabled:    true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	env.syncPortForwards(t)
+
+	url := fmt.Sprintf("http://%s:%d/", env.hubIP, listenPort)
+	body, err := peerHTTPGet(app.Net, url, 5*time.Second)
+	if err != nil {
+		t.Fatalf("peer -> hub forward (external target): %v", err)
+	}
+	if body != "external-host-ok" {
 		t.Fatalf("body = %q", body)
 	}
 }
