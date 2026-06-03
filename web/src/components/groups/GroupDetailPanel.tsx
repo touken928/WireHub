@@ -7,10 +7,13 @@ import {
   makeStyles,
   tokens,
 } from '@fluentui/react-components';
-import { ArrowDownloadRegular, DeleteRegular, PowerRegular } from '@fluentui/react-icons';
+import { ArrowDownloadRegular, DeleteRegular, EditRegular, PowerRegular } from '@fluentui/react-icons';
+import { useState } from 'react';
 import type { GroupGraphNode } from '@/api/types';
 import { DNS_DOMAIN } from '@/constants';
+import { RenameDialog } from '@/components/common/RenameDialog';
 import { formatBytes, formatHandshake } from '@/lib/format';
+import { getErrorMessage } from '@/lib/error';
 import { PeerStatusBadge } from '@/components/peers/PeerStatusBadge';
 import type { EnrichedPeer } from '@/pages/groups/utils';
 
@@ -123,6 +126,8 @@ type GroupDetailPanelProps = {
   createUserError: string;
   onNewUserNameChange: (value: string) => void;
   onCreateUser: () => void;
+  onRenameGroup: (name: string) => Promise<void>;
+  onRenamePeer: (peerId: number, name: string) => Promise<void>;
   onShowConfig: (peerId: number) => void;
   onTogglePeer: (peerId: number) => void;
   onDeletePeer: (peerId: number, peerName: string) => void;
@@ -136,11 +141,59 @@ export function GroupDetailPanel({
   createUserError,
   onNewUserNameChange,
   onCreateUser,
+  onRenameGroup,
+  onRenamePeer,
   onShowConfig,
   onTogglePeer,
   onDeletePeer,
 }: GroupDetailPanelProps) {
   const styles = useStyles();
+  const [groupRenameOpen, setGroupRenameOpen] = useState(false);
+  const [groupRenameValue, setGroupRenameValue] = useState('');
+  const [groupRenameError, setGroupRenameError] = useState('');
+  const [peerRenameOpen, setPeerRenameOpen] = useState(false);
+  const [peerRenameId, setPeerRenameId] = useState<number | null>(null);
+  const [peerRenameValue, setPeerRenameValue] = useState('');
+  const [peerRenameError, setPeerRenameError] = useState('');
+
+  const openGroupRename = () => {
+    if (!group) return;
+    setGroupRenameValue(group.name);
+    setGroupRenameError('');
+    setGroupRenameOpen(true);
+  };
+
+  const saveGroupRename = async () => {
+    const name = groupRenameValue.trim();
+    if (!name) return;
+    setGroupRenameError('');
+    try {
+      await onRenameGroup(name);
+      setGroupRenameOpen(false);
+    } catch (err) {
+      setGroupRenameError(getErrorMessage(err, 'Rename failed'));
+    }
+  };
+
+  const openPeerRename = (peerId: number, currentName: string) => {
+    setPeerRenameId(peerId);
+    setPeerRenameValue(currentName);
+    setPeerRenameError('');
+    setPeerRenameOpen(true);
+  };
+
+  const savePeerRename = async () => {
+    const name = peerRenameValue.trim();
+    if (!name || peerRenameId == null) return;
+    setPeerRenameError('');
+    try {
+      await onRenamePeer(peerRenameId, name);
+      setPeerRenameOpen(false);
+      setPeerRenameId(null);
+    } catch (err) {
+      setPeerRenameError(getErrorMessage(err, 'Rename failed'));
+    }
+  };
 
   if (!group) {
     return (
@@ -155,7 +208,14 @@ export function GroupDetailPanel({
   return (
     <aside className={styles.panel}>
       <div className={styles.header}>
-        <Text weight="semibold" block>{group.name}</Text>
+        <Text weight="semibold" block style={{ flex: 1 }}>{group.name}</Text>
+        <Button
+          size="small"
+          appearance="subtle"
+          icon={<EditRegular />}
+          aria-label="Rename group"
+          onClick={openGroupRename}
+        />
         <Text size={200} className={mutedClassName}>{peers.length} member(s)</Text>
       </div>
       <div className={styles.memberList}>
@@ -191,6 +251,9 @@ export function GroupDetailPanel({
                 </div>
               </div>
               <div className={styles.memberActions}>
+                <Button size="small" icon={<EditRegular />} onClick={() => openPeerRename(peer.id, peer.name)}>
+                  Rename
+                </Button>
                 <Button size="small" icon={<ArrowDownloadRegular />} onClick={() => onShowConfig(peer.id)}>
                   Config
                 </Button>
@@ -226,6 +289,30 @@ export function GroupDetailPanel({
           <Text size={200} style={{ color: tokens.colorPaletteRedForeground1 }}>{createUserError}</Text>
         )}
       </div>
+
+      <RenameDialog
+        open={groupRenameOpen}
+        title="Rename group"
+        label="Group name"
+        value={groupRenameValue}
+        error={groupRenameError}
+        onValueChange={setGroupRenameValue}
+        onClose={() => setGroupRenameOpen(false)}
+        onSave={() => void saveGroupRename()}
+      />
+      <RenameDialog
+        open={peerRenameOpen}
+        title="Rename user"
+        label="Hostname"
+        value={peerRenameValue}
+        error={peerRenameError}
+        onValueChange={setPeerRenameValue}
+        onClose={() => {
+          setPeerRenameOpen(false);
+          setPeerRenameId(null);
+        }}
+        onSave={() => void savePeerRename()}
+      />
     </aside>
   );
 }

@@ -37,6 +37,32 @@ func (s *Store) UpdateGroup(g *PeerGroup) error {
 	return s.db.Save(g).Error
 }
 
+func (s *Store) RenameGroup(id uint, name string) (*PeerGroup, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("group name is required")
+	}
+	g, err := s.GetGroup(id)
+	if err != nil {
+		return nil, err
+	}
+	if g.Name == name {
+		return g, nil
+	}
+	var count int64
+	if err := s.db.Model(&PeerGroup{}).Where("name = ? AND id != ?", name, id).Count(&count).Error; err != nil {
+		return nil, err
+	}
+	if count > 0 {
+		return nil, fmt.Errorf("group name already exists")
+	}
+	g.Name = name
+	if err := s.db.Save(g).Error; err != nil {
+		return nil, err
+	}
+	return g, nil
+}
+
 func (s *Store) DeleteGroup(id uint) error {
 	var count int64
 	if err := s.db.Model(&Peer{}).Where("group_id = ?", id).Count(&count).Error; err != nil {

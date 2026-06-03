@@ -83,7 +83,8 @@ func (s *Server) handleCreatePeer(c *gin.Context) {
 }
 
 type updatePeerRequest struct {
-	GroupID *uint `json:"group_id"`
+	Name    *string `json:"name"`
+	GroupID *uint   `json:"group_id"`
 }
 
 func (s *Server) handleUpdatePeer(c *gin.Context) {
@@ -97,24 +98,44 @@ func (s *Server) handleUpdatePeer(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.GroupID == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "group_id is required"})
+	if req.GroupID == nil && req.Name == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name or group_id is required"})
 		return
 	}
 
-	peer, err := s.UpdatePeerGroup(id, *req.GroupID)
-	if err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, service.ErrNetworkUnavailable) {
-			status = http.StatusServiceUnavailable
-		} else if err.Error() == "peer not found" || err.Error() == "group not found" {
-			status = http.StatusNotFound
-			if err.Error() == "group not found" {
-				status = http.StatusBadRequest
+	var peer *repo.Peer
+	if req.Name != nil {
+		peer, err = s.RenamePeer(id, *req.Name)
+		if err != nil {
+			status := http.StatusBadRequest
+			if err.Error() == "peer not found" {
+				status = http.StatusNotFound
+			} else if errors.Is(err, service.ErrNetworkUnavailable) {
+				status = http.StatusServiceUnavailable
 			}
+			c.JSON(status, gin.H{"error": err.Error()})
+			return
 		}
-		c.JSON(status, gin.H{"error": err.Error()})
-		return
+	}
+	if req.GroupID != nil {
+		peer, err = s.UpdatePeerGroup(id, *req.GroupID)
+		if err != nil {
+			status := http.StatusBadRequest
+			if err.Error() == "peer not found" {
+				status = http.StatusNotFound
+			} else if errors.Is(err, service.ErrNetworkUnavailable) {
+				status = http.StatusServiceUnavailable
+			}
+			c.JSON(status, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if peer == nil {
+		peer, err = s.Store.GetPeer(id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "peer not found"})
+			return
+		}
 	}
 	s.publishStatus()
 	c.JSON(http.StatusOK, s.enrichPeerResponse(*peer))

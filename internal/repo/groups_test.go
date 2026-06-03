@@ -7,6 +7,34 @@ import (
 	"github.com/touken928/wirehub/internal/config"
 )
 
+func TestRenameGroup(t *testing.T) {
+	dir := t.TempDir()
+	st, err := New(&config.RuntimeConfig{DatabasePath: filepath.Join(dir, "wirehub.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := st.CreateGroup("team", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateGroup("other", 100, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	renamed, err := st.RenameGroup(g.ID, "ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renamed.Name != "ops" {
+		t.Fatalf("expected ops, got %q", renamed.Name)
+	}
+
+	if _, err := st.RenameGroup(g.ID, "other"); err == nil {
+		t.Fatal("expected duplicate name error")
+	}
+}
+
 func TestGroupLinkUniquePair(t *testing.T) {
 	dir := t.TempDir()
 	st, err := New(&config.RuntimeConfig{DatabasePath: filepath.Join(dir, "wirehub.db")})

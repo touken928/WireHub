@@ -130,7 +130,7 @@ export const api = {
   listPeers: () => request<Peer[]>('/peers'),
   createPeer: (body: { name: string; group_id: number }) =>
     request<Peer>('/peers', { method: 'POST', body: JSON.stringify(body) }),
-  updatePeer: (id: number, body: { group_id: number }) =>
+  updatePeer: (id: number, body: { group_id?: number; name?: string }) =>
     request<Peer>(`/peers/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   deletePeer: (id: number) =>
     request<{ ok: boolean }>(`/peers/${id}`, { method: 'DELETE' }),

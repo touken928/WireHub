@@ -70,6 +70,40 @@ func (h *Hub) CreatePeer(name string, groupID uint) (*repo.Peer, error) {
 	return peer, nil
 }
 
+// RenamePeer changes a peer hostname and refreshes authoritative DNS.
+func (h *Hub) RenamePeer(peerID uint, name string) (*repo.Peer, error) {
+	slug, err := domain.ValidateHostname(name)
+	if err != nil {
+		return nil, err
+	}
+
+	peer, err := h.Store.GetPeer(peerID)
+	if err != nil {
+		return nil, fmt.Errorf("peer not found")
+	}
+	if peer.Name == slug {
+		return peer, nil
+	}
+
+	existing, _ := h.Store.ListPeers()
+	for _, p := range existing {
+		if p.ID != peerID && p.Name == slug {
+			return nil, fmt.Errorf("hostname already exists")
+		}
+	}
+
+	peer.Name = slug
+	peer.DNSName = slug
+	if err := h.Store.UpdatePeer(peer); err != nil {
+		return nil, err
+	}
+	if dns, err := h.dnsServer(); err == nil {
+		_ = dns.RegisterPeer(peer)
+	}
+	h.SyncAccessFilter()
+	return peer, nil
+}
+
 // UpdatePeerGroup moves a peer to another group and refreshes the network stack.
 func (h *Hub) UpdatePeerGroup(peerID, groupID uint) (*repo.Peer, error) {
 	peer, err := h.Store.GetPeer(peerID)

@@ -82,7 +82,12 @@ func (s *Server) handleUpdateGroup(c *gin.Context) {
 		return
 	}
 	if req.Name != nil {
-		g.Name = *req.Name
+		renamed, err := s.Store.RenameGroup(id, *req.Name)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		g = renamed
 	}
 	if req.PosX != nil {
 		g.PosX = *req.PosX
@@ -90,9 +95,11 @@ func (s *Server) handleUpdateGroup(c *gin.Context) {
 	if req.PosY != nil {
 		g.PosY = *req.PosY
 	}
-	if err := s.Store.UpdateGroup(g); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+	if req.PosX != nil || req.PosY != nil {
+		if err := s.Store.UpdateGroup(g); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 	}
 	s.SyncAccessFilter()
 	resp, _ := toGroupResponse(s.Store, *g)

@@ -206,6 +206,17 @@ export default function GroupsPage() {
     });
   };
 
+  const handleRenameGroup = async (name: string) => {
+    if (!detailGroup) return;
+    await api.updateGroup(detailGroup.id, { name });
+    await refreshDetail();
+  };
+
+  const handleRenamePeer = async (peerId: number, name: string) => {
+    await api.updatePeer(peerId, { name });
+    await refreshDetail();
+  };
+
   if (loading) return <Spinner label="Loading groups..." />;
 
   if (loadError) {
@@ -250,6 +261,8 @@ export default function GroupsPage() {
           createUserError={createUserError}
           onNewUserNameChange={setNewUserName}
           onCreateUser={() => void handleCreateUserInGroup()}
+          onRenameGroup={handleRenameGroup}
+          onRenamePeer={handleRenamePeer}
           onShowConfig={(id) => void peerConfig.showConfig(id)}
           onTogglePeer={(id) => void api.togglePeer(id).then(refreshDetail)}
           onDeletePeer={(id, name) => void handleDeletePeer(id, name)}
