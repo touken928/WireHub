@@ -1,7 +1,7 @@
 <h1 align="center">WireHub</h1>
 
 <p align="center">
-  <strong>集中式 Hub-and-Spoke WireGuard 管理平台 — 一台公网 Hub、内置 Web 控制台，Hub 侧使用 <a href="https://github.com/WireGuard/wireguard-go">用户态 WireGuard</a>（wireguard-go + gVisor netstack），无需内核模块。</strong>
+  <strong>集中式星型 WireGuard Hub，内嵌 Web 管理界面。服务端以 <a href="https://github.com/WireGuard/wireguard-go">用户态 WireGuard</a>（gVisor netstack）运行，单点公网 Endpoint，无需内核模块。</strong>
 </p>
 
 <p align="center">
@@ -22,98 +22,73 @@
 ## 功能
 
 - **星型拓扑** — 仅 Hub 需要可路由的公网 Endpoint，各 Peer 主动连出
-- **Web 管理界面** — React + Fluent UI，发布版内嵌于单一二进制
-- **Peer 全生命周期** — 创建、编辑、禁用、删除；导出 `.conf` 或扫码导入
-- **内置 DNS** — `{name}.wirehub`；Hub 为 `hub.wirehub`；`www.{name}.wirehub` 为别名
-- **组访问控制** — 每个 Peer 归属一个组；组间连线支持**双向**（直连 WG）或**单向**（透明 Hub SNAT：客户端仍访问目标 peer 的 IP:端口）
-- **在线状态** — 最近握手时间、收发流量、用量图表
-- **端口转发** — Hub VPN IP 上按端口 TCP/UDP 代理
-- **设置与备份** — 修改 Hub 运行参数、导出/导入完整 `wirehub.db`、密码确认的 Reset
-- **用户态 WireGuard** — [wireguard-go](https://github.com/WireGuard/wireguard-go) + gVisor netstack，Hub 侧无需内核模块
+- **单一二进制** — React 管理界面经 `go:embed` 嵌入；SQLite 持久化
+- **初始化向导** — 新建 Hub 或导入 `wirehub.db`；Hub / Admin / Advanced 分区
+- **Peer 全生命周期** — 在 Groups 或 Peers 创建；重命名、改组、启停、删除；导出 `.conf` 或二维码
+- **内置 DNS** — `hub.wirehub`、`{peer}.wirehub`；`www.*` 别名；其余域名走上游解析
+- **组访问控制** — 每 Peer 归属一组；拓扑图上**双向**或**单向**连线（跨组默认拒绝）
+- **在线状态** — WebSocket 推送握手、收发流量与用量图表
+- **端口转发** — Hub VPN IP 上 TCP/UDP 监听，转发至 FQDN 或 IPv4
+- **设置与备份** — 运行参数、改密、数据库导出、密码确认后重置
+- **用户态 WireGuard** — [wireguard-go](https://github.com/WireGuard/wireguard-go) + gVisor netstack；Hub 侧无主机 TUN
 
-## 工作原理
+## 架构
 
 ```mermaid
 flowchart TB
   net([公网])
 
-  net -->|TCP :8443 · Web UI| web["Web UI + REST API<br/>(Gin + React)"]
-  net -->|UDP · WireGuard 端口| hub
+  net -->|TCP · Web/API| host["主机监听<br/>(CLI --port)"]
+  net -->|UDP · WireGuard| wg["用户态 WG + netstack"]
 
-  admin[管理浏览器] --> web
-  web --> hub
+  admin[管理浏览器] --> host
+  host --> wg
 
-  hub["WireHub Hub<br/>wireguard-go · 用户态 TUN<br/>DNS UDP 53 · 访问过滤"]
+  wg --> dns["Hub IP 上 DNS :53"]
+  wg --> filter["L3 转发 + ACL 过滤"]
+  wg --> fwd["Hub IP 上 L4 转发"]
 
-  hub -->|WireGuard 隧道| p1["笔记本 Peer<br/>（同组互通）"]
-  hub -->|WireGuard 隧道| p2["服务器 Peer<br/>（同组互通）"]
-  hub -->|WireGuard 隧道| p3["隔离 Peer<br/>（其他组）"]
+  filter --> p1[Peer A]
+  filter --> p2[Peer B]
+  filter --> p3[Peer C]
 ```
 
-完成初始化后，Hub 在 VPN 地址上提供经隧道的 Web UI 与 DNS。Peer 间流量由 Hub 做 L3 转发并按组规则过滤；访问 Hub 自身（Web、DNS）不受 Peer 过滤影响。
-
-## Web 界面
-
-| 页面 | 说明 |
-|------|------|
-| **Dashboard** | Hub 状态、WireGuard Endpoint、实时流量图 |
-| **Groups** | React Flow 拓扑 — 组间拖线表示允许互通；点击组管理 Peer |
-| **Peers** | 全部 Peer 及在线状态、配置下载、启用/禁用、删除 |
-| **Forward** | Hub VPN IP 上的端口转发 → FQDN（`*.wirehub` 或外网域名）或 IPv4 |
-| **Settings** | 可改 Hub 参数、修改密码、导出数据库、危险区 Reset |
-
-删除 Peer/组、断开组间连线、Reset Hub 等破坏性操作需在界面中确认；Reset 还需输入管理员密码。
-
-## 环境要求
-
-| 组件 | 版本 |
-|------|------|
-| Go（源码构建） | 1.26+ |
-| Node.js（前端构建） | 22+ |
-| Docker（可选） | 20+ |
+- **控制面** — Gin REST API + React UI（JWT 鉴权）；状态经 WebSocket 推送。
+- **数据面** — WireGuard 隧道终结于 netstack。Peer 间流量按组策略转发与过滤；访问 Hub 自身（Web、DNS、转发监听端口）不受 Peer ACL 约束。
 
 ## 快速开始
 
-### Docker（推荐）
-
-从 GitHub Container Registry 拉取发布镜像：
+### Docker
 
 ```bash
 docker pull ghcr.io/touken928/wirehub:latest
 
 docker run -d --name wirehub \
+  --restart unless-stopped \
   -p 8443:8443 \
   -p 8443:8443/udp \
   -v wirehub-data:/app/data \
   ghcr.io/touken928/wirehub:latest
 ```
 
-本地用 Compose 构建：
+本地构建：`docker compose -f docker/compose.yml up -d --build`。
 
-```bash
-docker compose -f docker/docker-compose.yml up -d --build
-```
+无需 `--cap-add` 或 `--privileged`。镜像默认：数据目录 `/app/data`，端口 `8443`，绑定 `0.0.0.0`。
 
-浏览器打开 **http://localhost:8443/setup**，完成首次配置向导。
-
-无需 `--cap-add` 或 `--privileged`：WireHub 使用 wireguard-go 的用户态 netstack（gVisor），不依赖内核 TUN 设备。镜像内 CLI 参数（`--data-dir`、`--port`、`--bind`）可省略，默认分别为 `./data`（`WORKDIR /app` 下即 `/app/data`）、`8443`、`0.0.0.0`。
+首次配置打开 **http://localhost:8443/setup**。
 
 ### 预编译二进制
 
-在 [GitHub Releases](https://github.com/touken928/wirehub/releases) 下载对应平台的可执行文件（未压缩），例如：
+从 [GitHub Releases](https://github.com/touken928/wirehub/releases) 下载（`wirehub-vX.Y.Z-<平台>`）。支持 Linux amd64/arm64、macOS arm64、Windows amd64。
 
 ```bash
 chmod +x wirehub-vX.Y.Z-linux-amd64
 ./wirehub-vX.Y.Z-linux-amd64 --data-dir ./data
 ```
 
-```powershell
-.\wirehub-vX.Y.Z-windows-amd64.exe --data-dir .\data
-```
+### 源码构建
 
-发布目标：**Linux amd64**、**Linux arm64**、**macOS arm64**、**Windows amd64**。
-
-### 从源码构建
+需要 Go 1.26+、Node.js 22+。
 
 ```bash
 cd web && npm ci && npm run build && cd ..
@@ -121,144 +96,115 @@ go build -o wirehub ./cmd/wirehub
 ./wirehub --data-dir ./data
 ```
 
-前端产物输出到 `internal/static/dist`，由 `internal/static/static.go` 通过 `go:embed` 嵌入二进制。
+前端产物：`internal/static/dist`（`go:embed` 嵌入）。
 
 ## 首次配置
 
-全新安装时 HTTP 服务会立即启动，WireGuard 与 DNS 仅在完成配置后才会启动。
+全新安装时 HTTP 服务立即启动；WireGuard 与 DNS 在配置完成后才启动。
 
-1. 打开 **http://&lt;主机&gt;:8443/setup**（或你的 `--port`）
-2. 可先 **导入 wirehub.db** 恢复备份，**或** 填写下方新 Hub 表单
-3. 使用创建的管理员账号登录
+1. 打开 **http://&lt;主机&gt;:&lt;端口&gt;/setup**
+2. **导入**已有 `wirehub.db`，或填写 **新 Hub** 表单（Hub / Admin / Advanced）
+3. 使用管理员账号登录
 
-### 新 Hub 向导
-
-| 字段 | 必填 | 说明 |
-|------|------|------|
-| Public endpoint | 是 | 客户端 `Endpoint` 中的主机名或 IP（端口前），如 `example.com` |
-| Client endpoint port | 是 | Peer `Endpoint` 中的端口（`主机:端口`）；默认 **8443** |
-| VPN subnet | 否 | 默认 `100.127.0.0/24`；Hub 与 DNS 使用首个主机地址（`.1`） |
-| 管理员用户名 | 否 | 默认 `admin` |
-| 管理员密码 | 是 | 至少 8 位；SQLite 中以 bcrypt 存储 |
-| MTU | 否 | 默认 `1420` |
-| 状态轮询间隔 | 否 | 默认 `1` 秒 |
-| 额外 DNS | 否 | 默认 `1.2.4.8`、`1.1.1.1`，写入客户端配置并由 Hub 转发外网查询 |
-
-### 导入
-
-上传此前导出的 **wirehub.db** 可恢复组、Peer 与 Hub 设置，随后用原管理员账号登录。
-
-JWT 签名密钥在首次启动时自动生成，保存在 `{data-dir}/.jwt_secret`。
-
-## 设置（初始化之后）
-
-在侧栏打开 **Settings**。
-
-| 区域 | 是否可改 |
-|------|----------|
-| Hub（只读） | 公网 Endpoint、VPN 网段、管理员用户名、客户端 Endpoint 端口 |
-| 可编辑 | MTU、状态轮询间隔、额外 DNS |
-| 修改密码 | 当前密码 + 新密码 |
-| 导出 | 下载完整 `wirehub.db` 快照 |
-| 危险区 | **Reset WireHub** — 清空全部数据；需输入管理员密码 |
-
-修改 **MTU** 会重启 VPN 栈。**Reset** 后回到配置向导。
-
-初始化后不可在 UI 修改的项：公网 Endpoint、VPN 网段、管理员用户名、客户端 Endpoint 端口（仅在向导或导入数据库时确定）。
-
-## 端口转发
-
-侧栏 **Forward** 管理转发。
-
-**显式规则**：在 **Hub VPN IP**（设置中的 `hub_ip`）上监听，将流量转到目标主机与端口。Peer 经隧道访问 `{hub_ip}:{监听端口}`。
-
-| 目标类型 | 示例 | 解析方式 |
-|----------|------|----------|
-| Peer FQDN | `alice.wirehub` | Hub 权威 DNS |
-| 公网域名 | `db.example.com` | **Settings** 中的额外 DNS（A 记录） |
-| IPv4 地址 | `10.0.0.5` | 直接使用（仅 IPv4） |
-
-目标主机须为 FQDN 或 IPv4（不接受无域后缀的 Peer 名称）。在列表中切换 **Enabled** 即可生效，无需重启 VPN 栈。此为 **显式 L4**（客户端须访问 Hub 监听端口）；组间**单向**连线使用 **透明 SNAT**（见下节）。
-
-REST：`GET/POST /api/forwards`，`PUT/DELETE /api/forwards/:id`。
-
-## 组连线
-
-在 **Groups** 页面左下角选择**双向**或**单向**，再从源组拖向目标组建边。
-
-- **双向** — 相连组内 Peer 可经 WireGuard 直连。
-- **单向**（`A → B`） — `A` 仍按平常方式访问 **`B` 的 WireGuard IP 与服务端口**；Hub 在出站路径上做 SNAT（随机高位 ephemeral 端口），`B` 侧只见 Hub。回程由 Hub 改写，使 `A` 仍认为来自 `B`。`B` 不能主动访问 `A`。管理端 **Forward** 为另行配置的 Hub 监听端口代理，与单向 SNAT 无关。
-
-REST：`POST/DELETE /api/groups/links`，字段 `from_group_id`、`to_group_id`、`bidirectional`。
-
-## 命令行参数
-
-仅影响进程运行，不写入数据库：
-
-| 参数 | 默认值 | 说明 |
+| 字段 | 默认值 | 说明 |
 |------|--------|------|
-| `--port` | `8443` | Hub 监听端口（Web/API TCP 与 WireGuard UDP）。数据库 `listen_port` 仅写入 Peer 配置的 `Endpoint`（如端口转发时填公网端口） |
-| `--bind` | `0.0.0.0` | HTTP 监听地址 |
-| `--data-dir` | `./data` | SQLite、JWT 密钥及持久化数据目录 |
+| Public endpoint | — | 客户端 `Endpoint` 中的主机名或 IP（`:` 之前） |
+| Client endpoint port | `8443` | 客户端 `Endpoint` 端口；NAT 下可与 CLI `--port` 不同 |
+| VPN subnet | `100.127.0.0/24` | Hub 与 DNS 使用首个主机地址（`.1`） |
+| Admin username | `admin` | 初始化后不可改 |
+| Admin password | — | 必填，至少 8 位 |
+| MTU | `1420` | 可在设置中修改；变更会重启 VPN 栈 |
+| Status interval | `1` 秒 | Peer 状态轮询间隔 |
+| Additional DNS | `1.2.4.8`, `1.1.1.1` | 非 `wirehub` 域名的上游解析器 |
 
-```bash
-./wirehub --port 8443 --bind 0.0.0.0 --data-dir ./data
-```
+JWT 密钥：`{data-dir}/.jwt_secret`（首次启动时生成）。
+
+## 配置项
+
+### 命令行（仅进程级）
+
+| 参数 | 默认 | 作用 |
+|------|------|------|
+| `--port` | `8443` | 主机 TCP（Web/API）与 UDP（WireGuard）监听端口 |
+| `--bind` | `0.0.0.0` | HTTP 绑定地址 |
+| `--data-dir` | `./data` | SQLite 与密钥目录 |
+
+数据库中的 `listen_port` 仅写入 Peer 配置，不改变 Hub 绑定端口。
+
+### 数据库（初始化后）
+
+| 项 | UI 可改 | 说明 |
+|----|--------|------|
+| 公网 Endpoint、网段、管理员用户名、客户端 Endpoint 端口 | 否 | 仅在 setup 或导入 DB 时设定 |
+| MTU、状态间隔、额外 DNS | 是 | **Settings** |
+| 管理员密码 | 是 | **Settings** |
+| 导出 / 重置 | — | 导出完整 `wirehub.db`；重置清空数据（需密码） |
+
+## 管理界面
+
+| 页面 | 功能 |
+|------|------|
+| **Dashboard** | Hub 概览、Endpoint、Peer 状态与流量图 |
+| **Groups** | 拓扑图；连线模式（双向 / 单向）；组内 Peer 卡片；重命名、改组 |
+| **Peers** | 全部 Peer，支持搜索与筛选；创建、重命名、改组、下载配置、启停、删除 |
+| **Forward** | 在 Hub VPN IP 上 TCP/UDP 监听并转发至目标 |
+| **Settings** | 运行参数、改密、导出、重置 |
+
+破坏性操作需确认；重置 Hub 还需输入管理员密码。
 
 ## 客户端接入
 
-1. 登录 Web 控制台
-2. 在 **Groups** 中选择组并添加 Peer，或在 **Peers** 中管理
-3. 下载 `.conf` 或扫描二维码
-4. 导入任意 WireGuard 客户端并连接
+1. 在 **Groups**（组侧栏）或 **Peers**（对话框选组）创建 Peer
+2. 下载 `.conf` 或扫描二维码
+3. 导入 WireGuard 客户端并连接
 
-生成的配置包含 `Endpoint`、密钥、AllowedIPs、DNS（Hub IP + 额外解析器）及 MTU。
+配置含密钥、`Endpoint`、`AllowedIPs`（整段 VPN 网段）、`DNS`（Hub IP + 上游解析器）与 MTU。注释中给出隧道内管理地址 `http://hub.wirehub`。
 
-## DNS
+## 网络行为
 
-WireHub 在 Hub VPN IP 上提供 DNS 服务（UDP 53）。`wirehub` 下的名称由 Hub 权威解析；其他查询会转发到配置时设置的**额外 DNS**（默认 `1.2.4.8`、`1.1.1.1`）。
+### DNS
 
-客户端 WireGuard 配置中的 DNS 为 `{hub_ip}, {upstream…}`，Peer 经 Hub 解析内网主机名，并通过上游解析器访问公网。
+Hub VPN IP 上提供解析（UDP 53）。后缀固定为 `wirehub`，Hub 标签为 `hub`。
 
-| 域名 | 解析结果 |
-|------|----------|
-| `hub.wirehub` | Hub VPN IP |
-| `www.hub.wirehub` | Hub VPN IP（别名） |
-| `{peer}.wirehub` | 对应 Peer VPN IP |
-| `www.{peer}.wirehub` | 对应 Peer VPN IP（别名） |
+| 名称 | 结果 |
+|------|------|
+| `hub.wirehub`、`www.hub.wirehub` | Hub VPN IP |
+| `{peer}.wirehub`、`www.{peer}.wirehub` | 对应 Peer VPN IP |
 
-域名后缀固定为 `wirehub`，Hub 标签为 `hub`（见 `internal/config/config.go`）。裸 `wirehub` / `www.wirehub` 不解析。
+裸域名 `wirehub` / `www.wirehub` 不解析。其余查询转发至设置中的 **额外 DNS**。
 
-## 访问控制
+### 访问控制
 
-每个 Peer 只能属于 **一个组**。同组 Peer 默认可互相访问。**组间访问** 在 **Groups** 页面（React Flow）中配置：组之间连线表示允许互通；未连线的组 **默认不可访问**。
+- 每个 Peer 仅属 **一个组**；同组 Peer 可直接互通。
+- **跨组**访问须在 **Groups** 拓扑上显式连线（默认拒绝）。
+  - **双向** — 两组均可主动访问对方。
+  - **单向**（`A → B`）— `A` 仍按 `B` 的 IP 与端口访问；Hub 对出站 SNAT，使 `B` 只见 Hub；回程改写后 `A` 仍认为来自 `B`。`B` 不能主动访问 `A`。
 
-规则在 Hub 用户态转发路径中执行，仅作用于 **Peer ↔ Peer** 流量，不影响访问 Hub Web 或 DNS。
+策略仅作用于 Peer 间流量，不影响访问 Hub Web 或 DNS。
+
+### 端口转发
+
+规则在 **Hub VPN IP** 上监听并转发。Peer 在隧道内访问 `{hub_ip}:{监听端口}`。
+
+| 目标 | 解析 |
+|------|------|
+| `*.wirehub` FQDN | Hub 权威 DNS |
+| 外网域名 | 额外 DNS（A 记录） |
+| IPv4 | 字面地址 |
+
+目标须为 FQDN 或 IPv4（不接受无域后缀的 Peer 名）。切换 **Enabled** 即时生效，无需重启 VPN 栈。此为显式 L4 代理，与组间单向 SNAT 无关。
 
 ## 开发
 
-**后端 + 内嵌 UI**（接近生产环境）：
-
 ```bash
+# 后端 + 内嵌 UI
 cd web && npm ci && npm run build && cd ..
 go run ./cmd/wirehub --data-dir ./data
-```
 
-**前端热更新**（API 代理，Go 服务需监听 `8080`）：
+# 前端热更新（/api 代理到 :8080）
+go run ./cmd/wirehub --port 8080 --data-dir ./data   # 终端 1
+cd web && npm run dev                                 # 终端 2
 
-```bash
-# 终端 1
-go run ./cmd/wirehub --port 8080 --data-dir ./data
-
-# 终端 2
-cd web && npm ci && npm run dev
-```
-
-Vite 将 `/api` 代理到 `http://localhost:8080`（见 `web/vite.config.ts`）。
-
-**测试：**
-
-```bash
 go test ./...
 ```
 

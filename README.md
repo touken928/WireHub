@@ -1,7 +1,7 @@
 <h1 align="center">WireHub</h1>
 
 <p align="center">
-  <strong>Centralized hub-and-spoke WireGuard management with a built-in web dashboard — one public hub endpoint, <a href="https://github.com/WireGuard/wireguard-go">userspace WireGuard</a> on the server, no kernel module required.</strong>
+  <strong>Centralized hub and spoke WireGuard with a built in web UI. Server runs <a href="https://github.com/WireGuard/wireguard-go">userspace WireGuard</a> on gVisor netstack; one public endpoint, no kernel module.</strong>
 </p>
 
 <p align="center">
@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.26+-00ADD8.svg?style=for-the-badge&logo=go&logoColor=white" alt="Go 1.26+"></a>
-  <a href="https://react.dev/"><img src="https://img.shields.io/badge/react-19-61DAFB.svg?style=for-the-badge&logo=react&logoColor=black" alt="React 19"></a>
+  <a href="https://react.dev/"><img src="https://img.shields.io/badge/react-19-61DAFB.svg?style=for-the-badge&logo=react&logoColor=white" alt="React 19"></a>
   <a href="https://www.docker.com/"><img src="https://img.shields.io/badge/docker-ready-2496ED.svg?style=for-the-badge&logo=docker&logoColor=white" alt="Docker"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue.svg?style=for-the-badge" alt="GPL-3.0"></a>
 </p>
@@ -21,99 +21,74 @@
 
 ## Features
 
-- **Hub-and-spoke topology** — only the hub needs a routable endpoint; peers connect outbound
-- **Web admin UI** — React + Fluent UI; embedded in the release binary
-- **Peer lifecycle** — create, edit, disable, delete; export `.conf` or scan a QR code
-- **Built-in DNS** — `{name}.wirehub`; hub is `hub.wirehub`; `www.{name}.wirehub` is an alias
-- **Group-based access control** — peers belong to one group; **bidirectional** links allow direct WG; **unidirectional** links use transparent hub SNAT (client dials target peer IP:port; hub picks ephemeral ports)
-- **Live status** — last handshake, RX/TX bytes, network usage charts
-- **Port forwarding** — per-port TCP/UDP proxy on the hub VPN IP
-- **Settings & backup** — edit runtime hub options, export/import full `wirehub.db`, password-protected reset
-- **Userspace WireGuard** — [wireguard-go](https://github.com/WireGuard/wireguard-go) + gVisor netstack; no kernel module on the hub
+- **Hub and spoke topology** — only the hub needs a routable endpoint; peers connect outbound
+- **Single binary** — React admin UI embedded via `go:embed`; SQLite persistence
+- **Setup wizard** — new hub or import `wirehub.db`; Hub / Admin / Advanced sections
+- **Peer lifecycle** — create from Groups or Peers; rename, move group, enable/disable, delete; export `.conf` or QR code
+- **Built in DNS** — `hub.wirehub`, `{peer}.wirehub`; `www.*` aliases; upstream resolvers for other names
+- **Group access control** — one group per peer; **bidirectional** or **unidirectional** links on the topology graph (default deny across groups)
+- **Live status** — WebSocket push: handshake, RX/TX, traffic charts
+- **Port forwarding** — TCP/UDP listeners on hub VPN IP → FQDN or IPv4
+- **Settings and backup** — runtime options, password change, database export, password protected reset
+- **Userspace WireGuard** — [wireguard-go](https://github.com/WireGuard/wireguard-go) + gVisor netstack; no host TUN on the hub
 
-## How it works
+## Architecture
 
 ```mermaid
 flowchart TB
   net([Public Internet])
 
-  net -->|TCP :8443 · Web UI| web["Web UI + REST API<br/>(Gin + React)"]
-  net -->|UDP · WireGuard port| hub
+  net -->|TCP · Web/API| host["Host listener<br/>(CLI --port)"]
+  net -->|UDP · WireGuard| wg["Userspace WG + netstack"]
 
-  admin[Admin browser] --> web
-  web --> hub
+  admin[Admin browser] --> host
+  host --> wg
 
-  hub["WireHub Hub<br/>wireguard-go · userspace TUN<br/>DNS UDP 53 · access filter"]
+  wg --> dns["DNS :53 on hub IP"]
+  wg --> filter["L3 forward + ACL filter"]
+  wg --> fwd["L4 forwards on hub IP"]
 
-  hub -->|WireGuard tunnel| p1["Laptop peer<br/>(same group)"]
-  hub -->|WireGuard tunnel| p2["Server peer<br/>(same group)"]
-  hub -->|WireGuard tunnel| p3["Restricted peer<br/>(other group)"]
+  filter --> p1[Peer A]
+  filter --> p2[Peer B]
+  filter --> p3[Peer C]
 ```
 
-After setup, the hub serves tunnel web UI and DNS on the VPN address. Peer-to-peer traffic is L3-forwarded and filtered by group rules; traffic to the hub itself is not filtered.
-
-## Web UI
-
-| Page | Purpose |
-|------|---------|
-| **Dashboard** | Hub status, WireGuard endpoint, live traffic chart |
-| **Groups** | React Flow graph — pick link type (bottom-left), drag between groups; click a group to manage peers |
-| **Peers** | All peers with online status, config download, enable/disable, delete |
-| **Forward** | Port forwards on the hub VPN IP → FQDN (`*.wirehub` or external) or IPv4 |
-| **Settings** | Editable hub options, password change, database export, danger-zone reset |
-
-Destructive actions (delete peer/group, disconnect link, reset hub) require confirmation in the UI. Reset also requires your admin password.
-
-## Requirements
-
-| Component | Version |
-|-----------|---------|
-| Go (from source) | 1.26+ |
-| Node.js (frontend build) | 22+ |
-| Docker (optional) | 20+ |
+- **Control plane** — Gin REST API + React UI (JWT auth). Status is pushed over WebSocket.
+- **Data plane** — WireGuard tunnels terminate in netstack. Peer-to-peer traffic is forwarded and filtered by group policy. Traffic to the hub itself (Web, DNS, forward listeners) is not subject to peer ACL rules.
 
 ## Quick start
 
-### Docker (recommended)
-
-Pull a release image from GitHub Container Registry:
+### Docker
 
 ```bash
 docker pull ghcr.io/touken928/wirehub:latest
 
 docker run -d --name wirehub \
+  --restart unless-stopped \
   -p 8443:8443 \
   -p 8443:8443/udp \
   -v wirehub-data:/app/data \
   ghcr.io/touken928/wirehub:latest
 ```
 
-Build locally with Compose:
+Or build locally: `docker compose -f docker/compose.yml up -d --build`.
 
-```bash
-docker compose -f docker/docker-compose.yml up -d --build
-```
+No `--cap-add` or `--privileged` is required. Image defaults: data dir `/app/data`, port `8443`, bind `0.0.0.0`.
 
-Open **http://localhost:8443/setup** and complete the first-run wizard.
+Open **http://localhost:8443/setup** for first-run configuration.
 
-No `--cap-add` or `--privileged` is required: WireHub uses wireguard-go's userspace netstack (gVisor), not a kernel TUN device. CLI flags (`--data-dir`, `--port`, `--bind`) are optional in the image — defaults are `./data` (i.e. `/app/data` with `WORKDIR /app`), `8443`, and `0.0.0.0`.
+### Release binary
 
-### Pre-built binary
-
-Download the executable for your platform from [GitHub Releases](https://github.com/touken928/wirehub/releases) (uncompressed assets), then:
+Download from [GitHub Releases](https://github.com/touken928/wirehub/releases) (`wirehub-vX.Y.Z-<platform>`). Targets: Linux amd64/arm64, macOS arm64, Windows amd64.
 
 ```bash
 chmod +x wirehub-vX.Y.Z-linux-amd64
 ./wirehub-vX.Y.Z-linux-amd64 --data-dir ./data
 ```
 
-```powershell
-.\wirehub-vX.Y.Z-windows-amd64.exe --data-dir .\data
-```
-
-Supported release targets: **Linux amd64**, **Linux arm64**, **macOS arm64**, **Windows amd64**.
-
 ### From source
+
+Requires Go 1.26+ and Node.js 22+.
 
 ```bash
 cd web && npm ci && npm run build && cd ..
@@ -121,144 +96,115 @@ go build -o wirehub ./cmd/wirehub
 ./wirehub --data-dir ./data
 ```
 
-The frontend build output is written to `internal/static/dist` and embedded via `go:embed` in `internal/static/static.go`.
+Frontend output: `internal/static/dist` (embedded via `go:embed`).
 
-## First-run setup
+## Initial setup
 
-On a fresh install the HTTP server starts immediately, but WireGuard and DNS start only after setup.
+On a fresh install the HTTP server starts immediately; WireGuard and DNS start only after setup completes.
 
-1. Open **http://&lt;host&gt;:8443/setup** (or your `--port`)
-2. Optionally **Import wirehub.db** to restore a backup, **or** fill in the new-hub form
-3. Sign in with the admin account you created
+1. Open **http://&lt;host&gt;:&lt;port&gt;/setup**
+2. **Import** an existing `wirehub.db`, or complete the **new hub** form (Hub / Admin / Advanced)
+3. Sign in with the admin account
 
-### New hub wizard
+| Field | Default | Notes |
+|-------|---------|-------|
+| Public endpoint | — | Hostname or IP in client `Endpoint` (before `:`) |
+| Client endpoint port | `8443` | Port in client `Endpoint`; may differ from CLI `--port` under NAT |
+| VPN subnet | `100.127.0.0/24` | Hub and DNS use the first host (`.1`) |
+| Admin username | `admin` | Fixed after setup |
+| Admin password | — | Required; min 8 characters |
+| MTU | `1420` | Editable later; change restarts VPN stack |
+| Status interval | `1` s | Peer stats poll interval |
+| Additional DNS | `1.2.4.8`, `1.1.1.1` | Upstream resolvers for non-`wirehub` queries |
 
-| Field | Required | Notes |
-|-------|----------|-------|
-| Public endpoint | Yes | Hostname or IP in client `Endpoint` (before the port), e.g. `example.com` |
-| Client endpoint port | Yes | Port in peer `Endpoint` (`host:port`); default **8443** |
-| VPN subnet | No | Default `100.127.0.0/24`; hub and DNS use the first host (`.1`) |
-| Admin username | No | Default `admin` |
-| Admin password | Yes | At least 8 characters; bcrypt hash in SQLite |
-| MTU | No | Default `1420` |
-| Status interval | No | Default `1` second between peer status polls |
-| Additional DNS | No | Default `1.2.4.8`, `1.1.1.1` — upstream resolvers in client configs |
+JWT secret: `{data-dir}/.jwt_secret` (created on first launch).
 
-### Import
+## Configuration
 
-Upload a previously exported **wirehub.db** to restore groups, peers, and hub settings, then sign in with the existing admin account.
+### CLI (process only)
 
-The JWT signing secret is created automatically on first launch and stored at `{data-dir}/.jwt_secret`.
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--port` | `8443` | Host TCP (Web/API) and UDP (WireGuard) bind port |
+| `--bind` | `0.0.0.0` | Host HTTP bind address |
+| `--data-dir` | `./data` | SQLite DB and secrets |
 
-## Settings (after setup)
+`settings.listen_port` in the database is written to peer configs only; it does not change the hub bind port.
 
-Open **Settings** in the sidebar.
+### Database (after setup)
 
-| Section | Editable |
-|---------|----------|
-| Hub (read-only) | Public endpoint, VPN subnet, admin username, client endpoint port |
-| Editable | MTU, status interval, additional DNS |
-| Change password | Current + new password |
-| Export | Download full `wirehub.db` snapshot |
-| Danger zone | **Reset WireHub** — wipes all data; requires admin password |
+| Setting | Editable in UI | Notes |
+|---------|----------------|-------|
+| Public endpoint, subnet, admin username, client endpoint port | No | Set at setup or via DB import |
+| MTU, status interval, additional DNS | Yes | **Settings** |
+| Admin password | Yes | **Settings** |
+| Export / reset | — | Full `wirehub.db` export; reset wipes data (password required) |
 
-Changing **MTU** restarts the VPN stack. **Reset** returns to setup mode.
+## Admin UI
 
-Fields fixed after setup: public endpoint, VPN subnet, admin username, client endpoint port (set only in the wizard or via database import).
+| Page | Purpose |
+|------|---------|
+| **Dashboard** | Hub summary, endpoint, live peer stats and traffic chart |
+| **Groups** | Topology graph; link mode (bidirectional / unidirectional); per-group peer cards; rename peers, change group |
+| **Peers** | All peers with search and filters; create, rename, move group, config download, enable/disable, delete |
+| **Forward** | TCP/UDP listeners on hub VPN IP → target host:port |
+| **Settings** | Runtime options, password, export, reset |
 
-## Port forwarding
+Destructive actions require confirmation; hub reset also requires the admin password.
 
-Open **Forward** in the sidebar.
+## Client onboarding
 
-**Explicit rules** listen on the **hub VPN IP** (`hub_ip` from settings) and proxy to a target host and port. Peers reach the service at `{hub_ip}:{listen_port}` over the tunnel.
+1. Create a peer under **Groups** (group panel) or **Peers** (dialog with group picker)
+2. Download `.conf` or scan the QR code
+3. Import into a WireGuard client and connect
 
-| Target | Example | Resolution |
-|--------|---------|------------|
-| Peer FQDN | `alice.wirehub` | Hub authoritative DNS |
-| External hostname | `db.example.com` | Additional DNS from **Settings** (A record) |
-| IPv4 address | `10.0.0.5` | Used as-is (IPv4 only) |
+Generated configs include keys, `Endpoint`, `AllowedIPs` (full subnet), `DNS` (hub IP then upstream resolvers), and MTU. The config comment points to `http://hub.wirehub` for the admin UI over the tunnel.
 
-Toggle **Enabled** on a rule; changes apply without restarting the VPN stack. This is **explicit L4** mode: clients must dial the hub listen port (see **Group links** for transparent SNAT on uni-directional edges).
+## Networking
 
-REST: `GET/POST /api/forwards`, `PUT/DELETE /api/forwards/:id`.
+### DNS
 
-## Group links
+Resolver on hub VPN IP (UDP 53). Suffix is fixed: `wirehub`; hub label is `hub`.
 
-On **Groups**, choose **Both ways** or **One-way** in the bottom-left toolbar, then drag from source to target group.
+| Name | Answer |
+|------|--------|
+| `hub.wirehub`, `www.hub.wirehub` | Hub VPN IP |
+| `{peer}.wirehub`, `www.{peer}.wirehub` | Peer VPN IP |
 
-- **Bidirectional** — peers in linked groups may reach each other directly over WireGuard.
-- **Unidirectional** (`A → B`) — peers in `A` use **`B`’s WireGuard IP and service port** as usual; the hub SNATs outbound flows to ephemeral hub ports so `B` only sees the hub. Return traffic is rewritten so `A` still sees replies from `B`. Peers in `B` cannot initiate to `A`. Explicit **Forward** rules are separate hub listen ports for admin-defined proxies.
+Bare `wirehub` / `www.wirehub` are not served. Other names are forwarded to **additional DNS** from settings.
 
-REST: `POST/DELETE /api/groups/links` with `from_group_id`, `to_group_id`, `bidirectional`.
+### Access control
 
-## CLI flags
+- Each peer belongs to **one group**. Peers in the same group may reach each other directly.
+- **Cross-group** access requires an explicit link on the **Groups** graph (default deny).
+  - **Bidirectional** — both groups may initiate to each other over WireGuard.
+  - **Unidirectional** (`A → B`) — peers in `A` dial `B`’s IP and port as usual; the hub SNATs outbound traffic so `B` sees the hub. Return traffic is rewritten for `A`. `B` cannot initiate to `A`.
 
-Process-level settings only — not stored in the database:
+Policy applies to peer-to-peer traffic only, not to reaching the hub Web UI or DNS.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--port` | `8443` | Hub listen port (Web/API TCP and WireGuard UDP). `listen_port` in the DB is only the port written to peer configs (`Endpoint`), e.g. when using port forwarding |
-| `--bind` | `0.0.0.0` | Address for the HTTP server |
-| `--data-dir` | `./data` | SQLite database, JWT secret, persistent state |
+### Port forwarding
 
-```bash
-./wirehub --port 8443 --bind 0.0.0.0 --data-dir ./data
-```
+Rules listen on the **hub VPN IP** and proxy to a target. Peers connect to `{hub_ip}:{listen_port}` inside the tunnel.
 
-## Client setup
+| Target | Resolution |
+|--------|------------|
+| `*.wirehub` FQDN | Hub authoritative DNS |
+| External hostname | Additional DNS (A record) |
+| IPv4 | Literal address |
 
-1. Sign in to the web UI
-2. Under **Groups**, select a group and add a peer — or use **Peers** to manage them
-3. Download the `.conf` file or scan the QR code
-4. Import into any WireGuard client and connect
-
-Each client config includes `Endpoint`, keys, allowed IPs, DNS (`hub IP` plus additional resolvers), and MTU.
-
-## DNS
-
-WireHub runs a resolver on the hub VPN IP (UDP 53). Names under `wirehub` are answered authoritatively; other queries are forwarded to the **additional DNS** servers configured at setup (default `1.2.4.8`, `1.1.1.1`).
-
-Client WireGuard configs list DNS as `{hub_ip}, {upstream…}` so peers resolve internal hostnames via the hub and can reach the public internet through upstream resolvers.
-
-| Name | Resolves to |
-|------|-------------|
-| `hub.wirehub` | Hub VPN IP |
-| `www.hub.wirehub` | Hub VPN IP (alias) |
-| `{peer}.wirehub` | Peer VPN IP |
-| `www.{peer}.wirehub` | Peer VPN IP (alias) |
-
-The suffix `wirehub` is fixed; the hub label is `hub` (`internal/config/config.go`). Bare `wirehub` / `www.wirehub` do not resolve.
-
-## Access control
-
-Peers are assigned to **groups** (one group per peer). Peers in the same group can reach each other. **Cross-group access** is controlled in **Groups** (React Flow): connect groups with a bidirectional or one-way edge; groups without a link cannot reach each other (**default deny**). See [Group links](#group-links).
-
-Rules are enforced in the hub's userspace forwarding path. They apply to **peer ↔ peer** traffic, not to reaching the hub web UI or DNS.
+Target must be a FQDN or IPv4 (not a bare peer name). Toggle **Enabled** to apply without restarting the VPN stack. This is explicit L4 proxying, separate from unidirectional group SNAT.
 
 ## Development
 
-**Backend + embedded UI** (production-like):
-
 ```bash
+# Backend + embedded UI
 cd web && npm ci && npm run build && cd ..
 go run ./cmd/wirehub --data-dir ./data
-```
 
-**Frontend dev server** with API proxy (run the Go server on port `8080`):
+# Frontend dev (proxy /api → :8080)
+go run ./cmd/wirehub --port 8080 --data-dir ./data   # terminal 1
+cd web && npm run dev                               # terminal 2
 
-```bash
-# terminal 1
-go run ./cmd/wirehub --port 8080 --data-dir ./data
-
-# terminal 2
-cd web && npm ci && npm run dev
-```
-
-Vite proxies `/api` to `http://localhost:8080` (see `web/vite.config.ts`).
-
-**Tests:**
-
-```bash
 go test ./...
 ```
 
