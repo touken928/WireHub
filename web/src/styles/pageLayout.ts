@@ -1,7 +1,7 @@
 import { makeStyles, tokens } from '@fluentui/react-components';
 import { LAYOUT } from '@/styles/layout';
 
-/** Shared shell for Dashboard, Groups, Users, Settings. */
+/** Shared shell for Dashboard, Groups, Peers, Settings. */
 export const usePageLayoutStyles = makeStyles({
   page: {
     display: 'flex',

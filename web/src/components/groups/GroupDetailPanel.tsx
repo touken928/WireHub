@@ -44,7 +44,7 @@ const useStyles = makeStyles({
     padding: '14px 16px',
     borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
   },
-  memberList: {
+  peerList: {
     minHeight: 0,
     overflowY: 'auto',
     overflowX: 'hidden',
@@ -55,7 +55,7 @@ const useStyles = makeStyles({
     flexDirection: 'column',
     gap: '12px',
   },
-  memberCard: {
+  peerCard: {
     flexShrink: 0,
     padding: '14px',
     display: 'flex',
@@ -65,13 +65,13 @@ const useStyles = makeStyles({
     border: `1px solid ${tokens.colorNeutralStroke2}`,
     backgroundColor: tokens.colorNeutralBackground2,
   },
-  memberTop: {
+  peerTop: {
     display: 'flex',
     alignItems: 'center',
     gap: '8px',
     flexWrap: 'wrap',
   },
-  memberMeta: {
+  peerMeta: {
     display: 'grid',
     gridTemplateColumns: '1fr 1fr',
     gap: '8px 12px',
@@ -89,7 +89,7 @@ const useStyles = makeStyles({
     fontFamily: tokens.fontFamilyMonospace,
     fontSize: tokens.fontSizeBase200,
   },
-  memberActions: {
+  peerActions: {
     display: 'flex',
     gap: '6px',
     flexWrap: 'wrap',
@@ -122,10 +122,10 @@ type GroupDetailPanelProps = {
   group: GroupGraphNode | null;
   peers: EnrichedPeer[];
   mutedClassName: string;
-  newUserName: string;
-  createUserError: string;
-  onNewUserNameChange: (value: string) => void;
-  onCreateUser: () => void;
+  newPeerName: string;
+  createPeerError: string;
+  onNewPeerNameChange: (value: string) => void;
+  onCreatePeer: () => void;
   onRenameGroup: (name: string) => Promise<void>;
   onRenamePeer: (peerId: number, name: string) => Promise<void>;
   onShowConfig: (peerId: number) => void;
@@ -137,10 +137,10 @@ export function GroupDetailPanel({
   group,
   peers,
   mutedClassName,
-  newUserName,
-  createUserError,
-  onNewUserNameChange,
-  onCreateUser,
+  newPeerName,
+  createPeerError,
+  onNewPeerNameChange,
+  onCreatePeer,
   onRenameGroup,
   onRenamePeer,
   onShowConfig,
@@ -216,21 +216,21 @@ export function GroupDetailPanel({
           aria-label="Rename group"
           onClick={openGroupRename}
         />
-        <Text size={200} className={mutedClassName}>{peers.length} member(s)</Text>
+        <Text size={200} className={mutedClassName}>{peers.length} peer(s)</Text>
       </div>
-      <div className={styles.memberList}>
+      <div className={styles.peerList}>
         {peers.length === 0 ? (
           <div className={styles.empty}>
-            <Text size={300}>No users in this group yet.</Text>
+            <Text size={300}>No peers in this group yet.</Text>
           </div>
         ) : (
           peers.map((peer) => (
-            <Card key={peer.id} className={styles.memberCard}>
-              <div className={styles.memberTop}>
+            <Card key={peer.id} className={styles.peerCard}>
+              <div className={styles.peerTop}>
                 <Text weight="semibold">{peer.name}</Text>
                 <PeerStatusBadge enabled={peer.enabled} online={peer.online} />
               </div>
-              <div className={styles.memberMeta}>
+              <div className={styles.peerMeta}>
                 <div className={styles.metaItem}>
                   <span className={styles.metaLabel}>WireGuard IP</span>
                   <span className={styles.mono}>{peer.wg_ip}</span>
@@ -250,7 +250,7 @@ export function GroupDetailPanel({
                   </Text>
                 </div>
               </div>
-              <div className={styles.memberActions}>
+              <div className={styles.peerActions}>
                 <Button size="small" icon={<EditRegular />} onClick={() => openPeerRename(peer.id, peer.name)}>
                   Rename
                 </Button>
@@ -272,21 +272,21 @@ export function GroupDetailPanel({
         )}
       </div>
       <div className={styles.addSection}>
-        <Text weight="semibold" size={300}>Add user</Text>
+        <Text weight="semibold" size={300}>Add peer</Text>
         <div className={styles.addRow}>
           <Field style={{ flex: 1 }}>
             <Input
-              value={newUserName}
+              value={newPeerName}
               placeholder="alice"
-              onChange={(_, data) => onNewUserNameChange(data.value)}
+              onChange={(_, data) => onNewPeerNameChange(data.value)}
             />
           </Field>
-          <Button appearance="primary" onClick={onCreateUser} disabled={!newUserName.trim()}>
+          <Button appearance="primary" onClick={onCreatePeer} disabled={!newPeerName.trim()}>
             Add
           </Button>
         </div>
-        {createUserError && (
-          <Text size={200} style={{ color: tokens.colorPaletteRedForeground1 }}>{createUserError}</Text>
+        {createPeerError && (
+          <Text size={200} style={{ color: tokens.colorPaletteRedForeground1 }}>{createPeerError}</Text>
         )}
       </div>
 
@@ -302,7 +302,7 @@ export function GroupDetailPanel({
       />
       <RenameDialog
         open={peerRenameOpen}
-        title="Rename user"
+        title="Rename peer"
         label="Hostname"
         value={peerRenameValue}
         error={peerRenameError}

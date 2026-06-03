@@ -43,7 +43,7 @@ const useStyles = makeStyles({
     flexDirection: 'column',
     gap: '12px',
   },
-  userCard: {
+  peerCard: {
     padding: '16px 18px',
     borderRadius: tokens.borderRadiusXLarge,
     border: `1px solid ${tokens.colorNeutralStroke2}`,
@@ -109,7 +109,7 @@ const useStyles = makeStyles({
   },
 });
 
-export default function UsersPage() {
+export default function PeersPage() {
   const styles = useStyles();
   const pageLayout = usePageLayoutStyles();
   const { confirmDeletePeer } = useDestructiveConfirm();
@@ -151,23 +151,23 @@ export default function UsersPage() {
     });
   };
 
-  if (loading || !connected) return <Spinner label="Loading users..." />;
+  if (loading || !connected) return <Spinner label="Loading peers..." />;
 
   return (
     <div className={pageLayout.page}>
       <PageHeader
-        title="Users"
+        title="Peers"
         description="All peers with live status. Manage config, group membership, and access from each row."
       />
 
       {peers.length === 0 ? (
         <div className={styles.empty}>
-          <Text>No users yet. Create a group and add users from the Groups page.</Text>
+          <Text>No peers yet. Create a group and add peers from the Groups page.</Text>
         </div>
       ) : (
         <div className={styles.list}>
           {peers.map((peer) => (
-            <Card key={peer.id} className={styles.userCard}>
+            <Card key={peer.id} className={styles.peerCard}>
               <div className={styles.identity}>
                 <div className={styles.nameRow}>
                   <Text weight="semibold">{peer.name}</Text>
@@ -221,7 +221,7 @@ export default function UsersPage() {
           <DialogBody>
             <DialogTitle>Change group</DialogTitle>
             <DialogContent>
-              <Field label="User">
+              <Field label="Peer">
                 <Input value={movePeer?.name ?? ''} readOnly />
               </Field>
               <Field label="Group">

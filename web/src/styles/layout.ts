@@ -1,6 +1,6 @@
 /** Shared layout widths for app and auth screens. */
 export const LAYOUT = {
-  /** Max width for Dashboard, Groups, Users, Settings (main shell). */
+  /** Max width for Dashboard, Groups, Peers, Settings (main shell). */
   pageMaxWidth: '1120px',
   /** Centered card width on Login / Setup. */
   authPanelWidth: '480px',

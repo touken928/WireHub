@@ -7,7 +7,7 @@ export function useDestructiveConfirm() {
   const confirmDeleteGroup = useCallback(
     () => confirm({
       title: 'Delete group?',
-      message: 'Members will be unassigned from this group.',
+      message: 'Peers must be removed before this group can be deleted.',
       confirmLabel: 'Delete',
     }),
     [confirm],
@@ -15,9 +15,9 @@ export function useDestructiveConfirm() {
 
   const confirmDeletePeer = useCallback(
     (name?: string) => {
-      const label = name?.trim() ? `"${name.trim()}"` : 'this user';
+      const label = name?.trim() ? `"${name.trim()}"` : 'this peer';
       return confirm({
-        title: 'Delete user?',
+        title: 'Delete peer?',
         message: `Delete ${label}? This cannot be undone.`,
         confirmLabel: 'Delete',
       });
@@ -28,7 +28,7 @@ export function useDestructiveConfirm() {
   const confirmDisconnectLinks = useCallback(
     (count = 1) => confirm({
       title: count <= 1 ? 'Disconnect link?' : `Disconnect ${count} links?`,
-      message: 'Group members will lose cross-group access between these groups.',
+      message: 'Peers will lose cross-group access between these groups.',
       confirmLabel: 'Disconnect',
     }),
     [confirm],

@@ -30,7 +30,7 @@ body {
   overflow-y: auto;
 }
 
-/* Groups: lock viewport; member panel scrolls internally */
+/* Groups: lock viewport; peer panel scrolls internally */
 html.layout-fill,
 html.layout-fill body,
 html.layout-fill #root {

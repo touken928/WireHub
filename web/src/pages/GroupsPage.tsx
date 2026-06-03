@@ -68,8 +68,8 @@ export default function GroupsPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [detailGroupId, setDetailGroupId] = useState<number | null>(null);
-  const [newUserName, setNewUserName] = useState('');
-  const [createUserError, setCreateUserError] = useState('');
+  const [newPeerName, setNewPeerName] = useState('');
+  const [createPeerError, setCreatePeerError] = useState('');
   const [nodeContextMenu, setNodeContextMenu] = useState<{ x: number; y: number; groupId: number } | null>(null);
 
   const detailGroup = useMemo(
@@ -127,8 +127,8 @@ export default function GroupsPage() {
 
   const selectGroup = (groupId: number) => {
     setDetailGroupId(groupId);
-    setNewUserName('');
-    setCreateUserError('');
+    setNewPeerName('');
+    setCreatePeerError('');
   };
 
   const refreshDetail = async () => {
@@ -177,15 +177,15 @@ export default function GroupsPage() {
     await load();
   };
 
-  const handleCreateUserInGroup = async () => {
-    if (!detailGroup || !newUserName.trim()) return;
-    setCreateUserError('');
+  const handleCreatePeerInGroup = async () => {
+    if (!detailGroup || !newPeerName.trim()) return;
+    setCreatePeerError('');
     try {
-      await api.createPeer({ name: newUserName.trim(), group_id: detailGroup.id });
-      setNewUserName('');
+      await api.createPeer({ name: newPeerName.trim(), group_id: detailGroup.id });
+      setNewPeerName('');
       await refreshDetail();
     } catch (err) {
-      setCreateUserError(getErrorMessage(err, 'Create failed'));
+      setCreatePeerError(getErrorMessage(err, 'Create failed'));
     }
   };
 
@@ -257,10 +257,10 @@ export default function GroupsPage() {
           group={detailGroup}
           peers={detailPeers}
           mutedClassName={pageLayout.muted}
-          newUserName={newUserName}
-          createUserError={createUserError}
-          onNewUserNameChange={setNewUserName}
-          onCreateUser={() => void handleCreateUserInGroup()}
+          newPeerName={newPeerName}
+          createPeerError={createPeerError}
+          onNewPeerNameChange={setNewPeerName}
+          onCreatePeer={() => void handleCreatePeerInGroup()}
           onRenameGroup={handleRenameGroup}
           onRenamePeer={handleRenamePeer}
           onShowConfig={(id) => void peerConfig.showConfig(id)}

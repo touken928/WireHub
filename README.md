@@ -57,12 +57,12 @@ After setup, the hub serves tunnel web UI and DNS on the VPN address. Peer-to-pe
 | Page | Purpose |
 |------|---------|
 | **Dashboard** | Hub status, WireGuard endpoint, live traffic chart |
-| **Groups** | React Flow graph — pick link type (bottom-left), drag between groups; click a group to manage members |
-| **Users** | All peers with online status, config download, enable/disable, delete |
+| **Groups** | React Flow graph — pick link type (bottom-left), drag between groups; click a group to manage peers |
+| **Peers** | All peers with online status, config download, enable/disable, delete |
 | **Forward** | Port forwards on the hub VPN IP → FQDN (`*.wirehub` or external) or IPv4 |
 | **Settings** | Editable hub options, password change, database export, danger-zone reset |
 
-Destructive actions (delete user/group, disconnect link, reset hub) require confirmation in the UI. Reset also requires your admin password.
+Destructive actions (delete peer/group, disconnect link, reset hub) require confirmation in the UI. Reset also requires your admin password.
 
 ## Requirements
 
@@ -146,7 +146,7 @@ On a fresh install the HTTP server starts immediately, but WireGuard and DNS sta
 
 ### Import
 
-Upload a previously exported **wirehub.db** to restore groups, users, and hub settings, then sign in with the existing admin account.
+Upload a previously exported **wirehub.db** to restore groups, peers, and hub settings, then sign in with the existing admin account.
 
 The JWT signing secret is created automatically on first launch and stored at `{data-dir}/.jwt_secret`.
 
@@ -208,7 +208,7 @@ Process-level settings only — not stored in the database:
 ## Client setup
 
 1. Sign in to the web UI
-2. Under **Groups**, select a group and add a user — or use **Users** to manage peers
+2. Under **Groups**, select a group and add a peer — or use **Peers** to manage them
 3. Download the `.conf` file or scan the QR code
 4. Import into any WireGuard client and connect
 
@@ -231,7 +231,7 @@ The suffix `wirehub` is fixed; the hub label is `hub` (`internal/config/config.g
 
 ## Access control
 
-Peers are assigned to **groups** (one group per user). Users in the same group can reach each other. **Cross-group access** is controlled in **Groups** (React Flow): connect groups with a bidirectional or one-way edge; groups without a link cannot reach each other (**default deny**). See [Group links](#group-links).
+Peers are assigned to **groups** (one group per peer). Peers in the same group can reach each other. **Cross-group access** is controlled in **Groups** (React Flow): connect groups with a bidirectional or one-way edge; groups without a link cannot reach each other (**default deny**). See [Group links](#group-links).
 
 Rules are enforced in the hub's userspace forwarding path. They apply to **peer ↔ peer** traffic, not to reaching the hub web UI or DNS.
 

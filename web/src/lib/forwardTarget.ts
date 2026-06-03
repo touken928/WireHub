@@ -12,7 +12,7 @@ export function validateForwardTargetHost(host: string): string | null {
     return null;
   }
   if (!h.includes('.')) {
-    return 'Use a hostname (e.g. peer.wirehub) or IPv4 address, not a peer username';
+    return 'Use a hostname (e.g. peer.wirehub) or IPv4 address, not a bare peer name';
   }
   if (h.length > 253) {
     return 'Hostname is too long';

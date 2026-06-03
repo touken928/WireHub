@@ -251,7 +251,7 @@ export default function SettingsPage() {
       <Card className={styles.dangerCard}>
         <Text weight="semibold">Danger zone</Text>
         <Text size={200} className={pageLayout.muted}>
-          Reset permanently deletes all hub settings, groups, users, and admin credentials.
+          Reset permanently deletes all hub settings, groups, peers, and admin credentials.
         </Text>
         <Button
           appearance="secondary"
@@ -294,7 +294,7 @@ export default function SettingsPage() {
             <DialogTitle>Reset WireHub?</DialogTitle>
             <DialogContent style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <Text>
-                This permanently deletes all hub settings, groups, users, and admin credentials.
+                This permanently deletes all hub settings, groups, peers, and admin credentials.
               </Text>
               <Field label="Admin password" required>
                 <Input

@@ -18,7 +18,7 @@ func normalizeForwardTargetHost(host string) string {
 }
 
 // ValidateForwardTargetHost checks the forward destination FQDN or IPv4 address.
-// Peer usernames without a domain suffix are rejected.
+// Peer names without a domain suffix are rejected.
 func ValidateForwardTargetHost(host string) (string, error) {
 	host = normalizeForwardTargetHost(host)
 	if host == "" {
@@ -31,7 +31,7 @@ func ValidateForwardTargetHost(host string) (string, error) {
 		return ip.String(), nil
 	}
 	if !strings.Contains(host, ".") {
-		return "", fmt.Errorf("target host must be a hostname or IPv4 address, not a peer username")
+		return "", fmt.Errorf("target host must be a hostname or IPv4 address, not a bare peer name")
 	}
 	if len(host) > 253 {
 		return "", fmt.Errorf("target host too long")
