@@ -1,33 +1,17 @@
 import {
   Button,
-  Card,
-  Dialog,
-  DialogActions,
-  DialogBody,
-  DialogContent,
-  DialogSurface,
-  DialogTitle,
   Field,
   Input,
-  Select,
   Text,
   makeStyles,
   tokens,
 } from '@fluentui/react-components';
-import {
-  ArrowDownloadRegular,
-  DeleteRegular,
-  EditRegular,
-  PeopleTeamRegular,
-  PowerRegular,
-} from '@fluentui/react-icons';
+import { EditRegular } from '@fluentui/react-icons';
 import { useState } from 'react';
 import type { GroupGraphNode } from '@/api/types';
-import { DNS_DOMAIN } from '@/constants';
 import { RenameDialog } from '@/components/common/RenameDialog';
-import { formatBytes, formatHandshake } from '@/lib/format';
+import { PeerMemberCard, type PeerMemberCardGroup } from '@/components/peers/PeerMemberCard';
 import { getErrorMessage } from '@/lib/error';
-import { PeerStatusBadge } from '@/components/peers/PeerStatusBadge';
 import type { EnrichedPeer } from '@/pages/groups/utils';
 
 const useStyles = makeStyles({
@@ -68,65 +52,6 @@ const useStyles = makeStyles({
     flexDirection: 'column',
     gap: '12px',
   },
-  peerCard: {
-    flexShrink: 0,
-    padding: '14px',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '10px',
-    borderRadius: tokens.borderRadiusLarge,
-    border: `1px solid ${tokens.colorNeutralStroke2}`,
-    backgroundColor: tokens.colorNeutralBackground2,
-  },
-  peerHeader: {
-    display: 'flex',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    gap: '8px',
-  },
-  peerHeaderActions: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '2px',
-    flexShrink: 0,
-  },
-  peerTop: {
-    flex: 1,
-    minWidth: 0,
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    flexWrap: 'wrap',
-  },
-  peerMeta: {
-    display: 'grid',
-    gridTemplateColumns: '1fr 1fr',
-    gap: '8px 12px',
-  },
-  metaItem: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '2px',
-  },
-  metaLabel: {
-    color: tokens.colorNeutralForeground3,
-    fontSize: tokens.fontSizeBase200,
-  },
-  mono: {
-    fontFamily: tokens.fontFamilyMonospace,
-    fontSize: tokens.fontSizeBase200,
-  },
-  peerActions: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
-    gap: '6px',
-  },
-  actionButton: {
-    width: '100%',
-    minWidth: 0,
-    paddingLeft: '6px',
-    paddingRight: '6px',
-  },
   addSection: {
     flexShrink: 0,
     padding: '12px 16px 16px',
@@ -151,14 +76,9 @@ const useStyles = makeStyles({
   },
 });
 
-type GroupOption = {
-  id: number;
-  name: string;
-};
-
 type GroupDetailPanelProps = {
   group: GroupGraphNode | null;
-  groups: GroupOption[];
+  groups: PeerMemberCardGroup[];
   peers: EnrichedPeer[];
   mutedClassName: string;
   newPeerName: string;
@@ -172,6 +92,21 @@ type GroupDetailPanelProps = {
   onTogglePeer: (peerId: number) => void;
   onDeletePeer: (peerId: number, peerName: string) => void;
 };
+
+function toMemberCardPeer(peer: EnrichedPeer) {
+  return {
+    id: peer.id,
+    name: peer.name,
+    fqdn: peer.fqdn,
+    wg_ip: peer.wg_ip,
+    group_id: peer.group_id,
+    enabled: peer.enabled,
+    online: peer.online,
+    last_handshake: peer.last_handshake ?? 0,
+    rx_bytes: peer.rx_bytes ?? 0,
+    tx_bytes: peer.tx_bytes ?? 0,
+  };
+}
 
 export function GroupDetailPanel({
   group,
@@ -193,15 +128,6 @@ export function GroupDetailPanel({
   const [groupRenameOpen, setGroupRenameOpen] = useState(false);
   const [groupRenameValue, setGroupRenameValue] = useState('');
   const [groupRenameError, setGroupRenameError] = useState('');
-  const [peerRenameOpen, setPeerRenameOpen] = useState(false);
-  const [peerRenameId, setPeerRenameId] = useState<number | null>(null);
-  const [peerRenameValue, setPeerRenameValue] = useState('');
-  const [peerRenameError, setPeerRenameError] = useState('');
-  const [moveOpen, setMoveOpen] = useState(false);
-  const [movePeerId, setMovePeerId] = useState<number | null>(null);
-  const [movePeerName, setMovePeerName] = useState('');
-  const [moveGroupId, setMoveGroupId] = useState('');
-  const [moveError, setMoveError] = useState('');
 
   const openGroupRename = () => {
     if (!group) return;
@@ -219,46 +145,6 @@ export function GroupDetailPanel({
       setGroupRenameOpen(false);
     } catch (err) {
       setGroupRenameError(getErrorMessage(err, 'Rename failed'));
-    }
-  };
-
-  const openPeerRename = (peerId: number, currentName: string) => {
-    setPeerRenameId(peerId);
-    setPeerRenameValue(currentName);
-    setPeerRenameError('');
-    setPeerRenameOpen(true);
-  };
-
-  const savePeerRename = async () => {
-    const name = peerRenameValue.trim();
-    if (!name || peerRenameId == null) return;
-    setPeerRenameError('');
-    try {
-      await onRenamePeer(peerRenameId, name);
-      setPeerRenameOpen(false);
-      setPeerRenameId(null);
-    } catch (err) {
-      setPeerRenameError(getErrorMessage(err, 'Rename failed'));
-    }
-  };
-
-  const openMovePeer = (peerId: number, peerName: string, currentGroupId: number) => {
-    setMovePeerId(peerId);
-    setMovePeerName(peerName);
-    setMoveGroupId(String(currentGroupId));
-    setMoveError('');
-    setMoveOpen(true);
-  };
-
-  const saveMovePeer = async () => {
-    if (movePeerId == null || !moveGroupId) return;
-    setMoveError('');
-    try {
-      await onMovePeer(movePeerId, Number(moveGroupId));
-      setMoveOpen(false);
-      setMovePeerId(null);
-    } catch (err) {
-      setMoveError(getErrorMessage(err, 'Move failed'));
     }
   };
 
@@ -292,66 +178,16 @@ export function GroupDetailPanel({
           </div>
         ) : (
           peers.map((peer) => (
-            <Card key={peer.id} className={styles.peerCard}>
-              <div className={styles.peerHeader}>
-                <div className={styles.peerTop}>
-                  <Text weight="semibold">{peer.name}</Text>
-                  <PeerStatusBadge enabled={peer.enabled} online={peer.online} />
-                </div>
-                <div className={styles.peerHeaderActions}>
-                  <Button
-                    size="small"
-                    icon={<EditRegular />}
-                    appearance="subtle"
-                    aria-label="Rename peer"
-                    onClick={() => openPeerRename(peer.id, peer.name)}
-                  />
-                  <Button
-                    size="small"
-                    icon={<DeleteRegular />}
-                    appearance="subtle"
-                    aria-label="Delete peer"
-                    onClick={() => onDeletePeer(peer.id, peer.name)}
-                  />
-                </div>
-              </div>
-              <div className={styles.peerMeta}>
-                <div className={styles.metaItem}>
-                  <span className={styles.metaLabel}>WireGuard IP</span>
-                  <span className={styles.mono}>{peer.wg_ip}</span>
-                </div>
-                <div className={styles.metaItem}>
-                  <span className={styles.metaLabel}>DNS</span>
-                  <span className={styles.mono}>{peer.fqdn || `${peer.name}.${DNS_DOMAIN}`}</span>
-                </div>
-                <div className={styles.metaItem}>
-                  <span className={styles.metaLabel}>Last handshake</span>
-                  <Text size={200}>{formatHandshake(peer.last_handshake ?? 0)}</Text>
-                </div>
-                <div className={styles.metaItem}>
-                  <span className={styles.metaLabel}>Traffic</span>
-                  <Text size={200}>
-                    {formatBytes(peer.rx_bytes ?? 0)} / {formatBytes(peer.tx_bytes ?? 0)}
-                  </Text>
-                </div>
-              </div>
-              <div className={styles.peerActions}>
-                <Button
-                  className={styles.actionButton}
-                  size="small"
-                  icon={<PeopleTeamRegular />}
-                  onClick={() => openMovePeer(peer.id, peer.name, peer.group_id)}
-                >
-                  Group
-                </Button>
-                <Button className={styles.actionButton} size="small" icon={<ArrowDownloadRegular />} onClick={() => onShowConfig(peer.id)}>
-                  Config
-                </Button>
-                <Button className={styles.actionButton} size="small" icon={<PowerRegular />} onClick={() => onTogglePeer(peer.id)}>
-                  Toggle
-                </Button>
-              </div>
-            </Card>
+            <PeerMemberCard
+              key={peer.id}
+              peer={toMemberCardPeer(peer)}
+              groups={groups}
+              onRename={onRenamePeer}
+              onMove={onMovePeer}
+              onShowConfig={onShowConfig}
+              onToggle={onTogglePeer}
+              onDelete={onDeletePeer}
+            />
           ))
         )}
       </div>
@@ -384,46 +220,6 @@ export function GroupDetailPanel({
         onClose={() => setGroupRenameOpen(false)}
         onSave={() => void saveGroupRename()}
       />
-      <RenameDialog
-        open={peerRenameOpen}
-        title="Rename peer"
-        label="Hostname"
-        value={peerRenameValue}
-        error={peerRenameError}
-        onValueChange={setPeerRenameValue}
-        onClose={() => {
-          setPeerRenameOpen(false);
-          setPeerRenameId(null);
-        }}
-        onSave={() => void savePeerRename()}
-      />
-
-      <Dialog open={moveOpen} onOpenChange={(_, data) => !data.open && setMoveOpen(false)}>
-        <DialogSurface>
-          <DialogBody>
-            <DialogTitle>Change group</DialogTitle>
-            <DialogContent>
-              <Field label="Peer">
-                <Input value={movePeerName} readOnly />
-              </Field>
-              <Field label="Group">
-                <Select value={moveGroupId} onChange={(_, data) => setMoveGroupId(data.value)}>
-                  {groups.map((g) => (
-                    <option key={g.id} value={String(g.id)}>{g.name}</option>
-                  ))}
-                </Select>
-              </Field>
-              {moveError && (
-                <Text size={200} style={{ color: tokens.colorPaletteRedForeground1 }}>{moveError}</Text>
-              )}
-            </DialogContent>
-            <DialogActions>
-              <Button onClick={() => setMoveOpen(false)}>Cancel</Button>
-              <Button appearance="primary" onClick={() => void saveMovePeer()}>Save</Button>
-            </DialogActions>
-          </DialogBody>
-        </DialogSurface>
-      </Dialog>
     </aside>
   );
 }
