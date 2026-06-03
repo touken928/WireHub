@@ -62,7 +62,7 @@ function linkEdgeAppearance(
   return {
     type: 'groupLink',
     className: 'group-link-uni',
-    markerStart: { ...arrow, width: 16, height: 16 },
+    markerEnd: { ...arrow, width: 16, height: 16 },
     animated: false,
     style: { strokeWidth: 1.5 },
   };
@@ -71,12 +71,24 @@ function linkEdgeAppearance(
 /**
  * Maps a new canvas connection to DB policy direction.
  * Must match repo GroupLink (from_group_id → to_group_id) and domain.LinkAllowsInit.
+ *
+ * In ConnectionMode.Loose with source+target handles on each node, React Flow's
+ * connection.source/target can follow handle types instead of drag start/end.
+ * For unidirectional links, pass connectStartNodeId from onConnectStart.
  */
-export function connectionLinkEnds(connection: Connection): { from: number; to: number } {
-  return {
-    from: Number(connection.source),
-    to: Number(connection.target),
-  };
+export function connectionLinkEnds(
+  connection: Connection,
+  connectStartNodeId: string | null | undefined,
+  bidirectional: boolean,
+): { from: number; to: number } {
+  const src = Number(connection.source);
+  const tgt = Number(connection.target);
+  if (!bidirectional && connectStartNodeId) {
+    const from = Number(connectStartNodeId);
+    const to = from === src ? tgt : src;
+    return { from, to };
+  }
+  return { from: src, to: tgt };
 }
 
 /** True when edge policy direction matches React Flow source → target (uni links). */

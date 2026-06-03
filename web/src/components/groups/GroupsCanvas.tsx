@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
 } from 'react';
 import {
@@ -90,6 +91,14 @@ function GroupsCanvasInner({
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
   const [selectedEdgeIds, setSelectedEdgeIds] = useState<string[]>([]);
   const [linkMode, setLinkMode] = useState<LinkDrawMode>('bidirectional');
+  const connectStartNodeId = useRef<string | null>(null);
+
+  const onConnectStart = useCallback(
+    (_event: MouseEvent | TouchEvent, params: { nodeId?: string | null }) => {
+      connectStartNodeId.current = params.nodeId ?? null;
+    },
+    [],
+  );
 
   const disconnectEdges = useCallback(async (toRemove: Edge[]) => {
     if (toRemove.length === 0) return;
@@ -111,10 +120,14 @@ function GroupsCanvasInner({
   }, [disconnectEdges]);
 
   const onConnect = useCallback(async (connection: Connection) => {
-    const { from, to } = connectionLinkEnds(connection);
-    if (!from || !to || from === to) return;
-
     const bidirectional = linkMode === 'bidirectional';
+    const { from, to } = connectionLinkEnds(
+      connection,
+      connectStartNodeId.current,
+      bidirectional,
+    );
+    connectStartNodeId.current = null;
+    if (!from || !to || from === to) return;
     let shouldConnect = false;
     const currentNodes = getNodes() as Node<GroupNodeData>[];
     setEdges((eds) => {
@@ -197,6 +210,7 @@ function GroupsCanvasInner({
         edges={edges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
+        onConnectStart={onConnectStart}
         onConnect={onConnect}
         isValidConnection={isValidConnection}
         onBeforeDelete={onBeforeDelete}

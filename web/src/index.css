@@ -38,7 +38,21 @@ html.layout-fill #root {
   overflow: hidden;
 }
 
-/* Uni link dashes (static; path matches markerStart direction). */
-.react-flow__edge.group-link-uni .react-flow__edge-path {
-  stroke-dasharray: 6 4;
+/* Unidirectional links: dash flow toward path target (to_group_id / drag end). */
+@keyframes group-link-uni-to-target {
+  from {
+    stroke-dashoffset: 10;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes group-link-uni-to-target-rev {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: 10;
+  }
 }

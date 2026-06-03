@@ -78,7 +78,7 @@ export function pickEdgeHandles(
   if (!source || !target) {
     return {
       sourceHandle: handleId(Position.Bottom, 'source'),
-      targetHandle: handleId(Position.Top, 'target'),
+      targetHandle: handleId(Position.Top, 'source'),
     };
   }
 
@@ -88,7 +88,7 @@ export function pickEdgeHandles(
   const tgtSide = nearestSide(target, sCenter);
   return {
     sourceHandle: handleId(srcSide, 'source'),
-    targetHandle: handleId(tgtSide, 'target'),
+    targetHandle: handleId(tgtSide, 'source'),
   };
 }
 

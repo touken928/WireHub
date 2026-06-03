@@ -1,4 +1,4 @@
-import { memo, Fragment } from 'react';
+import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { Text, makeStyles, tokens } from '@fluentui/react-components';
 import { handleId } from '@/components/groups/groupLayout';
@@ -34,10 +34,7 @@ function GroupNode({ data, selected }: NodeProps & { data: GroupNodeData }) {
   return (
     <div className={`${styles.root} ${selected ? styles.selected : ''}`}>
       {SIDES.map((pos) => (
-        <Fragment key={pos}>
-          <Handle id={handleId(pos, 'source')} type="source" position={pos} />
-          <Handle id={handleId(pos, 'target')} type="target" position={pos} />
-        </Fragment>
+        <Handle key={pos} id={handleId(pos, 'source')} type="source" position={pos} />
       ))}
       <Text weight="semibold">{label}</Text>
     </div>

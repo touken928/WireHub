@@ -1,9 +1,11 @@
 import { BaseEdge, getSmoothStepPath, type EdgeProps } from '@xyflow/react';
 import type { GroupLinkEdgeData } from '@/components/groups/types';
 
-/** React Flow path + markerStart for uni arrow (markerEnd points backward on this path). */
+/** Uni: markerEnd at path target (same direction as dash flow and from_group_id → to_group_id). */
 export default function GroupLinkEdge({
   id,
+  source,
+  target,
   sourceX,
   sourceY,
   targetX,
@@ -28,13 +30,29 @@ export default function GroupLinkEdge({
     borderRadius: 14,
   });
 
+  const policyTowardTarget =
+    bidirectional
+    || (link?.fromGroupId != null
+      && source === String(link.fromGroupId)
+      && target === String(link.toGroupId));
+
+  const uniStyle = bidirectional
+    ? style
+    : {
+        ...style,
+        strokeDasharray: '6 4',
+        animation: policyTowardTarget
+          ? `group-link-uni-to-target 0.55s linear infinite`
+          : `group-link-uni-to-target-rev 0.55s linear infinite`,
+      };
+
   return (
     <BaseEdge
       id={id}
       path={path}
-      style={style}
-      markerStart={markerStart}
-      markerEnd={bidirectional ? markerEnd : undefined}
+      style={uniStyle}
+      markerStart={bidirectional ? markerStart : undefined}
+      markerEnd={markerEnd}
     />
   );
 }
