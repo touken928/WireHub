@@ -27,6 +27,8 @@ func Mount(r *gin.Engine) error {
 		return err
 	}
 
+	r.Use(corsMiddleware)
+
 	if assetsFS, err := fs.Sub(webFS, "assets"); err == nil {
 		r.StaticFS("/assets", http.FS(assetsFS))
 	}
@@ -37,7 +39,7 @@ func Mount(r *gin.Engine) error {
 		}
 	}
 
-	r.GET("/", serveFile(webFS, "index.html"))
+	r.GET("/", serveIndexHTML(webFS))
 
 	r.NoRoute(func(c *gin.Context) {
 		path := c.Request.URL.Path
@@ -46,6 +48,10 @@ func Mount(r *gin.Engine) error {
 			return
 		}
 		if strings.HasPrefix(path, "/assets") {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		if isLikelyAssetPath(path) {
 			c.Status(http.StatusNotFound)
 			return
 		}
@@ -58,10 +64,48 @@ func Mount(r *gin.Engine) error {
 			}
 		}
 
-		serveFile(webFS, "index.html")(c)
+		serveIndexHTML(webFS)(c)
 	})
 
 	return nil
+}
+
+func corsMiddleware(c *gin.Context) {
+	origin := c.GetHeader("Origin")
+	if origin != "" {
+		c.Header("Access-Control-Allow-Origin", origin)
+		c.Header("Vary", "Origin")
+		c.Header("Access-Control-Allow-Credentials", "true")
+	}
+	if c.Request.Method == http.MethodOptions {
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		c.AbortWithStatus(http.StatusNoContent)
+		return
+	}
+	c.Next()
+}
+
+func isLikelyAssetPath(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svg", ".woff", ".woff2", ".ttf", ".map":
+		return true
+	default:
+		return false
+	}
+}
+
+func serveIndexHTML(webFS fs.FS) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		data, err := fs.ReadFile(webFS, "index.html")
+		if err != nil {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+		c.Data(http.StatusOK, "text/html; charset=utf-8", data)
+	}
 }
 
 func serveFile(webFS fs.FS, name string) gin.HandlerFunc {
