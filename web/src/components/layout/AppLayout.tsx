@@ -3,7 +3,6 @@ import {
   tokens,
   Text,
   Button,
-  Switch,
   Tooltip,
 } from '@fluentui/react-components';
 import {
@@ -13,6 +12,8 @@ import {
   ArrowRoutingRegular,
   SettingsRegular,
   SignOutRegular,
+  WeatherMoonRegular,
+  WeatherSunnyRegular,
 } from '@fluentui/react-icons';
 import { useEffect } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
@@ -115,11 +116,6 @@ const useStyles = makeStyles({
     marginTop: 'auto',
     paddingTop: '16px',
   },
-  compactSwitch: {
-    '& label': {
-      fontSize: tokens.fontSizeBase200,
-    },
-  },
 });
 
 const NAV_ITEMS = [
@@ -163,11 +159,12 @@ export function AppLayout() {
       </aside>
       <div className={`${styles.main} ${isFill ? styles.mainFill : ''}`}>
         <div className={styles.topBar}>
-          <Switch
-            className={styles.compactSwitch}
-            label={dark ? 'Dark' : 'Light'}
-            checked={dark}
-            onChange={toggleTheme}
+          <Button
+            size="small"
+            appearance="subtle"
+            icon={dark ? <WeatherSunnyRegular /> : <WeatherMoonRegular />}
+            aria-label={dark ? 'Light mode' : 'Dark mode'}
+            onClick={toggleTheme}
           />
           <Tooltip content="Logout" relationship="label">
             <Button
