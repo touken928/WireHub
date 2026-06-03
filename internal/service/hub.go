@@ -12,15 +12,25 @@ import (
 
 var ErrNetworkUnavailable = errors.New("network runtime is not running")
 
+// StatusPublisher receives a push after peer stats are polled from WireGuard.
+type StatusPublisher interface {
+	Publish()
+}
+
 // Hub is the application service: persistence orchestration and optional live network attachments.
 type Hub struct {
 	Store *repo.Store
 
-	networkMu  sync.RWMutex
-	wg         *wg.Manager
-	dns        *dnssvc.Server
-	network    NetworkRuntime
-	statusStop chan struct{}
+	networkMu       sync.RWMutex
+	wg              *wg.Manager
+	dns             *dnssvc.Server
+	network         NetworkRuntime
+	statusStop      chan struct{}
+	statusPublisher StatusPublisher
+}
+
+func (h *Hub) SetStatusPublisher(p StatusPublisher) {
+	h.statusPublisher = p
 }
 
 func NewHub(st *repo.Store) *Hub {
@@ -123,5 +133,8 @@ func (h *Hub) pollPeerStats() {
 			hs = st.LastHandshake.Unix()
 		}
 		_ = h.Store.UpdatePeerStats(p.ID, hs, st.RxBytes, st.TxBytes)
+	}
+	if h.statusPublisher != nil {
+		h.statusPublisher.Publish()
 	}
 }

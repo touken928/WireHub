@@ -3,6 +3,7 @@ import { lazy, Suspense } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { RequireAuth } from '@/app/guards/RequireAuth';
+import { StatusProvider } from '@/app/StatusProvider';
 
 const LoginPage = lazy(() => import('@/pages/LoginPage'));
 const SetupPage = lazy(() => import('@/pages/SetupPage'));
@@ -22,7 +23,9 @@ export function AppRoutes() {
           path="/"
           element={
             <RequireAuth>
-              <AppLayout />
+              <StatusProvider>
+                <AppLayout />
+              </StatusProvider>
             </RequireAuth>
           }
         >

@@ -1,15 +1,20 @@
 package server
 
 import (
-	"github.com/touken928/wirehub/internal/service"
 	"github.com/touken928/wirehub/internal/repo"
+	"github.com/touken928/wirehub/internal/service"
+	"github.com/touken928/wirehub/internal/ws"
 )
 
 // Server is the HTTP delivery layer over the application Hub service.
 type Server struct {
 	*service.Hub
+	statusHub *ws.Hub
 }
 
 func New(st *repo.Store) *Server {
-	return &Server{Hub: service.NewHub(st)}
+	s := &Server{Hub: service.NewHub(st)}
+	s.statusHub = ws.NewHub(s.buildStatusJSON)
+	s.Hub.SetStatusPublisher(s.statusHub)
+	return s
 }

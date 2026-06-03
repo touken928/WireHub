@@ -14,8 +14,9 @@ import {
   tokens,
 } from '@fluentui/react-components';
 import { DeleteRegular } from '@fluentui/react-icons';
+import { useStatus } from '@/app/StatusProvider';
 import { api } from '@/api';
-import type { GroupGraphNode, PeerStatus } from '@/api/types';
+import type { GroupGraphNode } from '@/api/types';
 import GroupsCanvas from '@/components/groups/GroupsCanvas';
 import { edgeLinkEndpoints, graphToFlow } from '@/components/groups/groupGraph';
 import type { GroupNodeData } from '@/components/groups/types';
@@ -63,7 +64,7 @@ export default function GroupsPage() {
   const [flowEdges, setFlowEdges] = useState<Edge[]>([]);
   const [graphRevision, setGraphRevision] = useState(0);
   const [graphGroups, setGraphGroups] = useState<GroupGraphNode[]>([]);
-  const [peerStatus, setPeerStatus] = useState<PeerStatus[]>([]);
+  const { peers: peerStatus } = useStatus();
   const [createOpen, setCreateOpen] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [detailGroupId, setDetailGroupId] = useState<number | null>(null);
@@ -82,7 +83,7 @@ export default function GroupsPage() {
   );
 
   const load = useCallback(async () => {
-    const [graph, status] = await Promise.all([api.getGroupGraph(), api.getStatus()]);
+    const graph = await api.getGroupGraph();
     const { nodes, edges, layoutPayload } = graphToFlow(graph, { autoLayout: true });
     setFlowNodes(nodes);
     setFlowEdges(edges);
@@ -91,7 +92,6 @@ export default function GroupsPage() {
     }
     const groups = graph.groups ?? [];
     setGraphGroups(groups);
-    setPeerStatus(status.peers ?? []);
     setGraphRevision((v) => v + 1);
     setDetailGroupId((prev) => {
       if (groups.length === 0) return null;
@@ -114,12 +114,8 @@ export default function GroupsPage() {
         }
       }
     })();
-    const timer = setInterval(() => {
-      api.getStatus().then((s) => setPeerStatus(s.peers ?? [])).catch(() => {});
-    }, 5000);
     return () => {
       cancelled = true;
-      clearInterval(timer);
     };
   }, [load]);
 
@@ -142,8 +138,6 @@ export default function GroupsPage() {
     setFlowNodes(nodes);
     setFlowEdges(edges);
     setGraphRevision((v) => v + 1);
-    const status = await api.getStatus();
-    setPeerStatus(status.peers ?? []);
   };
 
   const onConnectLink = useCallback(async (from: number, to: number, bidirectional: boolean) => {

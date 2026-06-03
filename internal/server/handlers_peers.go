@@ -3,7 +3,6 @@ package server
 import (
 	"errors"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/touken928/wirehub/internal/service"
@@ -44,58 +43,6 @@ func toPeerResponses(h *service.Hub, peers []repo.Peer) []peerResponse {
 	return out
 }
 
-func (s *Server) handleStatus(c *gin.Context) {
-	peers, err := s.Store.ListPeers()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	settings, _ := s.Store.GetSettings()
-	groups, _ := s.Store.ListGroups()
-	groupNames := map[uint]string{}
-	for _, g := range groups {
-		groupNames[g.ID] = g.Name
-	}
-	type peerStatus struct {
-		ID            uint   `json:"id"`
-		Name          string `json:"name"`
-		FQDN          string `json:"fqdn"`
-		WGIP          string `json:"wg_ip"`
-		GroupID       uint   `json:"group_id"`
-		GroupName     string `json:"group_name"`
-		Enabled       bool   `json:"enabled"`
-		LastHandshake int64  `json:"last_handshake"`
-		RxBytes       int64  `json:"rx_bytes"`
-		TxBytes       int64  `json:"tx_bytes"`
-		Online        bool   `json:"online"`
-	}
-	now := time.Now()
-	result := make([]peerStatus, 0)
-	for _, p := range peers {
-		online := false
-		if p.LastHandshake > 0 {
-			online = now.Sub(time.Unix(p.LastHandshake, 0)) < 3*time.Minute
-		}
-		result = append(result, peerStatus{
-			ID:            p.ID,
-			Name:          p.Name,
-			FQDN:          domain.PeerFQDN(p.Name),
-			WGIP:          p.WGIP,
-			GroupID:       p.GroupID,
-			GroupName:     groupNames[p.GroupID],
-			Enabled:       p.Enabled,
-			LastHandshake: p.LastHandshake,
-			RxBytes:       p.RxBytes,
-			TxBytes:       p.TxBytes,
-			Online:        online,
-		})
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"peers":    result,
-		"settings": settings,
-	})
-}
-
 func (s *Server) handleListPeers(c *gin.Context) {
 	peers, err := s.Store.ListPeers()
 	if err != nil {
@@ -131,6 +78,7 @@ func (s *Server) handleCreatePeer(c *gin.Context) {
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
+	s.publishStatus()
 	c.JSON(http.StatusCreated, s.enrichPeerResponse(*peer))
 }
 
@@ -168,6 +116,7 @@ func (s *Server) handleUpdatePeer(c *gin.Context) {
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
+	s.publishStatus()
 	c.JSON(http.StatusOK, s.enrichPeerResponse(*peer))
 }
 
@@ -185,6 +134,7 @@ func (s *Server) handleDeletePeer(c *gin.Context) {
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
+	s.publishStatus()
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -205,6 +155,7 @@ func (s *Server) handleTogglePeer(c *gin.Context) {
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
+	s.publishStatus()
 	c.JSON(http.StatusOK, s.enrichPeerResponse(*peer))
 }
 

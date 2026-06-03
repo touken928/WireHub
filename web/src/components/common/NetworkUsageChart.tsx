@@ -1,9 +1,9 @@
 import { Card, Subtitle2, Text, makeStyles, tokens } from '@fluentui/react-components';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, formatRate } from '@/api';
+import { useStatus } from '@/app/StatusProvider';
+import { formatRate } from '@/api';
 import type { PeerStatus } from '@/api/types';
 
-const POLL_MS = 1000;
 const TICK_MS = 100;
 const WINDOW_MS = 60_000;
 const CHART_HEIGHT = 160;
@@ -123,15 +123,16 @@ const useStyles = makeStyles({
 
 function NetworkUsageChart() {
   const styles = useStyles();
+  const { peers } = useStatus();
   const [samples, setSamples] = useState<NetworkSample[]>([]);
   const [now, setNow] = useState(() => Date.now());
   const [width, setWidth] = useState(800);
   const prevRef = useRef<{ t: number; rx: number; tx: number } | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
 
-  const recordSample = useCallback((peers: PeerStatus[]) => {
+  const recordSample = useCallback((peerList: PeerStatus[]) => {
     const tick = Date.now();
-    const { rx, tx } = sumTraffic(peers);
+    const { rx, tx } = sumTraffic(peerList);
     const prev = prevRef.current;
 
     if (prev && tick > prev.t) {
@@ -152,6 +153,12 @@ function NetworkUsageChart() {
   }, []);
 
   useEffect(() => {
+    if (peers.length > 0) {
+      recordSample(peers);
+    }
+  }, [peers, recordSample]);
+
+  useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
     const ro = new ResizeObserver(([entry]) => {
@@ -163,26 +170,9 @@ function NetworkUsageChart() {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-
-    const poll = () => {
-      api.getStatus()
-        .then((data) => {
-          if (!cancelled) recordSample(data.peers ?? []);
-        })
-        .catch(() => {});
-    };
-
-    poll();
-    const pollId = setInterval(poll, POLL_MS);
     const tickId = setInterval(() => setNow(Date.now()), TICK_MS);
-
-    return () => {
-      cancelled = true;
-      clearInterval(pollId);
-      clearInterval(tickId);
-    };
-  }, [recordSample]);
+    return () => clearInterval(tickId);
+  }, []);
 
   const windowStart = now - WINDOW_MS;
   const visible = useMemo(

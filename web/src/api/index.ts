@@ -5,10 +5,8 @@ import type {
   HubSettings,
   Peer,
   PeerGroup,
-  PeerStatus,
   PortForward,
   PortForwardList,
-  Settings,
   SetupStatus,
 } from '@/api/types';
 
@@ -59,8 +57,6 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     }),
-
-  getStatus: () => request<{ peers: PeerStatus[]; settings: Settings }>('/status'),
 
   getSettings: () => request<HubSettings>('/settings'),
 

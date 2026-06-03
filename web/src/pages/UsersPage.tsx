@@ -21,7 +21,8 @@ import {
   PeopleTeamRegular,
   PowerRegular,
 } from '@fluentui/react-icons';
-import { useCallback, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useStatus } from '@/app/StatusProvider';
 import {
   api,
   formatBytes,
@@ -34,7 +35,6 @@ import { PeerStatusBadge } from '@/components/peers/PeerStatusBadge';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { useDestructiveConfirm } from '@/hooks/useDestructiveConfirm';
 import { usePeerConfig, runPeerAction } from '@/hooks/usePeerConfig';
-import { usePolling } from '@/hooks/usePolling';
 import { usePageLayoutStyles } from '@/styles/pageLayout';
 
 const useStyles = makeStyles({
@@ -115,24 +115,21 @@ export default function UsersPage() {
   const { confirmDeletePeer } = useDestructiveConfirm();
   const peerConfig = usePeerConfig();
 
-  const [peers, setPeers] = useState<PeerStatus[]>([]);
+  const { peers, connected } = useStatus();
   const [groups, setGroups] = useState<PeerGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [moveOpen, setMoveOpen] = useState(false);
   const [movePeer, setMovePeer] = useState<PeerStatus | null>(null);
   const [moveGroupId, setMoveGroupId] = useState('');
 
-  const load = useCallback(() => {
-    Promise.all([api.getStatus(), api.listGroups()])
-      .then(([status, groupList]) => {
-        setPeers(status.peers ?? []);
+  useEffect(() => {
+    api.listGroups()
+      .then((groupList) => {
         setGroups(groupList);
         setLoading(false);
       })
       .catch(() => setLoading(false));
   }, []);
-
-  usePolling(load, 5000);
 
   const openMove = (peer: PeerStatus) => {
     setMovePeer(peer);
@@ -145,18 +142,16 @@ export default function UsersPage() {
     await api.updatePeer(movePeer.id, { group_id: Number(moveGroupId) });
     setMoveOpen(false);
     setMovePeer(null);
-    load();
   };
 
   const handleDeletePeer = async (peer: PeerStatus) => {
     if (!(await confirmDeletePeer(peer.name))) return;
     await runPeerAction(async () => {
       await api.deletePeer(peer.id);
-      load();
     });
   };
 
-  if (loading) return <Spinner label="Loading users..." />;
+  if (loading || !connected) return <Spinner label="Loading users..." />;
 
   return (
     <div className={pageLayout.page}>
@@ -204,7 +199,7 @@ export default function UsersPage() {
                   Config
                 </Button>
                 <Button size="small" onClick={() => openMove(peer)}>Group</Button>
-                <Button size="small" icon={<PowerRegular />} onClick={() => api.togglePeer(peer.id).then(load)}>
+                <Button size="small" icon={<PowerRegular />} onClick={() => void api.togglePeer(peer.id)}>
                   Toggle
                 </Button>
                 <Button size="small" icon={<DeleteRegular />} appearance="subtle" onClick={() => void handleDeletePeer(peer)} />

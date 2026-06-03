@@ -108,7 +108,7 @@ web/src/
 ```
 
 - Path alias: `@/*` → `./src/*` in `tsconfig.app.json` (no `baseUrl`; TS 6 style).
-- API base: `/api`; Vite dev proxy in `vite.config.ts`.
+- API base: `/api`; live hub status via WebSocket `GET /api/ws/status?token=…` (replaces polling `/status`). Vite dev proxy enables `ws: true` in `vite.config.ts`.
 - UI: Fluent UI v9; groups graph uses `@xyflow/react`.
 
 ## Testing notes
