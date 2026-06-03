@@ -85,8 +85,8 @@ func allowDirectPeerIP(p, q PeerEndpoint, links []GroupLinkPair) bool {
 	return l.Bidirectional
 }
 
-// needsUniSNAT is true for unidirectional cross-group traffic (hub SNAT, ephemeral ports).
-func needsUniSNAT(p, q PeerEndpoint, links []GroupLinkPair) bool {
+// needsTransparentRelay is true for unidirectional cross-group traffic (hub TUN SNAT).
+func needsTransparentRelay(p, q PeerEndpoint, links []GroupLinkPair) bool {
 	if p.GroupID == 0 || q.GroupID == 0 || p.GroupID == q.GroupID {
 		return false
 	}
@@ -99,26 +99,7 @@ func needsUniSNAT(p, q PeerEndpoint, links []GroupLinkPair) bool {
 // BuildAccessPolicy configures ACL blocking and hub SNAT for unidirectional group links.
 func BuildAccessPolicy(peers []PeerEndpoint, links []GroupLinkPair) (*filter.AccessPolicy, error) {
 	rules := filter.NewRuleSet()
-	snat := filter.NewUniSNATTable()
-
-	peerByIP := make(map[netip.Addr]PeerEndpoint, len(peers))
-	for _, p := range peers {
-		if !p.Enabled || p.GroupID == 0 {
-			continue
-		}
-		ip, err := netip.ParseAddr(p.WGIP)
-		if err != nil {
-			continue
-		}
-		peerByIP[ip] = p
-		snat.RegisterPeer(ip, p.GroupID)
-	}
-	for _, l := range links {
-		if l.Bidirectional {
-			continue
-		}
-		snat.RegisterUniLink(l.FromGroupID, l.ToGroupID)
-	}
+	transparent := BuildTransparentTable(peers, links)
 
 	for _, p := range peers {
 		if !p.Enabled || p.GroupID == 0 {
@@ -140,8 +121,8 @@ func BuildAccessPolicy(peers []PeerEndpoint, links []GroupLinkPair) (*filter.Acc
 			if allowDirectPeerIP(p, q, links) {
 				continue
 			}
-			if needsUniSNAT(p, q, links) {
-				continue // hub SNAT path handles allowed A→B
+			if needsTransparentRelay(p, q, links) {
+				continue // transparent relay handles allowed A→B
 			}
 			if LinkAllowsInit(p.GroupID, q.GroupID, links) {
 				continue
@@ -150,7 +131,7 @@ func BuildAccessPolicy(peers []PeerEndpoint, links []GroupLinkPair) (*filter.Acc
 		}
 		rules.SetBlocked(fromIP, blocked)
 	}
-	return &filter.AccessPolicy{Rules: rules, SNAT: snat}, nil
+	return &filter.AccessPolicy{Rules: rules, Transparent: transparent}, nil
 }
 
 // BuildAccessRules is kept for tests that only need the block list.

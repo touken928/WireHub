@@ -178,7 +178,7 @@ Open **Forward** in the sidebar.
 | External hostname | `db.example.com` | Additional DNS from **Settings** (A record) |
 | IPv4 address | `10.0.0.5` | Used as-is (IPv4 only) |
 
-Target host must be a fully qualified domain name or IPv4 address (peer usernames without a domain suffix are not accepted). Toggle **Enabled** on a rule; changes apply without restarting the VPN stack.
+Toggle **Enabled** on a rule; changes apply without restarting the VPN stack. This is **explicit L4** mode: clients must dial the hub listen port (see **Group links** for transparent SNAT on uni-directional edges).
 
 REST: `GET/POST /api/forwards`, `PUT/DELETE /api/forwards/:id`.
 

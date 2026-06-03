@@ -12,6 +12,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/touken928/wirehub/internal/domain"
 	"github.com/touken928/wirehub/internal/vpn/filter"
+	"github.com/touken928/wirehub/internal/vpn/filter/l4"
 	"github.com/touken928/wirehub/internal/repo"
 	"github.com/touken928/wirehub/internal/vpn/wg"
 	"golang.zx2c4.com/wireguard/tun/netstack"
@@ -209,10 +210,10 @@ func applyAccessRules(hubMgr *wg.Manager, st *repo.Store) error {
 	return nil
 }
 
-func toPortForwardRules(rules []repo.PortForward) []filter.PortForwardRule {
-	out := make([]filter.PortForwardRule, 0, len(rules))
+func toForwardRules(rules []repo.PortForward) []l4.ForwardRule {
+	out := make([]l4.ForwardRule, 0, len(rules))
 	for _, r := range rules {
-		out = append(out, filter.PortForwardRule{
+		out = append(out, l4.ForwardRule{
 			ID:         r.ID,
 			ListenPort: r.ListenPort,
 			Protocol:   r.Protocol,
@@ -226,18 +227,20 @@ func toPortForwardRules(rules []repo.PortForward) []filter.PortForwardRule {
 
 func (env *peerMeshEnv) syncPortForwards(t *testing.T) {
 	t.Helper()
-	if env.portProxy == nil {
-		mgr, err := filter.NewPortProxyManager(env.wgMgr.Net(), env.hubIP, env.dnsServer)
+	if env.forwardProxy == nil {
+		mgr, err := l4.NewForwardProxy(env.wgMgr.Net(), env.hubIP, env.dnsServer)
 		if err != nil {
 			t.Fatal(err)
 		}
-		env.portProxy = mgr
+		env.forwardProxy = mgr
 	}
 	rules, err := env.store.ListPortForwards()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := env.portProxy.Apply(toPortForwardRules(rules)); err != nil {
+	runtime := toForwardRules(rules)
+	env.wgMgr.ReserveHubPorts(l4.ReservedHubPorts(env.listenPort, runtime))
+	if err := env.forwardProxy.Apply(runtime); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(100 * time.Millisecond)

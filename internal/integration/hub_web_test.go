@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/touken928/wirehub/internal/config"
-	"github.com/touken928/wirehub/internal/vpn/filter"
+	"github.com/touken928/wirehub/internal/vpn/filter/l4"
 )
 
 func TestHubWebOnNetstack(t *testing.T) {
@@ -25,7 +25,7 @@ func TestHubWebOnNetstack(t *testing.T) {
 
 	_, portStr, _ := net.SplitHostPort(backend.Listener.Addr().String())
 	webPort := mustAtoi(portStr)
-	if _, err := filter.StartHubWebServer(env.wgMgr.Net(), env.hubIP, webPort, backend.Config.Handler); err != nil {
+	if _, err := l4.StartWebServer(env.wgMgr.Net(), env.hubIP, webPort, backend.Config.Handler); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(100 * time.Millisecond)
@@ -56,7 +56,7 @@ func TestHubWebViaWireGuardPeer(t *testing.T) {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "tunnel-ok")
 	})
-	if _, err := filter.StartHubWebServer(env.wgMgr.Net(), env.hubIP, webPort, mux); err != nil {
+	if _, err := l4.StartWebServer(env.wgMgr.Net(), env.hubIP, webPort, mux); err != nil {
 		t.Fatal(err)
 	}
 

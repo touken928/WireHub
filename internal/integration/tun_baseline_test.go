@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/touken928/wirehub/internal/vpn/filter"
+	"github.com/touken928/wirehub/internal/vpn/filter/l4"
 	"github.com/touken928/wirehub/internal/repo"
 	"github.com/touken928/wirehub/internal/vpn/wg"
 	"golang.zx2c4.com/wireguard/conn"
@@ -139,7 +140,7 @@ func TestWireGuardTCPWithFilterAndForwarding(t *testing.T) {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "filtered-ok")
 	})
-	if _, err := filter.StartHubWebServer(hubMgr.Net(), "10.8.0.1", 18082, mux); err != nil {
+	if _, err := l4.StartWebServer(hubMgr.Net(), "10.8.0.1", 18082, mux); err != nil {
 		t.Fatal(err)
 	}
 

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"strings"
+
+	"github.com/touken928/wirehub/internal/vpn/filter/l4"
 )
 
 const (
@@ -67,8 +69,8 @@ func ValidateForwardListenPort(port int, hubWebPort int, protocol string) error 
 	if err := ValidateForwardPort(port, "listen port"); err != nil {
 		return err
 	}
-	if port == 53 {
-		return fmt.Errorf("listen port 53 is reserved for hub DNS")
+	if port == l4.HubDNSPort {
+		return fmt.Errorf("listen port %d is reserved for hub DNS", l4.HubDNSPort)
 	}
 	if port == hubWebPort {
 		if protocol == ForwardProtoTCP {

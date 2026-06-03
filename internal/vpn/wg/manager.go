@@ -70,6 +70,10 @@ func (m *Manager) SetAccessPolicy(p *filter.AccessPolicy) {
 	m.filterTUN.SetAccessPolicy(p)
 }
 
+func (m *Manager) ReserveHubPorts(ports []int) {
+	m.filterTUN.ReserveHubPorts(ports)
+}
+
 func (m *Manager) Net() *netstack.Net {
 	return m.tnet
 }

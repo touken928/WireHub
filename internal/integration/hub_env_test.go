@@ -10,6 +10,7 @@ import (
 	"github.com/touken928/wirehub/internal/config"
 	dnssvc "github.com/touken928/wirehub/internal/vpn/dns"
 	"github.com/touken928/wirehub/internal/vpn/filter"
+	"github.com/touken928/wirehub/internal/vpn/filter/l4"
 	"github.com/touken928/wirehub/internal/repo"
 	"github.com/touken928/wirehub/internal/vpn/wg"
 	"golang.zx2c4.com/wireguard/conn"
@@ -37,7 +38,7 @@ type livePeer struct {
 type peerMeshEnv struct {
 	wgMgr      *wg.Manager
 	dnsServer  *dnssvc.Server
-	portProxy  *filter.PortProxyManager
+	forwardProxy *l4.ForwardProxy
 	hubIP      string
 	hubPubKey  string
 	listenPort int
@@ -219,8 +220,8 @@ func setupPeerMesh(t *testing.T, specs []meshPeerSpec, linkPairs [][2]string) (*
 				p.Dev.Close()
 			}
 		}
-		if env.portProxy != nil {
-			env.portProxy.Stop()
+		if env.forwardProxy != nil {
+			env.forwardProxy.Stop()
 		}
 		_ = dnsServer.Stop()
 		_ = wgMgr.Down()

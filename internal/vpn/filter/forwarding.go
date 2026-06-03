@@ -1,11 +1,7 @@
 package filter
 
 import (
-	"errors"
 	"fmt"
-	"log"
-	"net/http"
-	"net/netip"
 	"reflect"
 	"unsafe"
 
@@ -46,24 +42,4 @@ func stackFromNet(tnet *netstack.Net) (*stack.Stack, error) {
 		return nil, fmt.Errorf("invalid netstack stack")
 	}
 	return stk, nil
-}
-
-// StartHubWebServer serves HTTP on hubIP:port inside the WireGuard netstack so tunnel peers can reach the UI.
-func StartHubWebServer(tnet *netstack.Net, hubIP string, port int, handler http.Handler) (*http.Server, error) {
-	addr, err := netip.ParseAddr(hubIP)
-	if err != nil {
-		return nil, fmt.Errorf("parse hub ip: %w", err)
-	}
-	ln, err := tnet.ListenTCPAddrPort(netip.AddrPortFrom(addr, uint16(port)))
-	if err != nil {
-		return nil, fmt.Errorf("listen %s:%d on netstack: %w", hubIP, port, err)
-	}
-	log.Printf("WireHub tunnel web: http://%s:%d (netstack)", hubIP, port)
-	srv := &http.Server{Handler: handler}
-	go func() {
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("tunnel web server: %v", err)
-		}
-	}()
-	return srv, nil
 }

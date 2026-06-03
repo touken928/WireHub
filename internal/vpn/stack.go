@@ -13,20 +13,21 @@ import (
 	"github.com/touken928/wirehub/internal/service"
 	vpndns "github.com/touken928/wirehub/internal/vpn/dns"
 	"github.com/touken928/wirehub/internal/vpn/filter"
+	"github.com/touken928/wirehub/internal/vpn/filter/l4"
 	"github.com/touken928/wirehub/internal/vpn/wg"
 )
 
 // Stack manages WireGuard, DNS, status polling, and tunnel web serving.
 type Stack struct {
-	mu          sync.Mutex
-	cfg         *config.RuntimeConfig
-	repo        *repo.Store
-	hub         *service.Hub
-	httpHandler http.Handler
+	mu           sync.Mutex
+	cfg          *config.RuntimeConfig
+	repo         *repo.Store
+	hub          *service.Hub
+	httpHandler  http.Handler
 	wgMgr        *wg.Manager
 	dnsServer    *vpndns.Server
 	tunnelSrv    *http.Server
-	portProxies  *filter.PortProxyManager
+	forwardProxy *l4.ForwardProxy
 }
 
 func NewStack(cfg *config.RuntimeConfig, st *repo.Store, hub *service.Hub, handler http.Handler) *Stack {
@@ -91,14 +92,14 @@ func (s *Stack) Start() error {
 	}
 
 	dnsServer := vpndns.NewServer(s.repo, settings.HubIP, settings.DNSIP, settings.UpstreamDNSOrDefault())
-	if err := dnsServer.StartOnNetstack(wgMgr.Net(), settings.DNSIP, 53); err != nil {
+	if err := dnsServer.StartOnNetstack(wgMgr.Net(), settings.DNSIP, l4.HubDNSPort); err != nil {
 		_ = wgMgr.Close()
 		return fmt.Errorf("dns server: %w", err)
 	}
 
 	s.hub.AttachNetwork(wgMgr, dnsServer, statusInterval)
 
-	tunnelSrv, err := filter.StartHubWebServer(wgMgr.Net(), settings.HubIP, s.cfg.Port, s.httpHandler)
+	tunnelSrv, err := l4.StartWebServer(wgMgr.Net(), settings.HubIP, s.cfg.Port, s.httpHandler)
 	if err != nil {
 		s.hub.DetachNetwork()
 		_ = dnsServer.Stop()
@@ -145,23 +146,31 @@ func (s *Stack) SyncPortForwards() error {
 }
 
 func (s *Stack) applyPortForwards(hubIP string) error {
-	if s.portProxies == nil {
-		m, err := filter.NewPortProxyManager(s.wgMgr.Net(), hubIP, s.dnsServer)
+	if s.forwardProxy == nil {
+		m, err := l4.NewForwardProxy(s.wgMgr.Net(), hubIP, s.dnsServer)
 		if err != nil {
 			return err
 		}
-		s.portProxies = m
+		s.forwardProxy = m
 	}
 	rules, err := s.repo.ListPortForwards()
 	if err != nil {
 		return err
 	}
-	runtimeRules := make([]filter.PortForwardRule, 0, len(rules))
+	runtimeRules := forwardRulesFromRepo(rules)
+	if s.wgMgr != nil {
+		s.wgMgr.ReserveHubPorts(l4.ReservedHubPorts(s.cfg.Port, runtimeRules))
+	}
+	return s.forwardProxy.Apply(runtimeRules)
+}
+
+func forwardRulesFromRepo(rules []repo.PortForward) []l4.ForwardRule {
+	out := make([]l4.ForwardRule, 0, len(rules))
 	for _, r := range rules {
 		if !r.Enabled {
 			continue
 		}
-		runtimeRules = append(runtimeRules, filter.PortForwardRule{
+		out = append(out, l4.ForwardRule{
 			ID:         r.ID,
 			ListenPort: r.ListenPort,
 			Protocol:   r.Protocol,
@@ -170,7 +179,7 @@ func (s *Stack) applyPortForwards(hubIP string) error {
 			Enabled:    true,
 		})
 	}
-	return s.portProxies.Apply(runtimeRules)
+	return out
 }
 
 func (s *Stack) Stop() error {
@@ -199,9 +208,9 @@ func (s *Stack) Stop() error {
 		s.tunnelSrv = nil
 	}
 
-	if s.portProxies != nil {
-		s.portProxies.Stop()
-		s.portProxies = nil
+	if s.forwardProxy != nil {
+		s.forwardProxy.Stop()
+		s.forwardProxy = nil
 	}
 
 	s.closeWireGuard()

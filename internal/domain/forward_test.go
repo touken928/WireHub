@@ -1,6 +1,12 @@
 package domain
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/touken928/wirehub/internal/config"
+	"github.com/touken928/wirehub/internal/vpn/filter/l4"
+)
 
 func TestValidateForwardTargetHost(t *testing.T) {
 	tests := []struct {
@@ -29,5 +35,69 @@ func TestValidateForwardTargetHost(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("%q: got %q want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestValidateForwardListenPortReservesSystemListen(t *testing.T) {
+	webPort := config.DefaultPort
+
+	tests := []struct {
+		name     string
+		port     int
+		protocol string
+		wantErr  string
+	}{
+		{
+			name:     "dns port",
+			port:     l4.HubDNSPort,
+			protocol: ForwardProtoUDP,
+			wantErr:  "reserved for hub DNS",
+		},
+		{
+			name:     "web tcp",
+			port:     webPort,
+			protocol: ForwardProtoTCP,
+			wantErr:  "hub web UI and API",
+		},
+		{
+			name:     "wireguard udp",
+			port:     webPort,
+			protocol: ForwardProtoUDP,
+			wantErr:  "WireGuard",
+		},
+		{
+			name:     "allowed custom port",
+			port:     9000,
+			protocol: ForwardProtoTCP,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateForwardListenPort(tc.port, webPort, tc.protocol)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateForwardProtocol(t *testing.T) {
+	for _, proto := range []string{"tcp", "TCP", " udp "} {
+		got, err := ValidateForwardProtocol(proto)
+		if err != nil {
+			t.Fatalf("%q: %v", proto, err)
+		}
+		if got != strings.ToLower(strings.TrimSpace(proto)) {
+			t.Fatalf("got %q", got)
+		}
+	}
+	if _, err := ValidateForwardProtocol("icmp"); err == nil {
+		t.Fatal("expected error for unsupported protocol")
 	}
 }

@@ -85,9 +85,10 @@ Frontend build output: `internal/static/dist` (Vite `outDir`).
 
 - **Thin HTTP layer:** `internal/server` handlers delegate peer/network work to `service.Hub` methods; avoid duplicating WG/DNS sync in handlers.
 - **Domain logic** stays in `internal/domain` (no GORM, no Gin).
-- **Group ACL:** `domain.BuildAccessPolicy` + `GroupLinkPair.Bidirectional` → `vpn/filter.AccessPolicy` (block list + `UniSNATTable`) → `wg.Manager.SetAccessPolicy`. Bidirectional links: direct peer WG IP. Unidirectional `A → B`: client uses `B`’s WG IP and service port; hub SNATs to ephemeral hub ports (transparent to A, return traffic rewritten on TUN Write).
+- **Group ACL:** `domain.BuildAccessPolicy` + `GroupLinkPair.Bidirectional` → `vpn/filter.AccessPolicy` (block list + `l4.TransparentTable`) → `wg.Manager.SetAccessPolicy`. Bidirectional: direct WG IP. Unidirectional: `domain.BuildTransparentTable` → TUN transparent relay (`vpn/filter/l4`).
+- **Hub L4 (`vpn/filter/l4`):** three modes — **system listen** (DNS `:53`, Web TCP + WG UDP on CLI `--port`), **ForwardProxy** (admin Forward: client dials `hub:listenPort`), **TransparentTable** (uni group link: client dials peer IP:port; hub SNAT on TUN). Shared IPv4 rewrite and ephemeral pool; `l4.ReservedHubPorts(webPort, forwards)` reserves 53, web port, and Forward listen ports from SNAT range via `wg.Manager.ReserveHubPorts`.
 - **Hostnames:** `domain.ValidateHostname`, `domain.PeerFQDN` — not a separate package.
-- **Port forwards:** `repo.PortForward`; validate with `domain.ValidateForward*` (target host must be FQDN or IPv4, not peer username); resolve targets via `vpn/dns.Server.ResolveHost` (`*.wirehub` / upstream A / IPv4). Runtime proxy in `vpn/filter.PortProxyManager`; `vpn.Stack.SyncPortForwards()` after CRUD (no full stack reload). API: `handlers_forwards.go`, routes under `/api/forwards`.
+- **Port forwards:** `repo.PortForward` → `l4.ForwardProxy`; `vpn.Stack.SyncPortForwards()` after CRUD. API: `handlers_forwards.go`, routes under `/api/forwards`.
 - **Group links:** `repo.GroupLink` with `Bidirectional`; directed edges stored as `from_group_id → to_group_id`. UI: link type toolbar bottom-left on Groups canvas. API: `POST/DELETE /api/groups/links`.
 - **Passwords:** `password.Hash` / `password.Verify` only; never import `auth` from `repo`.
 - **VPN lifecycle:** `vpn.Stack` implements `service.NetworkRuntime` (`SyncPortForwards`, `HubListenPort`); call `service.Hub.AttachNetwork` / `DetachNetwork` from stack start/stop.

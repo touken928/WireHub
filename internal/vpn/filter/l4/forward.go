@@ -1,4 +1,4 @@
-package filter
+package l4
 
 import (
 	"context"
@@ -19,18 +19,8 @@ type HostResolver interface {
 	ResolveHost(host string) (netip.Addr, error)
 }
 
-// PortForwardRule is a runtime port-forward definition applied on the hub VPN address.
-type PortForwardRule struct {
-	ID         uint
-	ListenPort int
-	Protocol   string
-	TargetHost string
-	TargetPort int
-	Enabled    bool
-}
-
-// PortProxyManager listens on the hub VPN IP and proxies to configured targets.
-type PortProxyManager struct {
+// ForwardProxy listens on hub VPN IP ports and relays to configured targets (admin Forward rules).
+type ForwardProxy struct {
 	tnet     *netstack.Net
 	hubIP    netip.Addr
 	resolver HostResolver
@@ -40,19 +30,19 @@ type PortProxyManager struct {
 	wg     sync.WaitGroup
 }
 
-func NewPortProxyManager(tnet *netstack.Net, hubIP string, resolver HostResolver) (*PortProxyManager, error) {
+func NewForwardProxy(tnet *netstack.Net, hubIP string, resolver HostResolver) (*ForwardProxy, error) {
 	addr, err := netip.ParseAddr(hubIP)
 	if err != nil {
 		return nil, fmt.Errorf("parse hub ip: %w", err)
 	}
-	return &PortProxyManager{
+	return &ForwardProxy{
 		tnet:     tnet,
 		hubIP:    addr,
 		resolver: resolver,
 	}, nil
 }
 
-func (m *PortProxyManager) Apply(rules []PortForwardRule) error {
+func (m *ForwardProxy) Apply(rules []ForwardRule) error {
 	m.Stop()
 	if len(rules) == 0 {
 		return nil
@@ -72,7 +62,7 @@ func (m *PortProxyManager) Apply(rules []PortForwardRule) error {
 		go func() {
 			defer m.wg.Done()
 			if err := m.runRule(ctx, rule); err != nil && !errors.Is(err, context.Canceled) {
-				log.Printf("port forward %s/%d -> %s:%d: %v",
+				log.Printf("forward %s/%d -> %s:%d: %v",
 					rule.Protocol, rule.ListenPort, rule.TargetHost, rule.TargetPort, err)
 			}
 		}()
@@ -80,7 +70,7 @@ func (m *PortProxyManager) Apply(rules []PortForwardRule) error {
 	return nil
 }
 
-func (m *PortProxyManager) Stop() {
+func (m *ForwardProxy) Stop() {
 	m.mu.Lock()
 	cancel := m.cancel
 	m.cancel = nil
@@ -91,7 +81,7 @@ func (m *PortProxyManager) Stop() {
 	m.wg.Wait()
 }
 
-func (m *PortProxyManager) runRule(ctx context.Context, rule PortForwardRule) error {
+func (m *ForwardProxy) runRule(ctx context.Context, rule ForwardRule) error {
 	switch rule.Protocol {
 	case "tcp":
 		return m.runTCP(ctx, rule)
@@ -102,14 +92,14 @@ func (m *PortProxyManager) runRule(ctx context.Context, rule PortForwardRule) er
 	}
 }
 
-func (m *PortProxyManager) runTCP(ctx context.Context, rule PortForwardRule) error {
+func (m *ForwardProxy) runTCP(ctx context.Context, rule ForwardRule) error {
 	listen := netip.AddrPortFrom(m.hubIP, uint16(rule.ListenPort))
 	ln, err := m.tnet.ListenTCPAddrPort(listen)
 	if err != nil {
 		return fmt.Errorf("listen tcp %s: %w", listen, err)
 	}
 	defer ln.Close()
-	log.Printf("port forward tcp %s -> %s:%d", listen, rule.TargetHost, rule.TargetPort)
+	log.Printf("forward tcp %s -> %s:%d", listen, rule.TargetHost, rule.TargetPort)
 
 	go func() {
 		<-ctx.Done()
@@ -128,18 +118,18 @@ func (m *PortProxyManager) runTCP(ctx context.Context, rule PortForwardRule) err
 	}
 }
 
-func (m *PortProxyManager) proxyTCP(ctx context.Context, client net.Conn, targetHost string, targetPort int) {
+func (m *ForwardProxy) proxyTCP(ctx context.Context, client net.Conn, targetHost string, targetPort int) {
 	defer client.Close()
 
 	addr, err := m.resolver.ResolveHost(targetHost)
 	if err != nil {
-		log.Printf("port forward tcp resolve %q: %v", targetHost, err)
+		log.Printf("forward tcp resolve %q: %v", targetHost, err)
 		return
 	}
 	target := netip.AddrPortFrom(addr, uint16(targetPort))
 	remote, err := m.tnet.DialContext(ctx, "tcp", target.String())
 	if err != nil {
-		log.Printf("port forward tcp dial %s: %v", target, err)
+		log.Printf("forward tcp dial %s: %v", target, err)
 		return
 	}
 	defer remote.Close()
@@ -161,14 +151,14 @@ func (m *PortProxyManager) proxyTCP(ctx context.Context, client net.Conn, target
 	}
 }
 
-func (m *PortProxyManager) runUDP(ctx context.Context, rule PortForwardRule) error {
+func (m *ForwardProxy) runUDP(ctx context.Context, rule ForwardRule) error {
 	listen := netip.AddrPortFrom(m.hubIP, uint16(rule.ListenPort))
 	pc, err := m.tnet.ListenUDPAddrPort(listen)
 	if err != nil {
 		return fmt.Errorf("listen udp %s: %w", listen, err)
 	}
 	defer pc.Close()
-	log.Printf("port forward udp %s -> %s:%d", listen, rule.TargetHost, rule.TargetPort)
+	log.Printf("forward udp %s -> %s:%d", listen, rule.TargetHost, rule.TargetPort)
 
 	type session struct {
 		backend    net.Conn
@@ -179,7 +169,6 @@ func (m *PortProxyManager) runUDP(ctx context.Context, rule PortForwardRule) err
 
 	buf := make([]byte, 64*1024)
 	const readWait = 500 * time.Millisecond
-	sessionIdle := 2 * time.Minute
 
 	for {
 		if ctx.Err() != nil {
@@ -200,7 +189,7 @@ func (m *PortProxyManager) runUDP(ctx context.Context, rule PortForwardRule) err
 				mu.Lock()
 				now := time.Now()
 				for key, s := range sessions {
-					if s.lastActive.Add(sessionIdle).Before(now) {
+					if s.lastActive.Add(SessionIdle).Before(now) {
 						_ = s.backend.Close()
 						delete(sessions, key)
 					}
@@ -218,14 +207,14 @@ func (m *PortProxyManager) runUDP(ctx context.Context, rule PortForwardRule) err
 			addr, resolveErr := m.resolver.ResolveHost(rule.TargetHost)
 			if resolveErr != nil {
 				mu.Unlock()
-				log.Printf("port forward udp resolve %q: %v", rule.TargetHost, resolveErr)
+				log.Printf("forward udp resolve %q: %v", rule.TargetHost, resolveErr)
 				continue
 			}
 			target := netip.AddrPortFrom(addr, uint16(rule.TargetPort))
 			backend, dialErr := m.tnet.DialContext(ctx, "udp", target.String())
 			if dialErr != nil {
 				mu.Unlock()
-				log.Printf("port forward udp dial %s: %v", target, dialErr)
+				log.Printf("forward udp dial %s: %v", target, dialErr)
 				continue
 			}
 			sess = &session{backend: backend, lastActive: time.Now()}
@@ -237,7 +226,7 @@ func (m *PortProxyManager) runUDP(ctx context.Context, rule PortForwardRule) err
 					if ctx.Err() != nil {
 						return
 					}
-					_ = back.SetReadDeadline(time.Now().Add(sessionIdle))
+					_ = back.SetReadDeadline(time.Now().Add(SessionIdle))
 					rn, readErr := back.Read(b)
 					if readErr != nil {
 						return

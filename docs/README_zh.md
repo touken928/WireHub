@@ -178,7 +178,7 @@ JWT 签名密钥在首次启动时自动生成，保存在 `{data-dir}/.jwt_secr
 | 公网域名 | `db.example.com` | **Settings** 中的额外 DNS（A 记录） |
 | IPv4 地址 | `10.0.0.5` | 直接使用（仅 IPv4） |
 
-目标主机须为 FQDN 或 IPv4（不接受无域后缀的 Peer 用户名）。在列表中切换 **Enabled** 即可生效，无需重启 VPN 栈。
+目标主机须为 FQDN 或 IPv4（不接受无域后缀的 Peer 用户名）。在列表中切换 **Enabled** 即可生效，无需重启 VPN 栈。此为 **显式 L4**（客户端须访问 Hub 监听端口）；组间**单向**连线使用 **透明 SNAT**（见下节）。
 
 REST：`GET/POST /api/forwards`，`PUT/DELETE /api/forwards/:id`。
 

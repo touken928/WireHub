@@ -4,8 +4,8 @@ import (
 	"net/netip"
 	"os"
 	"sync"
-	"time"
 
+	"github.com/touken928/wirehub/internal/vpn/filter/l4"
 	"golang.zx2c4.com/wireguard/tun"
 )
 
@@ -16,17 +16,18 @@ type TUN struct {
 	mu        sync.RWMutex
 	closeOnce sync.Once
 	access    *RuleSet
-	snat      *UniSNATTable
+	transparent *l4.TransparentTable
+	reservedHubPorts []int
 	ct        *connTrack
 }
 
 func NewTUN(inner tun.Device, hubIP netip.Addr) *TUN {
 	return &TUN{
-		inner:  inner,
-		hubIP:  hubIP,
-		access: NewRuleSet(),
-		snat:   NewUniSNATTable(),
-		ct:     newConnTrack(2 * time.Minute),
+		inner:       inner,
+		hubIP:       hubIP,
+		access:      NewRuleSet(),
+		transparent: l4.NewTransparentTable(),
+		ct:          newConnTrack(l4.SessionIdle),
 	}
 }
 
@@ -35,31 +36,42 @@ func (f *TUN) SetAccessPolicy(p *AccessPolicy) {
 	defer f.mu.Unlock()
 	if p == nil {
 		f.access = NewRuleSet()
-		f.snat = NewUniSNATTable()
+		f.transparent = l4.NewTransparentTable()
 	} else {
 		if p.Rules != nil {
 			f.access = p.Rules
 		} else {
 			f.access = NewRuleSet()
 		}
-		if p.SNAT != nil {
-			f.snat = p.SNAT
-			f.snat.SetHubIP(f.hubIP)
+		if p.Transparent != nil {
+			f.transparent = p.Transparent
+			f.transparent.SetHubIP(f.hubIP)
 		} else {
-			f.snat = NewUniSNATTable()
-			f.snat.SetHubIP(f.hubIP)
+			f.transparent = l4.NewTransparentTable()
+			f.transparent.SetHubIP(f.hubIP)
 		}
 	}
 	if f.ct != nil {
 		f.ct.reset()
 	}
-	if f.snat != nil {
-		f.snat.Reset()
+	if f.transparent != nil {
+		f.transparent.Reset()
+		f.transparent.ReserveHubPorts(f.reservedHubPorts)
 	}
 }
 
 func (f *TUN) SetAccessRules(rules *RuleSet) {
 	f.SetAccessPolicy(&AccessPolicy{Rules: rules})
+}
+
+// ReserveHubPorts marks system + forward listen ports so transparent SNAT avoids them.
+func (f *TUN) ReserveHubPorts(ports []int) {
+	f.mu.Lock()
+	f.reservedHubPorts = append([]int(nil), ports...)
+	if f.transparent != nil {
+		f.transparent.ReserveHubPorts(f.reservedHubPorts)
+	}
+	f.mu.Unlock()
 }
 
 func (f *TUN) shouldDrop(packet []byte) bool {
@@ -112,7 +124,7 @@ func (f *TUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 		return n, err
 	}
 	f.mu.RLock()
-	snat := f.snat
+	snat := f.transparent
 	f.mu.RUnlock()
 	if snat == nil {
 		return n, err
@@ -129,7 +141,7 @@ func (f *TUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 func (f *TUN) Write(bufs [][]byte, offset int) (int, error) {
 	filtered := make([][]byte, 0, len(bufs))
 	f.mu.RLock()
-	snat := f.snat
+	snat := f.transparent
 	f.mu.RUnlock()
 
 	for _, b := range bufs {
