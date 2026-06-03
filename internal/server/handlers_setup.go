@@ -186,11 +186,20 @@ func (s *Server) handleLogin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	ip := clientIP(c)
+	if s.rejectLoginRateLimit(c, ip) {
+		return
+	}
+
 	authSvc := c.MustGet("auth").(*auth.Service)
 	token, err := authSvc.Login(req.Username, req.Password)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
+	}
+	if s.loginLimiter != nil {
+		s.loginLimiter.RecordSuccess(ip)
 	}
 	c.JSON(http.StatusOK, gin.H{"token": token})
 }
