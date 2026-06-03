@@ -2,8 +2,16 @@ import { ShieldLockRegular } from '@fluentui/react-icons';
 import type { ReactNode } from 'react';
 import { useLoginPageStyles } from '@/styles/loginPage';
 
+const DEFAULT_HERO_TITLE = 'Your private network hub.';
+const DEFAULT_HERO_SUBTITLE =
+  'Centralized WireGuard management for peers, groups, and secure access.';
+
 type LoginLayoutProps = {
   children: ReactNode;
+  wide?: boolean;
+  scroll?: boolean;
+  heroTitle?: string;
+  heroSubtitle?: string;
 };
 
 function BrandMark({ hero = false }: { hero?: boolean }) {
@@ -15,9 +23,26 @@ function BrandMark({ hero = false }: { hero?: boolean }) {
   );
 }
 
-export function LoginLayout({ children }: LoginLayoutProps) {
+export function LoginLayout({
+  children,
+  wide = false,
+  scroll = false,
+  heroTitle = DEFAULT_HERO_TITLE,
+  heroSubtitle = DEFAULT_HERO_SUBTITLE,
+}: LoginLayoutProps) {
   const styles = useLoginPageStyles();
   const year = new Date().getFullYear();
+
+  const formPanelClass = [
+    styles.formPanel,
+    scroll ? styles.formPanelScroll : '',
+  ].filter(Boolean).join(' ');
+
+  const formCardClass = [
+    styles.formCard,
+    wide ? styles.formCardWide : '',
+    'login-animate-slide-up',
+  ].filter(Boolean).join(' ');
 
   return (
     <div className={styles.shell}>
@@ -28,21 +53,19 @@ export function LoginLayout({ children }: LoginLayoutProps) {
             <span className={styles.heroBrandName}>WireHub</span>
           </div>
           <div>
-            <h1 className={styles.heroTitle}>Your private network hub.</h1>
-            <p className={styles.heroSubtitle}>
-              Centralized WireGuard management for peers, groups, and secure access.
-            </p>
+            <h1 className={styles.heroTitle}>{heroTitle}</h1>
+            <p className={styles.heroSubtitle}>{heroSubtitle}</p>
           </div>
         </div>
         <p className={styles.heroFooter}>© {year} WireHub. All rights reserved.</p>
       </aside>
 
-      <main className={styles.formPanel}>
+      <main className={formPanelClass}>
         <div className={styles.mobileBrand}>
           <BrandMark />
           <span className={styles.mobileBrandName}>WireHub</span>
         </div>
-        <div className={`${styles.formCard} login-animate-slide-up`}>
+        <div className={formCardClass}>
           {children}
         </div>
       </main>

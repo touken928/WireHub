@@ -1,25 +1,18 @@
-import {
-  Input,
-  Button,
-  Title1,
-  Text,
-  Field,
-  Spinner,
-  Textarea,
-} from '@fluentui/react-components';
+import { Button, Spinner } from '@fluentui/react-components';
 import { ArrowUploadRegular } from '@fluentui/react-icons';
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, getToken, setToken } from '@/api';
 import type { SetupDefaults } from '@/api/types';
 import { useSetupStatus } from '@/app/setupStatusContext';
-import { AuthLayout } from '@/components/layout/AuthLayout';
+import { AuthField } from '@/components/auth/AuthField';
+import { LoginLayout } from '@/components/layout/LoginLayout';
 import { getErrorMessage } from '@/lib/error';
 import { textToUpstreamDns } from '@/lib/hubConfig';
-import { useAuthLayoutStyles } from '@/styles/authLayout';
+import { useLoginPageStyles } from '@/styles/loginPage';
 
 export default function SetupPage() {
-  const styles = useAuthLayoutStyles();
+  const styles = useLoginPageStyles();
   const navigate = useNavigate();
   const { refresh } = useSetupStatus();
   const fileRef = useRef<HTMLInputElement>(null);
@@ -50,6 +43,7 @@ export default function SetupPage() {
         setDefaults(status.defaults);
         setSubnet(status.defaults.subnet);
         setAdminUsername(status.defaults.admin_username);
+        setListenPort(String(status.defaults.listen_port));
         setMtu(String(status.defaults.mtu));
         setStatusInterval(String(status.defaults.status_interval));
         setUpstreamDns(status.defaults.upstream_dns.join('\n'));
@@ -108,126 +102,169 @@ export default function SetupPage() {
 
   if (loadError) {
     return (
-      <div className={styles.page}>
-        <Text className={styles.error}>{loadError}</Text>
-        <Button appearance="primary" onClick={() => window.location.reload()}>
+      <LoginLayout wide scroll heroTitle="Almost there." heroSubtitle="We could not load setup defaults. Retry to continue configuring your hub.">
+        <div>
+          <h2 className={styles.formTitle}>Setup unavailable</h2>
+          <p className={styles.formSubtitle}>Check that the hub is running and try again.</p>
+        </div>
+        <div className={`${styles.errorBanner} login-animate-scale-in`} role="alert">
+          {loadError}
+        </div>
+        <Button appearance="primary" className={styles.submitButton} onClick={() => window.location.reload()}>
           Retry
         </Button>
-      </div>
+      </LoginLayout>
     );
   }
 
   if (!defaults) {
     return (
-      <div className={styles.page}>
-        <Spinner label="Loading setup..." />
-      </div>
+      <LoginLayout wide scroll heroTitle="Set up your hub." heroSubtitle="Import a backup or configure WireGuard, DNS, and admin access in a few steps.">
+        <div className={styles.loadingState}>
+          <Spinner size="medium" />
+          <span>Loading setup…</span>
+        </div>
+      </LoginLayout>
     );
   }
 
   return (
-    <AuthLayout>
-      <Title1>WireHub Setup</Title1>
-      <Text>
-        Import an existing <Text weight="semibold">wirehub.db</Text> backup, or configure a new hub below.
-      </Text>
-      <input
-        ref={fileRef}
-        type="file"
-        accept=".db,application/octet-stream"
-        hidden
-        onChange={(event) => {
-          const file = event.target.files?.[0];
-          if (file) void handleImport(file);
-          event.target.value = '';
-        }}
-      />
-      <Button
-        icon={<ArrowUploadRegular />}
-        disabled={importing}
-        onClick={() => fileRef.current?.click()}
-      >
-        {importing ? 'Importing...' : 'Import wirehub.db'}
-      </Button>
-      {importOk && <Text className={styles.success}>{importOk}</Text>}
+    <LoginLayout
+      wide
+      scroll
+      heroTitle="Set up your hub."
+      heroSubtitle="Import a backup or configure WireGuard, DNS, and admin access in a few steps."
+    >
+      <div>
+        <h2 className={styles.formTitle}>WireHub setup</h2>
+        <p className={styles.formSubtitle}>
+          Import an existing <strong>wirehub.db</strong> backup, or create a new hub below.
+        </p>
+      </div>
 
-      <div className={styles.divider} />
-      <Text weight="semibold">New hub</Text>
+      <div className={styles.importBlock}>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".db,application/octet-stream"
+          hidden
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) void handleImport(file);
+            event.target.value = '';
+          }}
+        />
+        <Button
+          className={styles.secondaryButton}
+          icon={<ArrowUploadRegular />}
+          disabled={importing}
+          onClick={() => fileRef.current?.click()}
+        >
+          {importing ? 'Importing…' : 'Import wirehub.db'}
+        </Button>
+        {importOk ? (
+          <div className={`${styles.successBanner} login-animate-scale-in`} role="status">
+            {importOk}
+          </div>
+        ) : null}
+      </div>
+
+      <hr className={styles.sectionDivider} />
 
       <form onSubmit={handleSubmit} className={styles.form}>
-        <Field
-          label="Public endpoint"
-          required
-          hint="IP or hostname clients use in WireGuard Endpoint (before the port)"
-        >
-          <Input
-            value={endpoint}
-            placeholder="example.com"
-            onChange={(_, data) => setEndpoint(data.value)}
-          />
-        </Field>
-        <Field
-          label="Client endpoint port"
-          required
-          hint="UDP port in peer .conf (Endpoint); use your public/NAT port if forwarded (default 8443). Hub listens on CLI --port."
-        >
-          <Input
-            type="number"
+        <section className={styles.formSection}>
+          <h3 className={styles.sectionTitle}>Hub</h3>
+          <AuthField
+            id="setup-endpoint"
+            label="Public endpoint"
             required
-            value={listenPort}
-            placeholder="8443"
-            onChange={(_, data) => setListenPort(data.value)}
+            hint="IP or hostname clients use in WireGuard Endpoint (before the port)"
+            placeholder="example.com"
+            value={endpoint}
+            onChange={setEndpoint}
           />
-        </Field>
-        <Field
-          label="VPN subnet"
-          hint="CIDR for the WireGuard network; hub and DNS use the first host (.1)"
-        >
-          <Input value={subnet} onChange={(_, data) => setSubnet(data.value)} />
-        </Field>
-        <Field label="Admin username" hint="Web UI login username">
-          <Input value={adminUsername} onChange={(_, data) => setAdminUsername(data.value)} />
-        </Field>
-        <Field label="Admin password" required hint="At least 8 characters">
-          <Input
+          <AuthField
+            id="setup-listen-port"
+            label="Client endpoint port"
+            required
+            hint="UDP port in peer .conf; use your public/NAT port if forwarded (default 8443)"
+            type="number"
+            value={listenPort}
+            onChange={setListenPort}
+          />
+          <AuthField
+            id="setup-subnet"
+            label="VPN subnet"
+            hint="CIDR for the WireGuard network; hub and DNS use the first host (.1)"
+            value={subnet}
+            onChange={setSubnet}
+          />
+        </section>
+
+        <section className={styles.formSection}>
+          <h3 className={styles.sectionTitle}>Admin</h3>
+          <AuthField
+            id="setup-admin-user"
+            label="Admin username"
+            hint="Web UI login username"
+            value={adminUsername}
+            onChange={setAdminUsername}
+          />
+          <AuthField
+            id="setup-admin-password"
+            label="Admin password"
+            required
+            hint="At least 8 characters"
             type="password"
             value={adminPassword}
-            onChange={(_, data) => setAdminPassword(data.value)}
+            onChange={setAdminPassword}
           />
-        </Field>
-        <Field label="MTU" hint="WireGuard interface MTU (default 1420)">
-          <Input
+        </section>
+
+        <section className={styles.formSection}>
+          <h3 className={styles.sectionTitle}>Advanced</h3>
+          <AuthField
+            id="setup-mtu"
+            label="MTU"
+            hint="WireGuard interface MTU (default 1420)"
             type="number"
             value={mtu}
-            onChange={(_, data) => setMtu(data.value)}
+            onChange={setMtu}
           />
-        </Field>
-        <Field
-          label="Additional DNS servers"
-          hint="Public resolvers in client configs after the hub DNS IP; one per line"
-        >
-          <Textarea
-            value={upstreamDns}
+          <AuthField
+            id="setup-upstream-dns"
+            label="Additional DNS servers"
+            multiline
             rows={3}
-            onChange={(_, data) => setUpstreamDns(data.value)}
+            hint="Public resolvers in client configs after the hub DNS IP; one per line"
+            value={upstreamDns}
+            onChange={setUpstreamDns}
           />
-        </Field>
-        <Field label="Status interval (seconds)" hint="How often peer traffic stats are polled">
-          <Input
+          <AuthField
+            id="setup-status-interval"
+            label="Status interval (seconds)"
+            hint="How often peer traffic stats are polled"
             type="number"
             value={statusInterval}
-            onChange={(_, data) => setStatusInterval(data.value)}
+            onChange={setStatusInterval}
           />
-        </Field>
-        {error && <Text className={styles.error}>{error}</Text>}
+        </section>
+
+        {error ? (
+          <div className={`${styles.errorBanner} login-animate-scale-in`} role="alert">
+            {error}
+          </div>
+        ) : null}
+
         <Button
           appearance="primary"
           type="submit"
           disabled={loading || !endpoint.trim() || !listenPort.trim() || !adminPassword}
+          className={styles.submitButton}
         >
-          {loading ? 'Setting up...' : 'Complete setup'}
+          {loading ? 'Setting up…' : 'Complete setup'}
         </Button>
       </form>
-    </AuthLayout>
+    </LoginLayout>
   );
 }

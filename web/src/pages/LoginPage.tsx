@@ -1,12 +1,11 @@
-import { Button, Input } from '@fluentui/react-components';
+import { Button } from '@fluentui/react-components';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, setToken } from '@/api';
+import { AuthField } from '@/components/auth/AuthField';
 import { LoginLayout } from '@/components/layout/LoginLayout';
 import { getErrorMessage } from '@/lib/error';
-import { loginInputFocusStyle, useLoginPageStyles } from '@/styles/loginPage';
-
-type FocusField = 'username' | 'password' | null;
+import { useLoginPageStyles } from '@/styles/loginPage';
 
 export default function LoginPage() {
   const styles = useLoginPageStyles();
@@ -15,7 +14,6 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [focusedField, setFocusedField] = useState<FocusField>(null);
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -32,11 +30,6 @@ export default function LoginPage() {
     }
   };
 
-  const inputFocusHandlers = (field: Exclude<FocusField, null>) => ({
-    onFocus: () => setFocusedField(field),
-    onBlur: () => setFocusedField((current) => (current === field ? null : current)),
-  });
-
   return (
     <LoginLayout>
       <div>
@@ -45,46 +38,21 @@ export default function LoginPage() {
       </div>
 
       <form onSubmit={handleSubmit} className={styles.form} autoComplete="off">
-        <div className={styles.field}>
-          <label className={styles.fieldLabel} htmlFor="login-username">
-            Username
-          </label>
-          <Input
-            id="login-username"
-            name="username"
-            placeholder="Admin username"
-            value={username}
-            autoComplete="off"
-            className={styles.inputRoot}
-            style={loginInputFocusStyle(focusedField === 'username')}
-            input={{
-              className: styles.inputField,
-              ...inputFocusHandlers('username'),
-            }}
-            onChange={(_, data) => setUsername(data.value)}
-          />
-        </div>
-
-        <div className={styles.field}>
-          <label className={styles.fieldLabel} htmlFor="login-password">
-            Password
-          </label>
-          <Input
-            id="login-password"
-            name="password"
-            type="password"
-            placeholder="Password"
-            value={password}
-            autoComplete="new-password"
-            className={styles.inputRoot}
-            style={loginInputFocusStyle(focusedField === 'password')}
-            input={{
-              className: styles.inputField,
-              ...inputFocusHandlers('password'),
-            }}
-            onChange={(_, data) => setPassword(data.value)}
-          />
-        </div>
+        <AuthField
+          id="login-username"
+          label="Username"
+          placeholder="Admin username"
+          value={username}
+          onChange={setUsername}
+        />
+        <AuthField
+          id="login-password"
+          label="Password"
+          type="password"
+          placeholder="Password"
+          value={password}
+          onChange={setPassword}
+        />
 
         {error ? (
           <div className={`${styles.errorBanner} login-animate-scale-in`} role="alert">
