@@ -1,12 +1,6 @@
 import {
   Button,
   Card,
-  Dialog,
-  DialogActions,
-  DialogBody,
-  DialogContent,
-  DialogSurface,
-  DialogTitle,
   Field,
   Input,
   Select,
@@ -146,9 +140,6 @@ export default function PeersPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [groupFilter, setGroupFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState<PeerConnectionFilter>('all');
-  const [moveOpen, setMoveOpen] = useState(false);
-  const [movePeer, setMovePeer] = useState<PeerStatus | null>(null);
-  const [moveGroupId, setMoveGroupId] = useState('');
 
   useEffect(() => {
     api.listGroups()
@@ -171,19 +162,6 @@ export default function PeersPage() {
   const filteredPeers = useMemo(() => filterPeers(peers, filters), [peers, filters]);
   const filtersActive = hasActivePeerFilters(filters);
 
-  const openMove = (peer: PeerStatus) => {
-    setMovePeer(peer);
-    setMoveGroupId(String(peer.group_id));
-    setMoveOpen(true);
-  };
-
-  const handleMove = async () => {
-    if (!movePeer) return;
-    await api.updatePeer(movePeer.id, { group_id: Number(moveGroupId) });
-    setMoveOpen(false);
-    setMovePeer(null);
-  };
-
   const handleDeletePeer = async (peer: PeerStatus) => {
     if (!(await confirmDeletePeer(peer.name))) return;
     await runPeerAction(async () => {
@@ -203,7 +181,7 @@ export default function PeersPage() {
     <div className={pageLayout.page}>
       <PageHeader
         title="Peers"
-        description="All peers with live status. Manage config, group membership, and access from each row."
+        description="All peers with live status. Download config, toggle access, or delete from each row."
       />
 
       {peers.length === 0 ? (
@@ -295,7 +273,6 @@ export default function PeersPage() {
                     <Button size="small" icon={<ArrowDownloadRegular />} onClick={() => void peerConfig.showConfig(peer.id)}>
                       Config
                     </Button>
-                    <Button size="small" onClick={() => openMove(peer)}>Group</Button>
                     <Button size="small" icon={<PowerRegular />} onClick={() => void api.togglePeer(peer.id)}>
                       Toggle
                     </Button>
@@ -314,30 +291,6 @@ export default function PeersPage() {
         filename={peerConfig.filename}
         onClose={peerConfig.close}
       />
-
-      <Dialog open={moveOpen} onOpenChange={(_, data) => setMoveOpen(data.open)}>
-        <DialogSurface>
-          <DialogBody>
-            <DialogTitle>Change group</DialogTitle>
-            <DialogContent>
-              <Field label="Peer">
-                <Input value={movePeer?.name ?? ''} readOnly />
-              </Field>
-              <Field label="Group">
-                <Select value={moveGroupId} onChange={(_, data) => setMoveGroupId(data.value)}>
-                  {groups.map((group) => (
-                    <option key={group.id} value={String(group.id)}>{group.name}</option>
-                  ))}
-                </Select>
-              </Field>
-            </DialogContent>
-            <DialogActions>
-              <Button onClick={() => setMoveOpen(false)}>Cancel</Button>
-              <Button appearance="primary" onClick={() => void handleMove()}>Save</Button>
-            </DialogActions>
-          </DialogBody>
-        </DialogSurface>
-      </Dialog>
     </div>
   );
 }

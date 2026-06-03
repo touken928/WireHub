@@ -217,6 +217,16 @@ export default function GroupsPage() {
     await refreshDetail();
   };
 
+  const handleMovePeer = async (peerId: number, groupId: number) => {
+    await api.updatePeer(peerId, { group_id: groupId });
+    await refreshDetail();
+  };
+
+  const groupOptions = useMemo(
+    () => graphGroups.map((g) => ({ id: g.id, name: g.name })),
+    [graphGroups],
+  );
+
   if (loading) return <Spinner label="Loading groups..." />;
 
   if (loadError) {
@@ -255,6 +265,7 @@ export default function GroupsPage() {
 
         <GroupDetailPanel
           group={detailGroup}
+          groups={groupOptions}
           peers={detailPeers}
           mutedClassName={pageLayout.muted}
           newPeerName={newPeerName}
@@ -263,6 +274,7 @@ export default function GroupsPage() {
           onCreatePeer={() => void handleCreatePeerInGroup()}
           onRenameGroup={handleRenameGroup}
           onRenamePeer={handleRenamePeer}
+          onMovePeer={handleMovePeer}
           onShowConfig={(id) => void peerConfig.showConfig(id)}
           onTogglePeer={(id) => void api.togglePeer(id).then(refreshDetail)}
           onDeletePeer={(id, name) => void handleDeletePeer(id, name)}
