@@ -18,10 +18,12 @@ import {
 import {
   ArrowDownloadRegular,
   DeleteRegular,
+  DismissRegular,
   PeopleTeamRegular,
   PowerRegular,
+  SearchRegular,
 } from '@fluentui/react-icons';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useStatus } from '@/app/StatusProvider';
 import {
   api,
@@ -35,9 +37,32 @@ import { PeerStatusBadge } from '@/components/peers/PeerStatusBadge';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { useDestructiveConfirm } from '@/hooks/useDestructiveConfirm';
 import { usePeerConfig, runPeerAction } from '@/hooks/usePeerConfig';
+import {
+  type PeerConnectionFilter,
+  filterPeers,
+  hasActivePeerFilters,
+} from '@/pages/peers/filterPeers';
 import { usePageLayoutStyles } from '@/styles/pageLayout';
 
 const useStyles = makeStyles({
+  toolbar: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '10px',
+    alignItems: 'flex-end',
+  },
+  searchField: {
+    flex: '1 1 220px',
+    minWidth: '200px',
+  },
+  filterField: {
+    flex: '0 1 160px',
+    minWidth: '140px',
+  },
+  resultHint: {
+    color: tokens.colorNeutralForeground3,
+    fontSize: tokens.fontSizeBase200,
+  },
   list: {
     display: 'flex',
     flexDirection: 'column',
@@ -118,6 +143,9 @@ export default function PeersPage() {
   const { peers, connected } = useStatus();
   const [groups, setGroups] = useState<PeerGroup[]>([]);
   const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [groupFilter, setGroupFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState<PeerConnectionFilter>('all');
   const [moveOpen, setMoveOpen] = useState(false);
   const [movePeer, setMovePeer] = useState<PeerStatus | null>(null);
   const [moveGroupId, setMoveGroupId] = useState('');
@@ -130,6 +158,18 @@ export default function PeersPage() {
       })
       .catch(() => setLoading(false));
   }, []);
+
+  const filters = useMemo(
+    () => ({
+      query: searchQuery,
+      groupId: groupFilter === '' ? null : Number(groupFilter),
+      status: statusFilter,
+    }),
+    [searchQuery, groupFilter, statusFilter],
+  );
+
+  const filteredPeers = useMemo(() => filterPeers(peers, filters), [peers, filters]);
+  const filtersActive = hasActivePeerFilters(filters);
 
   const openMove = (peer: PeerStatus) => {
     setMovePeer(peer);
@@ -151,6 +191,12 @@ export default function PeersPage() {
     });
   };
 
+  const clearFilters = () => {
+    setSearchQuery('');
+    setGroupFilter('');
+    setStatusFilter('all');
+  };
+
   if (loading || !connected) return <Spinner label="Loading peers..." />;
 
   return (
@@ -165,48 +211,101 @@ export default function PeersPage() {
           <Text>No peers yet. Create a group and add peers from the Groups page.</Text>
         </div>
       ) : (
-        <div className={styles.list}>
-          {peers.map((peer) => (
-            <Card key={peer.id} className={styles.peerCard}>
-              <div className={styles.identity}>
-                <div className={styles.nameRow}>
-                  <Text weight="semibold">{peer.name}</Text>
-                  <PeerStatusBadge enabled={peer.enabled} online={peer.online} />
-                </div>
-                <span className={styles.groupTag}>
-                  <PeopleTeamRegular fontSize={14} />
-                  {peer.group_name || '—'}
-                </span>
-              </div>
-              <div className={styles.stat}>
-                <span className={styles.statLabel}>WireGuard IP</span>
-                <span className={`${styles.statValue} ${styles.mono}`}>{peer.wg_ip}</span>
-              </div>
-              <div className={styles.stat}>
-                <span className={styles.statLabel}>DNS</span>
-                <span className={`${styles.statValue} ${styles.mono}`}>{peer.fqdn || `${peer.name}.${DNS_DOMAIN}`}</span>
-              </div>
-              <div className={styles.stat}>
-                <span className={styles.statLabel}>Last handshake</span>
-                <span className={styles.statValue}>{formatHandshake(peer.last_handshake)}</span>
-              </div>
-              <div className={styles.stat}>
-                <span className={styles.statLabel}>Traffic</span>
-                <span className={styles.statValue}>{formatBytes(peer.rx_bytes)} / {formatBytes(peer.tx_bytes)}</span>
-              </div>
-              <div className={styles.actions}>
-                <Button size="small" icon={<ArrowDownloadRegular />} onClick={() => void peerConfig.showConfig(peer.id)}>
-                  Config
-                </Button>
-                <Button size="small" onClick={() => openMove(peer)}>Group</Button>
-                <Button size="small" icon={<PowerRegular />} onClick={() => void api.togglePeer(peer.id)}>
-                  Toggle
-                </Button>
-                <Button size="small" icon={<DeleteRegular />} appearance="subtle" onClick={() => void handleDeletePeer(peer)} />
-              </div>
-            </Card>
-          ))}
-        </div>
+        <>
+          <div className={styles.toolbar}>
+            <Field label="Search" className={styles.searchField}>
+              <Input
+                value={searchQuery}
+                placeholder="Name, DNS, IP, group…"
+                contentBefore={<SearchRegular />}
+                onChange={(_, data) => setSearchQuery(data.value)}
+              />
+            </Field>
+            <Field label="Group" className={styles.filterField}>
+              <Select
+                value={groupFilter}
+                onChange={(_, data) => setGroupFilter(data.value)}
+              >
+                <option value="">All groups</option>
+                {groups.map((group) => (
+                  <option key={group.id} value={String(group.id)}>{group.name}</option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Status" className={styles.filterField}>
+              <Select
+                value={statusFilter}
+                onChange={(_, data) => setStatusFilter(data.value as PeerConnectionFilter)}
+              >
+                <option value="all">All statuses</option>
+                <option value="online">Online</option>
+                <option value="offline">Offline</option>
+                <option value="disabled">Disabled</option>
+              </Select>
+            </Field>
+            <Button
+              appearance="subtle"
+              icon={<DismissRegular />}
+              disabled={!filtersActive}
+              onClick={clearFilters}
+            >
+              Clear
+            </Button>
+          </div>
+
+          <Text className={styles.resultHint}>
+            Showing {filteredPeers.length} of {peers.length} peer{peers.length === 1 ? '' : 's'}
+          </Text>
+
+          {filteredPeers.length === 0 ? (
+            <div className={styles.empty}>
+              <Text>No peers match the current search or filters.</Text>
+            </div>
+          ) : (
+            <div className={styles.list}>
+              {filteredPeers.map((peer) => (
+                <Card key={peer.id} className={styles.peerCard}>
+                  <div className={styles.identity}>
+                    <div className={styles.nameRow}>
+                      <Text weight="semibold">{peer.name}</Text>
+                      <PeerStatusBadge enabled={peer.enabled} online={peer.online} />
+                    </div>
+                    <span className={styles.groupTag}>
+                      <PeopleTeamRegular fontSize={14} />
+                      {peer.group_name || '—'}
+                    </span>
+                  </div>
+                  <div className={styles.stat}>
+                    <span className={styles.statLabel}>WireGuard IP</span>
+                    <span className={`${styles.statValue} ${styles.mono}`}>{peer.wg_ip}</span>
+                  </div>
+                  <div className={styles.stat}>
+                    <span className={styles.statLabel}>DNS</span>
+                    <span className={`${styles.statValue} ${styles.mono}`}>{peer.fqdn || `${peer.name}.${DNS_DOMAIN}`}</span>
+                  </div>
+                  <div className={styles.stat}>
+                    <span className={styles.statLabel}>Last handshake</span>
+                    <span className={styles.statValue}>{formatHandshake(peer.last_handshake)}</span>
+                  </div>
+                  <div className={styles.stat}>
+                    <span className={styles.statLabel}>Traffic</span>
+                    <span className={styles.statValue}>{formatBytes(peer.rx_bytes)} / {formatBytes(peer.tx_bytes)}</span>
+                  </div>
+                  <div className={styles.actions}>
+                    <Button size="small" icon={<ArrowDownloadRegular />} onClick={() => void peerConfig.showConfig(peer.id)}>
+                      Config
+                    </Button>
+                    <Button size="small" onClick={() => openMove(peer)}>Group</Button>
+                    <Button size="small" icon={<PowerRegular />} onClick={() => void api.togglePeer(peer.id)}>
+                      Toggle
+                    </Button>
+                    <Button size="small" icon={<DeleteRegular />} appearance="subtle" onClick={() => void handleDeletePeer(peer)} />
+                  </div>
+                </Card>
+              ))}
+            </div>
+          )}
+        </>
       )}
 
       <ConfigDialog
