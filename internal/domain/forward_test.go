@@ -16,6 +16,7 @@ func TestValidateForwardTargetHost(t *testing.T) {
 	}{
 		{"10.0.0.2", "10.0.0.2", false},
 		{"app.wirehub", "app.wirehub", false},
+		{"hub.wirehub", "hub.wirehub", false},
 		{"service.example.com", "service.example.com", false},
 		{"app", "", true},
 		{"", "", true},

@@ -7,8 +7,11 @@ import (
 	"path/filepath"
 )
 
-// DNSDomain is the private DNS suffix for peer hostnames ({name}.wirehub).
+// DNSDomain is the private DNS suffix ({label}.wirehub).
 const DNSDomain = "wirehub"
+
+// HubDNSLabel is the hostname label for the hub itself (hub.wirehub).
+const HubDNSLabel = "hub"
 
 const (
 	DefaultSubnet         = "100.127.0.0/24"

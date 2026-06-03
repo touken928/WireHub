@@ -3,16 +3,14 @@ package dns
 import (
 	"strings"
 
+	"github.com/touken928/wirehub/internal/config"
 	"github.com/touken928/wirehub/internal/repo"
 )
 
 // dnsSlug strips a leading www. prefix for alias resolution.
-// www.wirehub -> hub (""); www.{name}.wirehub -> {name}.
+// www.{name}.wirehub -> {name}; www.hub.wirehub -> hub.
 func dnsSlug(slug string) string {
 	slug = strings.ToLower(strings.TrimSpace(slug))
-	if slug == "www" {
-		return ""
-	}
 	if strings.HasPrefix(slug, "www.") {
 		return strings.TrimPrefix(slug, "www.")
 	}
@@ -26,7 +24,7 @@ func (s *Server) lookupIP(raw string, ok bool) (string, bool) {
 	raw = strings.ToLower(strings.TrimSpace(raw))
 
 	slug := dnsSlug(raw)
-	if slug == "" {
+	if slug == config.HubDNSLabel {
 		return s.hubIP, true
 	}
 	return s.lookupPeer(slug)

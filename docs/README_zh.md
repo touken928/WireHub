@@ -24,7 +24,7 @@
 - **星型拓扑** — 仅 Hub 需要可路由的公网 Endpoint，各 Peer 主动连出
 - **Web 管理界面** — React + Fluent UI，发布版内嵌于单一二进制
 - **Peer 全生命周期** — 创建、编辑、禁用、删除；导出 `.conf` 或扫码导入
-- **内置 DNS** — `{name}.wirehub`；`www.{name}.wirehub` 为别名（`www` 指向 Hub）
+- **内置 DNS** — `{name}.wirehub`；Hub 为 `hub.wirehub`；`www.{name}.wirehub` 为别名
 - **组访问控制** — 每个用户归属一个组；组间连线支持**双向**（直连 WG）或**单向**（透明 Hub SNAT：客户端仍访问目标 peer 的 IP:端口）
 - **在线状态** — 最近握手时间、收发流量、用量图表
 - **端口转发** — Hub VPN IP 上按端口 TCP/UDP 代理
@@ -222,12 +222,12 @@ WireHub 在 Hub VPN IP 上提供 DNS 服务（UDP 53）。`wirehub` 下的名称
 
 | 域名 | 解析结果 |
 |------|----------|
-| `wirehub` | Hub VPN IP |
-| `www.wirehub` | Hub VPN IP（别名） |
+| `hub.wirehub` | Hub VPN IP |
+| `www.hub.wirehub` | Hub VPN IP（别名） |
 | `{peer}.wirehub` | 对应 Peer VPN IP |
 | `www.{peer}.wirehub` | 对应 Peer VPN IP（别名） |
 
-域名后缀固定为 `wirehub`（见 `internal/config/config.go`）。
+域名后缀固定为 `wirehub`，Hub 标签为 `hub`（见 `internal/config/config.go`）。裸 `wirehub` / `www.wirehub` 不解析。
 
 ## 访问控制
 

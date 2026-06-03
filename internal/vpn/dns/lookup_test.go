@@ -7,10 +7,12 @@ func TestDNSSlug(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"www", ""},
+		{"hub", "hub"},
+		{"www.hub", "hub"},
 		{"www.touken", "touken"},
 		{"touken", "touken"},
 		{"WWW.Touken", "touken"},
+		{"www", "www"},
 	}
 	for _, tc := range tests {
 		if got := dnsSlug(tc.in); got != tc.want {

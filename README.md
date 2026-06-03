@@ -24,7 +24,7 @@
 - **Hub-and-spoke topology** — only the hub needs a routable endpoint; peers connect outbound
 - **Web admin UI** — React + Fluent UI; embedded in the release binary
 - **Peer lifecycle** — create, edit, disable, delete; export `.conf` or scan a QR code
-- **Built-in DNS** — `{name}.wirehub`; `www.{name}.wirehub` is an alias (`www` → hub)
+- **Built-in DNS** — `{name}.wirehub`; hub is `hub.wirehub`; `www.{name}.wirehub` is an alias
 - **Group-based access control** — peers belong to one group; **bidirectional** links allow direct WG; **unidirectional** links use transparent hub SNAT (client dials target peer IP:port; hub picks ephemeral ports)
 - **Live status** — last handshake, RX/TX bytes, network usage charts
 - **Port forwarding** — per-port TCP/UDP proxy on the hub VPN IP
@@ -222,12 +222,12 @@ Client WireGuard configs list DNS as `{hub_ip}, {upstream…}` so peers resolve 
 
 | Name | Resolves to |
 |------|-------------|
-| `wirehub` | Hub VPN IP |
-| `www.wirehub` | Hub VPN IP (alias) |
+| `hub.wirehub` | Hub VPN IP |
+| `www.hub.wirehub` | Hub VPN IP (alias) |
 | `{peer}.wirehub` | Peer VPN IP |
 | `www.{peer}.wirehub` | Peer VPN IP (alias) |
 
-The suffix `wirehub` is fixed (`internal/config/config.go`).
+The suffix `wirehub` is fixed; the hub label is `hub` (`internal/config/config.go`). Bare `wirehub` / `www.wirehub` do not resolve.
 
 ## Access control
 

@@ -35,3 +35,12 @@ func TestValidateHostname(t *testing.T) {
 		}
 	}
 }
+
+func TestHubFQDN(t *testing.T) {
+	if got := HubFQDN(); got != "hub.wirehub" {
+		t.Fatalf("HubFQDN() = %q, want hub.wirehub", got)
+	}
+	if got := PeerFQDN("alice"); got != "alice.wirehub" {
+		t.Fatalf("PeerFQDN(alice) = %q, want alice.wirehub", got)
+	}
+}

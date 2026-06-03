@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/touken928/wirehub/internal/config"
+	"github.com/touken928/wirehub/internal/domain"
 	"github.com/touken928/wirehub/internal/vpn/filter/l4"
 )
 
@@ -30,7 +30,7 @@ func TestHubWebOnNetstack(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 
-	for _, host := range []string{config.DNSDomain, env.hubIP} {
+	for _, host := range []string{domain.HubFQDN(), env.hubIP} {
 		t.Run(host, func(t *testing.T) {
 			url := fmt.Sprintf("http://%s:%d", host, webPort)
 			req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
@@ -70,7 +70,7 @@ func TestHubWebViaWireGuardPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, host := range []string{config.DNSDomain, env.hubIP} {
+	for _, host := range []string{domain.HubFQDN(), env.hubIP} {
 		t.Run(host, func(t *testing.T) {
 			url := fmt.Sprintf("http://%s:%d", host, webPort)
 			req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)

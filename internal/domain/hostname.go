@@ -58,12 +58,9 @@ func ValidateHostname(name string) (string, error) {
 }
 
 func PeerFQDN(slug string) string {
-	if slug == "" {
-		return config.DNSDomain
-	}
 	return fmt.Sprintf("%s.%s", slug, config.DNSDomain)
 }
 
 func HubFQDN() string {
-	return config.DNSDomain
+	return fmt.Sprintf("%s.%s", config.HubDNSLabel, config.DNSDomain)
 }

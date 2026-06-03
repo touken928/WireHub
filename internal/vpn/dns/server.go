@@ -94,16 +94,13 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 		var slug string
 		var ok bool
 		domain := config.DNSDomain
-		switch {
-		case name == domain:
-			slug, ok = "", true
-		case strings.HasSuffix(name, "."+domain):
+		if strings.HasSuffix(name, "."+domain) {
 			slug = strings.TrimSuffix(name, "."+domain)
 			if slug == "" {
 				continue
 			}
 			ok = true
-		default:
+		} else {
 			continue
 		}
 

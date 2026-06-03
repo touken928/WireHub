@@ -10,7 +10,7 @@ import {
 import { useMemo } from 'react';
 import { useStatus } from '@/app/StatusProvider';
 import { formatHandshake } from '@/api';
-import { DNS_DOMAIN } from '@/constants';
+import { DNS_DOMAIN, hubFQDN } from '@/constants';
 import NetworkUsageChart from '@/components/common/NetworkUsageChart';
 import { PeerStatusBadge } from '@/components/peers/PeerStatusBadge';
 import { PageHeader } from '@/components/layout/PageHeader';
@@ -175,7 +175,7 @@ export default function DashboardPage() {
           <div className={styles.infoTile}>
             <Text size={200} className={styles.label}>Web UI</Text>
             <Text className={styles.monoText}>
-              {typeof window !== 'undefined' ? window.location.origin : `http://${settings.dns_suffix || DNS_DOMAIN}`}
+              {typeof window !== 'undefined' ? window.location.origin : `http://${hubFQDN(settings.dns_suffix || DNS_DOMAIN)}`}
             </Text>
           </div>
         </div>

@@ -57,6 +57,7 @@ Do not introduce `repo` → `auth` or `internal` → `cmd` imports.
 | Hub listen port (TCP Web/API + UDP WireGuard) | `8443` | CLI `--port` (`config.DefaultPort`) |
 | Client endpoint port in peer `.conf` | `8443` | DB `settings.listen_port` (`config.DefaultEndpointPort`) |
 | DNS domain suffix | `wirehub` | `config.DNSDomain` |
+| Hub DNS name | `hub.wirehub` | `config.HubDNSLabel` + suffix |
 | Data dir | `./data` | CLI `--data-dir` → `wirehub.db`, `.jwt_secret` |
 
 `settings.listen_port` is for generated client `Endpoint` only. Hub bind/listen uses CLI `--port`.

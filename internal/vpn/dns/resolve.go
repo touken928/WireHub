@@ -28,18 +28,11 @@ func (s *Server) ResolveHost(host string) (netip.Addr, error) {
 
 	name := strings.TrimSuffix(strings.ToLower(host), ".")
 	if s.isInternalName(name) {
-		var slug string
-		ok := true
-		domainName := config.DNSDomain
-		switch {
-		case name == domainName:
-			slug = ""
-		case strings.HasSuffix(name, "."+domainName):
-			slug = strings.TrimSuffix(name, "."+domainName)
-		default:
-			ok = false
+		if !strings.HasSuffix(name, "."+config.DNSDomain) {
+			return netip.Addr{}, fmt.Errorf("unknown host %q", host)
 		}
-		if !ok {
+		slug := strings.TrimSuffix(name, "."+config.DNSDomain)
+		if slug == "" {
 			return netip.Addr{}, fmt.Errorf("unknown host %q", host)
 		}
 		ip, found := s.lookupIP(slug, true)

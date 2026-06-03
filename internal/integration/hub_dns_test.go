@@ -4,17 +4,25 @@ import (
 	"testing"
 
 	"github.com/touken928/wirehub/internal/config"
+	"github.com/touken928/wirehub/internal/domain"
 )
 
-func TestHubDNSApexAndPeer(t *testing.T) {
+func TestHubDNSHubAndPeer(t *testing.T) {
 	env, tnet, cleanup := setupHub(t)
 	defer cleanup()
 
-	if got := queryAOrFail(t, tnet, env.dnsIP, config.DNSDomain); got != env.hubIP {
-		t.Fatalf("apex %s = %s, want %s", config.DNSDomain, got, env.hubIP)
+	for _, qname := range []string{config.DNSDomain, "www." + config.DNSDomain} {
+		if _, err := queryA(tnet, env.dnsIP, qname); err == nil {
+			t.Fatalf("apex %q should not resolve", qname)
+		}
 	}
-	if got := queryAOrFail(t, tnet, env.dnsIP, "www."+config.DNSDomain); got != env.hubIP {
-		t.Fatalf("www = %s, want %s", got, env.hubIP)
+
+	hubFQDN := domain.HubFQDN()
+	if got := queryAOrFail(t, tnet, env.dnsIP, hubFQDN); got != env.hubIP {
+		t.Fatalf("hub %s = %s, want %s", hubFQDN, got, env.hubIP)
+	}
+	if got := queryAOrFail(t, tnet, env.dnsIP, "www."+hubFQDN); got != env.hubIP {
+		t.Fatalf("www hub = %s, want %s", got, env.hubIP)
 	}
 	if got := queryAOrFail(t, tnet, env.dnsIP, "touken."+config.DNSDomain); got != env.peerIP {
 		t.Fatalf("peer fqdn = %s, want %s", got, env.peerIP)
