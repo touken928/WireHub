@@ -33,7 +33,7 @@ export const useLoginPageStyles = makeStyles({
     display: 'none',
     [MD]: {
       display: 'flex',
-      flex: '1 1 50%',
+      flex: '1 1 40%',
       flexDirection: 'column',
       justifyContent: 'space-between',
       padding: '48px 56px',
@@ -61,7 +61,7 @@ export const useLoginPageStyles = makeStyles({
     justifyContent: 'center',
     padding: '32px 24px 48px',
     [MD]: {
-      flex: '1 1 50%',
+      flex: '1 1 60%',
       padding: '48px 32px',
     },
   },
