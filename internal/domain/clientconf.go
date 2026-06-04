@@ -27,7 +27,7 @@ func BuildClientConfig(in ClientConfigInput) (string, error) {
 	fmt.Fprintf(&b, "PrivateKey = %s\n", in.PeerPrivateKey)
 	fmt.Fprintf(&b, "Address = %s/32\n", in.PeerAddress)
 	fmt.Fprintf(&b, "DNS = %s\n", strings.Join(in.ClientDNS, ", "))
-	fmt.Fprintf(&b, "# Hub web UI: http://%s\n\n", HubFQDN())
+	fmt.Fprintf(&b, "# Hub web UI: http://%s/\n\n", HubFQDN())
 	fmt.Fprintf(&b, "[Peer]\n")
 	fmt.Fprintf(&b, "PublicKey = %s\n", in.ServerPublicKey)
 	fmt.Fprintf(&b, "Endpoint = %s:%d\n", in.Endpoint, in.ListenPort)

@@ -33,8 +33,8 @@ func (s *Store) GetPortForward(id uint) (*PortForward, error) {
 	return &rule, nil
 }
 
-func (s *Store) CreatePortForward(hubWebPort int, in PortForwardInput) (*PortForward, error) {
-	rule, err := normalizePortForward(in, hubWebPort)
+func (s *Store) CreatePortForward(hubTunnelWebPort int, in PortForwardInput) (*PortForward, error) {
+	rule, err := normalizePortForward(in, hubTunnelWebPort)
 	if err != nil {
 		return nil, err
 	}
@@ -52,12 +52,12 @@ func (s *Store) CreatePortForward(hubWebPort int, in PortForwardInput) (*PortFor
 	return rule, nil
 }
 
-func (s *Store) UpdatePortForward(id uint, hubWebPort int, in PortForwardInput) (*PortForward, error) {
+func (s *Store) UpdatePortForward(id uint, hubTunnelWebPort int, in PortForwardInput) (*PortForward, error) {
 	rule, err := s.GetPortForward(id)
 	if err != nil {
 		return nil, err
 	}
-	updated, err := normalizePortForward(in, hubWebPort)
+	updated, err := normalizePortForward(in, hubTunnelWebPort)
 	if err != nil {
 		return nil, err
 	}
@@ -82,12 +82,12 @@ func (s *Store) DeletePortForward(id uint) error {
 	return s.db.Delete(&PortForward{}, id).Error
 }
 
-func normalizePortForward(in PortForwardInput, hubWebPort int) (*PortForward, error) {
+func normalizePortForward(in PortForwardInput, hubTunnelWebPort int) (*PortForward, error) {
 	proto, err := domain.ValidateForwardProtocol(in.Protocol)
 	if err != nil {
 		return nil, err
 	}
-	if err := domain.ValidateForwardListenPort(in.ListenPort, hubWebPort, proto); err != nil {
+	if err := domain.ValidateForwardListenPort(in.ListenPort, hubTunnelWebPort, proto); err != nil {
 		return nil, err
 	}
 	if err := domain.ValidateForwardPort(in.TargetPort, "target port"); err != nil {

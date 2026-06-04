@@ -23,8 +23,8 @@ func forwardListenPorts(rules []ForwardRule) []int {
 }
 
 // ReservedHubPorts lists hub port numbers that must not be used as SNAT ephemeral ports.
-// Includes system listeners (DNS, Web/WG CLI port) and enabled Forward listen ports.
-func ReservedHubPorts(webTCPPort int, forwards []ForwardRule) []int {
+// Includes system listeners on the hub VPN address (DNS, tunnel Web TCP) and enabled Forward listen ports.
+func ReservedHubPorts(tunnelWebTCPPort int, forwards []ForwardRule) []int {
 	seen := make(map[int]struct{})
 	add := func(p int) {
 		if p >= 1 && p <= 65535 {
@@ -32,7 +32,7 @@ func ReservedHubPorts(webTCPPort int, forwards []ForwardRule) []int {
 		}
 	}
 	add(HubDNSPort)
-	add(webTCPPort)
+	add(tunnelWebTCPPort)
 	for _, p := range forwardListenPorts(forwards) {
 		add(p)
 	}

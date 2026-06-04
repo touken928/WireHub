@@ -157,7 +157,7 @@ export default function ForwardPage() {
 
   const [rules, setRules] = useState<PortForward[]>([]);
   const [hubIP, setHubIP] = useState('');
-  const [hubPort, setHubPort] = useState(8443);
+  const [hubPort, setHubPort] = useState(80);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [togglingId, setTogglingId] = useState<number | null>(null);

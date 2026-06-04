@@ -8,6 +8,7 @@ import (
 	"github.com/touken928/wirehub/internal/config"
 	"github.com/touken928/wirehub/internal/domain"
 	"github.com/touken928/wirehub/internal/repo"
+	"github.com/touken928/wirehub/internal/vpn/filter/l4"
 )
 
 func TestPortForwardTCPToPeerHostname(t *testing.T) {
@@ -27,8 +28,7 @@ func TestPortForwardTCPToPeerHostname(t *testing.T) {
 	defer stopBackend()
 
 	listenPort := freeTCPPort(t)
-	hubWebPort := config.DefaultPort
-	if _, err := env.store.CreatePortForward(hubWebPort, repo.PortForwardInput{
+	if _, err := env.store.CreatePortForward(l4.HubTunnelWebPort, repo.PortForwardInput{
 		ListenPort: listenPort,
 		Protocol:   domain.ForwardProtoTCP,
 		TargetHost: domain.PeerFQDN("app"),
@@ -66,8 +66,7 @@ func TestPortForwardTCPToPeerIP(t *testing.T) {
 	defer stopBackend()
 
 	listenPort := freeTCPPort(t)
-	hubWebPort := config.DefaultPort
-	if _, err := env.store.CreatePortForward(hubWebPort, repo.PortForwardInput{
+	if _, err := env.store.CreatePortForward(l4.HubTunnelWebPort, repo.PortForwardInput{
 		ListenPort: listenPort,
 		Protocol:   domain.ForwardProtoTCP,
 		TargetHost: svc.Peer.WGIP,
@@ -106,8 +105,7 @@ func TestPortForwardTCPViaFQDN(t *testing.T) {
 
 	listenPort := freeTCPPort(t)
 	targetHost := fmt.Sprintf("web.%s", config.DNSDomain)
-	hubWebPort := config.DefaultPort
-	if _, err := env.store.CreatePortForward(hubWebPort, repo.PortForwardInput{
+	if _, err := env.store.CreatePortForward(l4.HubTunnelWebPort, repo.PortForwardInput{
 		ListenPort: listenPort,
 		Protocol:   domain.ForwardProtoTCP,
 		TargetHost: targetHost,
@@ -145,8 +143,7 @@ func TestPortForwardTCPDisabled(t *testing.T) {
 	defer stopBackend()
 
 	listenPort := freeTCPPort(t)
-	hubWebPort := config.DefaultPort
-	if _, err := env.store.CreatePortForward(hubWebPort, repo.PortForwardInput{
+	if _, err := env.store.CreatePortForward(l4.HubTunnelWebPort, repo.PortForwardInput{
 		ListenPort: listenPort,
 		Protocol:   domain.ForwardProtoTCP,
 		TargetHost: domain.PeerFQDN("app"),
@@ -180,8 +177,7 @@ func TestPortForwardUDPToPeer(t *testing.T) {
 	defer stopBackend()
 
 	listenPort := freeTCPPort(t)
-	hubWebPort := config.DefaultPort
-	if _, err := env.store.CreatePortForward(hubWebPort, repo.PortForwardInput{
+	if _, err := env.store.CreatePortForward(l4.HubTunnelWebPort, repo.PortForwardInput{
 		ListenPort: listenPort,
 		Protocol:   domain.ForwardProtoUDP,
 		TargetHost: domain.PeerFQDN("app"),
@@ -219,8 +215,7 @@ func TestPortForwardReapplyAfterUpdate(t *testing.T) {
 	defer stopBackend()
 
 	listenPort := freeTCPPort(t)
-	hubWebPort := config.DefaultPort
-	rule, err := env.store.CreatePortForward(hubWebPort, repo.PortForwardInput{
+	rule, err := env.store.CreatePortForward(l4.HubTunnelWebPort, repo.PortForwardInput{
 		ListenPort: listenPort,
 		Protocol:   domain.ForwardProtoTCP,
 		TargetHost: domain.PeerFQDN("app"),
@@ -237,7 +232,7 @@ func TestPortForwardReapplyAfterUpdate(t *testing.T) {
 		t.Fatal("expected forward to be off")
 	}
 
-	if _, err := env.store.UpdatePortForward(rule.ID, hubWebPort, repo.PortForwardInput{
+	if _, err := env.store.UpdatePortForward(rule.ID, l4.HubTunnelWebPort, repo.PortForwardInput{
 		ListenPort: listenPort,
 		Protocol:   domain.ForwardProtoTCP,
 		TargetHost: domain.PeerFQDN("app"),

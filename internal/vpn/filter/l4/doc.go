@@ -3,7 +3,7 @@
 // Three mechanisms share packet/port helpers but differ in how clients connect:
 //
 //   - System listen: built-in services on hub IP — authoritative DNS (:53 UDP),
-//     tunnel Web/API (CLI --port, default 8443 TCP), WireGuard (same --port UDP).
+//     tunnel Web/API (HubTunnelWebPort, default 80 TCP). WireGuard UDP uses the host bind (CLI --port), not the hub VPN IP.
 //     Managed by vpn.Stack / vpn/dns, not the Forward admin page.
 //
 //   - Forward listen: admin Forward rules — client dials hub:listenPort;
@@ -20,4 +20,6 @@ package l4
 const (
 	// HubDNSPort is the authoritative DNS listen port on the hub VPN address.
 	HubDNSPort = 53
+	// HubTunnelWebPort is the admin UI/API listen port on the hub VPN address (inside the tunnel).
+	HubTunnelWebPort = 80
 )

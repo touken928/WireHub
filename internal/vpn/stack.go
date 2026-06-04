@@ -99,7 +99,7 @@ func (s *Stack) Start() error {
 
 	s.hub.AttachNetwork(wgMgr, dnsServer, statusInterval)
 
-	tunnelSrv, err := l4.StartWebServer(wgMgr.Net(), settings.HubIP, s.cfg.Port, s.httpHandler)
+	tunnelSrv, err := l4.StartWebServer(wgMgr.Net(), settings.HubIP, l4.HubTunnelWebPort, s.httpHandler)
 	if err != nil {
 		s.hub.DetachNetwork()
 		_ = dnsServer.Stop()
@@ -159,7 +159,7 @@ func (s *Stack) applyPortForwards(hubIP string) error {
 	}
 	runtimeRules := forwardRulesFromRepo(rules)
 	if s.wgMgr != nil {
-		s.wgMgr.ReserveHubPorts(l4.ReservedHubPorts(s.cfg.Port, runtimeRules))
+		s.wgMgr.ReserveHubPorts(l4.ReservedHubPorts(l4.HubTunnelWebPort, runtimeRules))
 	}
 	return s.forwardProxy.Apply(runtimeRules)
 }

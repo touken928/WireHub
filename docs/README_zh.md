@@ -158,7 +158,7 @@ JWT 密钥：`{data-dir}/.jwt_secret`（首次启动时生成）。
 2. 下载 `.conf` 或扫描二维码
 3. 导入 WireGuard 客户端并连接
 
-配置含密钥、`Endpoint`、`AllowedIPs`（整段 VPN 网段）、`DNS`（仅 Hub VPN IP）与 MTU。注释中给出隧道内管理地址 `http://hub.wirehub`。
+配置含密钥、`Endpoint`、`AllowedIPs`（整段 VPN 网段）、`DNS`（仅 Hub VPN IP）与 MTU。注释中给出隧道内管理地址 `http://hub.wirehub/`（Hub VPN IP 上 80 端口；宿主机绑定端口默认为 `8443`）。
 
 ## 网络行为
 

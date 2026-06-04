@@ -267,7 +267,7 @@ func (env *peerMeshEnv) syncPortForwards(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := toForwardRules(rules)
-	env.wgMgr.ReserveHubPorts(l4.ReservedHubPorts(env.listenPort, runtime))
+	env.wgMgr.ReserveHubPorts(l4.ReservedHubPorts(l4.HubTunnelWebPort, runtime))
 	if err := env.forwardProxy.Apply(runtime); err != nil {
 		t.Fatal(err)
 	}

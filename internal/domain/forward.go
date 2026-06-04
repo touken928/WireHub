@@ -65,18 +65,15 @@ func ValidateForwardProtocol(proto string) (string, error) {
 }
 
 // ValidateForwardListenPort rejects ports reserved by hub services on the VPN address.
-func ValidateForwardListenPort(port int, hubWebPort int, protocol string) error {
+func ValidateForwardListenPort(port int, tunnelWebPort int, protocol string) error {
 	if err := ValidateForwardPort(port, "listen port"); err != nil {
 		return err
 	}
 	if port == l4.HubDNSPort {
 		return fmt.Errorf("listen port %d is reserved for hub DNS", l4.HubDNSPort)
 	}
-	if port == hubWebPort {
-		if protocol == ForwardProtoTCP {
-			return fmt.Errorf("listen port %d is used by the hub web UI and API", hubWebPort)
-		}
-		return fmt.Errorf("listen port %d is used by WireGuard (UDP)", hubWebPort)
+	if port == tunnelWebPort && protocol == ForwardProtoTCP {
+		return fmt.Errorf("listen port %d is used by the hub web UI and API", tunnelWebPort)
 	}
 	return nil
 }

@@ -158,7 +158,7 @@ Destructive actions require confirmation; hub reset also requires the admin pass
 2. Download `.conf` or scan the QR code
 3. Import into a WireGuard client and connect
 
-Generated configs include keys, `Endpoint`, `AllowedIPs` (full subnet), `DNS` (hub VPN IP only), and MTU. The config comment points to `http://hub.wirehub` for the admin UI over the tunnel.
+Generated configs include keys, `Endpoint`, `AllowedIPs` (full subnet), `DNS` (hub VPN IP only), and MTU. The config comment points to `http://hub.wirehub/` for the admin UI over the tunnel (port 80 on the hub VPN address; the host bind port defaults to `8443`).
 
 ## Networking
 

@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/touken928/wirehub/internal/domain"
 	"github.com/touken928/wirehub/internal/repo"
+	"github.com/touken928/wirehub/internal/vpn/filter/l4"
 	"gorm.io/gorm"
 )
 
@@ -22,12 +23,8 @@ func toPortForwardResponse(f repo.PortForward) portForwardResponse {
 	}
 }
 
-func (s *Server) hubWebPort(c *gin.Context) int {
-	net := s.NetworkRuntime()
-	if net != nil {
-		return net.HubListenPort()
-	}
-	return 0
+func (s *Server) hubTunnelWebPort() int {
+	return l4.HubTunnelWebPort
 }
 
 func (s *Server) syncPortForwards(c *gin.Context) {
@@ -55,7 +52,7 @@ func (s *Server) handleListPortForwards(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"rules":    out,
 		"hub_ip":   hubIP,
-		"hub_port": s.hubWebPort(c),
+		"hub_port": s.hubTunnelWebPort(),
 	})
 }
 
@@ -89,7 +86,7 @@ func (s *Server) handleCreatePortForward(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	rule, err := s.Store.CreatePortForward(s.hubWebPort(c), req.toInput())
+	rule, err := s.Store.CreatePortForward(s.hubTunnelWebPort(), req.toInput())
 	if err != nil {
 		if errors.Is(err, repo.ErrPortForwardConflict) {
 			c.JSON(http.StatusConflict, gin.H{"error": "listen port and protocol already in use"})
@@ -116,7 +113,7 @@ func (s *Server) handleUpdatePortForward(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	rule, err := s.Store.UpdatePortForward(id, s.hubWebPort(c), req.toInput())
+	rule, err := s.Store.UpdatePortForward(id, s.hubTunnelWebPort(), req.toInput())
 	if err != nil {
 		if errors.Is(err, repo.ErrPortForwardConflict) {
 			c.JSON(http.StatusConflict, gin.H{"error": "listen port and protocol already in use"})

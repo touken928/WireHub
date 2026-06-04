@@ -91,11 +91,11 @@ auth → repo, password
 
 | Mode | Purpose |
 |------|---------|
-| System listen | DNS `:53`, Web TCP + WG UDP on CLI `--port` |
+| System listen | DNS `:53`, tunnel Web TCP `:80` on hub VPN IP; WireGuard UDP on host (CLI `--port`) |
 | ForwardProxy | Admin **Forward** rules: peer dials `hub_ip:listen_port` → target host:port |
 | TransparentTable | Unidirectional group link: peer dials target peer IP:port; hub SNAT on TUN |
 
-Shared IPv4 rewrite and ephemeral port pool. `l4.ReservedHubPorts(webPort, forwards)` reserves port 53, web port, and Forward listen ports from the SNAT range via `wg.Manager.ReserveHubPorts`.
+Shared IPv4 rewrite and ephemeral port pool. `l4.ReservedHubPorts(tunnelWebPort, forwards)` reserves port 53, tunnel Web TCP (80), and Forward listen ports from the SNAT range via `wg.Manager.ReserveHubPorts`.
 
 **Group ACL**
 

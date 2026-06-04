@@ -40,7 +40,7 @@ func TestValidateForwardTargetHost(t *testing.T) {
 }
 
 func TestValidateForwardListenPortReservesSystemListen(t *testing.T) {
-	webPort := config.DefaultPort
+	tunnelWeb := l4.HubTunnelWebPort
 
 	tests := []struct {
 		name     string
@@ -56,15 +56,14 @@ func TestValidateForwardListenPortReservesSystemListen(t *testing.T) {
 		},
 		{
 			name:     "web tcp",
-			port:     webPort,
+			port:     tunnelWeb,
 			protocol: ForwardProtoTCP,
 			wantErr:  "hub web UI and API",
 		},
 		{
-			name:     "wireguard udp",
-			port:     webPort,
+			name:     "allowed wireguard host port on hub udp forward",
+			port:     config.DefaultPort,
 			protocol: ForwardProtoUDP,
-			wantErr:  "WireGuard",
 		},
 		{
 			name:     "allowed custom port",
@@ -74,7 +73,7 @@ func TestValidateForwardListenPortReservesSystemListen(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateForwardListenPort(tc.port, webPort, tc.protocol)
+			err := ValidateForwardListenPort(tc.port, tunnelWeb, tc.protocol)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
