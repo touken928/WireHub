@@ -1,8 +1,8 @@
 package repo
 
 import (
+	"errors"
 	"fmt"
-	"net"
 )
 
 // ListPeers returns all peers ordered by creation time (newest first).
@@ -32,39 +32,13 @@ func (s *Store) DeletePeer(id uint) error {
 	return s.db.Delete(&Peer{}, id).Error
 }
 
-// AllocateIP picks the next free host address in the VPN subnet (hub IP excluded).
-func (s *Store) AllocateIP(subnet, hubIP string) (string, error) {
-	_, ipNet, err := net.ParseCIDR(subnet)
-	if err != nil {
-		return "", err
+// AllocateIP picks the next free host address in the VPN subnet (hub, map VIPs, and DNS reserved).
+func (s *Store) AllocateIP(subnet, hubIP, dnsIP string) (string, error) {
+	ip, err := s.allocateSubnetIP(subnet, hubIP, dnsIP)
+	if errors.Is(err, errSubnetIPUnavailable) {
+		return "", fmt.Errorf("no available IP in subnet")
 	}
-
-	var peers []Peer
-	if err := s.db.Find(&peers).Error; err != nil {
-		return "", err
-	}
-
-	used := map[string]bool{hubIP: true}
-	for _, p := range peers {
-		used[p.WGIP] = true
-	}
-
-	base := ipNet.IP.To4()
-	if base == nil {
-		return "", fmt.Errorf("only IPv4 subnets supported")
-	}
-
-	mask, _ := ipNet.Mask.Size()
-	for i := 2; i < (1 << (32 - mask)); i++ {
-		ip := make(net.IP, 4)
-		copy(ip, base)
-		ip[3] = base[3] + byte(i)
-		candidate := ip.String()
-		if !used[candidate] {
-			return candidate, nil
-		}
-	}
-	return "", fmt.Errorf("no available IP in subnet")
+	return ip, err
 }
 
 func (s *Store) ListDNSRecords() ([]DNSRecord, error) {

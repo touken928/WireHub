@@ -37,7 +37,7 @@ func (a *App) CreatePeer(name string, groupID uint) (*repo.Peer, error) {
 		return nil, err
 	}
 
-	ip, err := a.Store.AllocateIP(settings.WGSubnet, settings.HubIP)
+	ip, err := a.Store.AllocateIP(settings.WGSubnet, settings.HubIP, settings.DNSIP)
 	if err != nil {
 		return nil, err
 	}

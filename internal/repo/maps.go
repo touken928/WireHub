@@ -3,7 +3,6 @@ package repo
 import (
 	"errors"
 	"fmt"
-	"net"
 	"strings"
 
 	"github.com/touken928/wirehub/internal/domain/map"
@@ -220,55 +219,11 @@ func (s *Store) DeleteServiceMap(id uint) error {
 }
 
 func (s *Store) AllocateMapIP(subnet, hubIP, dnsIP string) (string, error) {
-	_, ipNet, err := net.ParseCIDR(subnet)
-	if err != nil {
-		return "", err
+	ip, err := s.allocateSubnetIP(subnet, hubIP, dnsIP)
+	if errors.Is(err, errSubnetIPUnavailable) {
+		return "", ErrMapIPUnavailable
 	}
-
-	used := map[string]bool{
-		hubIP: true,
-		dnsIP: true,
-	}
-
-	var peers []Peer
-	if err := s.db.Find(&peers).Error; err != nil {
-		return "", err
-	}
-	for _, p := range peers {
-		used[p.WGIP] = true
-	}
-
-	var maps []ServiceMap
-	if err := s.db.Find(&maps).Error; err != nil {
-		return "", err
-	}
-	for _, r := range maps {
-		used[r.VirtualIP] = true
-	}
-
-	var records []DNSRecord
-	if err := s.db.Find(&records).Error; err != nil {
-		return "", err
-	}
-	for _, rec := range records {
-		used[rec.IP] = true
-	}
-
-	base := ipNet.IP.To4()
-	if base == nil {
-		return "", fmt.Errorf("only IPv4 subnets supported")
-	}
-	mask, _ := ipNet.Mask.Size()
-	for i := 2; i < (1 << (32 - mask)); i++ {
-		ip := make(net.IP, 4)
-		copy(ip, base)
-		ip[3] = base[3] + byte(i)
-		candidate := ip.String()
-		if !used[candidate] {
-			return candidate, nil
-		}
-	}
-	return "", ErrMapIPUnavailable
+	return ip, err
 }
 
 func normalizeMapInput(in MapInput) (*ServiceMap, []uint, error) {
