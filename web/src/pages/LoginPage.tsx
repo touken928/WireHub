@@ -15,12 +15,20 @@ export default function LoginPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleSubmit = async (event: React.FormEvent) => {
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const loginUsername = String(data.get('username') ?? username).trim();
+    const loginPassword = String(data.get('password') ?? password);
+    if (!loginUsername || !loginPassword) {
+      setError('Username and password are required');
+      return;
+    }
     setLoading(true);
     setError('');
     try {
-      const { token } = await api.login(username, password);
+      const { token } = await api.login(loginUsername, loginPassword);
       setToken(token);
       navigate('/');
     } catch (err) {
@@ -37,19 +45,25 @@ export default function LoginPage() {
         <p className={styles.formSubtitle}>Enter your admin credentials to continue.</p>
       </div>
 
-      <form onSubmit={handleSubmit} className={styles.form} autoComplete="off">
+      <form onSubmit={handleSubmit} className={styles.form}>
         <AuthField
           id="login-username"
+          name="username"
           label="Username"
           placeholder="Admin username"
+          autoComplete="username"
+          required
           value={username}
           onChange={setUsername}
         />
         <AuthField
           id="login-password"
+          name="password"
           label="Password"
           type="password"
           placeholder="Password"
+          autoComplete="current-password"
+          required
           value={password}
           onChange={setPassword}
         />

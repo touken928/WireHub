@@ -7,6 +7,8 @@ type AuthFieldBaseProps = {
   label: string;
   hint?: string;
   required?: boolean;
+  name?: string;
+  autoComplete?: string;
 };
 
 type AuthInputFieldProps = AuthFieldBaseProps & {
@@ -56,6 +58,7 @@ export function AuthField(props: AuthFieldProps) {
       ) : (
         <Input
           id={props.id}
+          name={props.name}
           type={props.type}
           required={props.required}
           placeholder={props.placeholder}
@@ -64,6 +67,8 @@ export function AuthField(props: AuthFieldProps) {
           style={loginInputFocusStyle(focused)}
           input={{
             className: styles.inputField,
+            name: props.name,
+            autoComplete: props.autoComplete,
             ...focusHandlers,
           }}
           onChange={(_, data) => props.onChange(data.value)}

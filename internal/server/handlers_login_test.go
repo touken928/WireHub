@@ -166,3 +166,54 @@ func TestHandleLogin_SuccessClearsFailures(t *testing.T) {
 		t.Fatalf("after success, bad login status = %d, want 401 (not locked)", w.Code)
 	}
 }
+
+func TestHandleLogin_EmptyBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dir := t.TempDir()
+	cfg := &config.RuntimeConfig{
+		DatabasePath: filepath.Join(dir, "wirehub.db"),
+		JWTSecret:    "test-jwt-secret",
+	}
+	st, err := repo.New(cfg)
+	if err != nil {
+		t.Fatalf("repo.New: %v", err)
+	}
+	if err := st.Setup(repo.SetupInput{
+		Endpoint:         "hub.example.com",
+		Subnet:           config.DefaultSubnet,
+		AdminUsername:    "admin",
+		AdminPassword:    "password123",
+		ListenPort:       config.DefaultEndpointPort,
+		ServerPrivateKey: "dummy-priv",
+		ServerPublicKey:  "dummy-pub",
+	}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	authSvc := auth.NewService(cfg.JWTSecret, st)
+	svc := &Server{Hub: service.NewHub(st)}
+
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set("auth", authSvc)
+		c.Next()
+	})
+	r.POST("/api/auth/login", svc.handleLogin)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader([]byte("{}")))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["error"] != "username and password are required" {
+		t.Fatalf("error = %q, want friendly message", resp["error"])
+	}
+}
