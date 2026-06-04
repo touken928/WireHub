@@ -2,6 +2,16 @@ import { makeStyles, tokens } from '@fluentui/react-components';
 
 /** List page chrome for Forward / Maps. */
 export const useRuleListPageStyles = makeStyles({
+  toolbar: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '10px',
+    alignItems: 'flex-end',
+  },
+  searchField: {
+    flex: '1 1 220px',
+    minWidth: '200px',
+  },
   resultHint: {
     color: tokens.colorNeutralForeground3,
     fontSize: tokens.fontSizeBase200,

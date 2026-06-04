@@ -13,14 +13,16 @@ import {
   makeStyles,
 } from '@fluentui/react-components';
 import { AddRegular } from '@fluentui/react-icons';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '@/api';
 import type { PeerGroup, ServiceMap } from '@/api/types';
 import { AllowedGroupsPicker } from '@/components/common/AllowedGroupsPicker';
+import { RuleListSearchBar } from '@/components/common/RuleListSearchBar';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { MapCard } from '@/components/maps/MapCard';
 import { useConfirm } from '@/components/common/useConfirm';
 import { ALLOWED_GROUPS_REQUIRED } from '@/lib/allowedGroups';
+import { filterServiceMaps } from '@/lib/filterRules';
 import { validateForwardTargetHost } from '@/lib/forwardTarget';
 import { DNS_DOMAIN } from '@/constants';
 import { usePageLayoutStyles } from '@/styles/pageLayout';
@@ -58,6 +60,12 @@ export default function MapsPage() {
   const [form, setForm] = useState<FormState>(emptyForm());
   const [formError, setFormError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+
+  const filteredMaps = useMemo(
+    () => filterServiceMaps(maps, groups, searchQuery),
+    [maps, groups, searchQuery],
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -172,20 +180,31 @@ export default function MapsPage() {
         </div>
       ) : (
         <>
+          <RuleListSearchBar
+            value={searchQuery}
+            placeholder="Name, slug, DNS, VIP, target, group…"
+            onChange={setSearchQuery}
+          />
           <Text className={listPage.resultHint}>
-            {maps.length} map{maps.length === 1 ? '' : 's'}
+            Showing {filteredMaps.length} of {maps.length} map{maps.length === 1 ? '' : 's'}
           </Text>
-          <div className={listPage.list}>
-            {maps.map((m) => (
-              <MapCard
-                key={m.id}
-                map={m}
-                groups={groups}
-                onEdit={openEdit}
-                onDelete={(r) => void remove(r)}
-              />
-            ))}
-          </div>
+          {filteredMaps.length === 0 ? (
+            <div className={listPage.empty}>
+              <Text>No maps match the current search.</Text>
+            </div>
+          ) : (
+            <div className={listPage.list}>
+              {filteredMaps.map((m) => (
+                <MapCard
+                  key={m.id}
+                  map={m}
+                  groups={groups}
+                  onEdit={openEdit}
+                  onDelete={(r) => void remove(r)}
+                />
+              ))}
+            </div>
+          )}
         </>
       )}
 

@@ -15,13 +15,15 @@ import {
   makeStyles,
 } from '@fluentui/react-components';
 import { AddRegular } from '@fluentui/react-icons';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '@/api';
 import type { PortForward } from '@/api/types';
 import { ForwardRuleCard } from '@/components/forward/ForwardRuleCard';
+import { RuleListSearchBar } from '@/components/common/RuleListSearchBar';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { useConfirm } from '@/components/common/useConfirm';
 import { DNS_DOMAIN, hubFQDN } from '@/constants';
+import { filterPortForwards } from '@/lib/filterRules';
 import { validateForwardTargetHost } from '@/lib/forwardTarget';
 import { usePageLayoutStyles } from '@/styles/pageLayout';
 import { useRuleListPageStyles } from '@/styles/ruleListPage';
@@ -69,6 +71,12 @@ export default function ForwardPage() {
   const [editing, setEditing] = useState<PortForward | null>(null);
   const [form, setForm] = useState<ForwardForm>(emptyForm);
   const [formError, setFormError] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+
+  const filteredRules = useMemo(
+    () => filterPortForwards(rules, searchQuery),
+    [rules, searchQuery],
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -193,19 +201,30 @@ export default function ForwardPage() {
         </div>
       ) : (
         <>
+          <RuleListSearchBar
+            value={searchQuery}
+            placeholder="Name, port, protocol, target…"
+            onChange={setSearchQuery}
+          />
           <Text className={listPage.resultHint}>
-            {rules.length} rule{rules.length === 1 ? '' : 's'} · dial {hubFQDN()}:port · reserved DNS :53, Web/API :{hubPort}
+            Showing {filteredRules.length} of {rules.length} rule{rules.length === 1 ? '' : 's'} · dial {hubFQDN()}:port · reserved DNS :53, Web/API :{hubPort}
           </Text>
-          <div className={listPage.list}>
-            {rules.map((rule) => (
-              <ForwardRuleCard
-                key={rule.id}
-                rule={rule}
-                onEdit={openEdit}
-                onDelete={(r) => void remove(r)}
-              />
-            ))}
-          </div>
+          {filteredRules.length === 0 ? (
+            <div className={listPage.empty}>
+              <Text>No forwards match the current search.</Text>
+            </div>
+          ) : (
+            <div className={listPage.list}>
+              {filteredRules.map((rule) => (
+                <ForwardRuleCard
+                  key={rule.id}
+                  rule={rule}
+                  onEdit={openEdit}
+                  onDelete={(r) => void remove(r)}
+                />
+              ))}
+            </div>
+          )}
         </>
       )}
 
