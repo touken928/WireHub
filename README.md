@@ -171,7 +171,7 @@ Resolver on hub VPN IP (UDP 53). Suffix is fixed: `wirehub`; hub label is `hub`.
 | `hub.wirehub`, `www.hub.wirehub` | Hub VPN IP |
 | `{peer}.wirehub`, `www.{peer}.wirehub` | Peer VPN IP |
 
-Bare `wirehub` / `www.wirehub` are not served. When upstream DNS is configured, other names are forwarded server-side (not listed in peer configs). With no upstream, external names are not resolved.
+Bare `wirehub` / `www.wirehub` are not served. When upstream DNS is configured, other names are forwarded server-side (not listed in peer configs). With no upstream, external names are not resolved. Other VPN or proxy tools (e.g. Clash TUN) may hijack DNS and prevent `*.wirehub` from resolving.
 
 ### Access control
 
