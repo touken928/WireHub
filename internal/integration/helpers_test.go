@@ -255,8 +255,12 @@ func toForwardRules(rules []repo.PortForward) []l4.ForwardRule {
 
 func (env *peerMeshEnv) syncPortForwards(t *testing.T) {
 	t.Helper()
+	settings, err := env.store.GetSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if env.forwardProxy == nil {
-		mgr, err := l4.NewForwardProxy(env.wgMgr.Net(), env.hubIP, env.dnsServer)
+		mgr, err := l4.NewForwardProxy(env.wgMgr.Net(), env.hubIP, settings.WGSubnet, env.dnsServer)
 		if err != nil {
 			t.Fatal(err)
 		}

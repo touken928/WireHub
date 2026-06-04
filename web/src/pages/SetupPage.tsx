@@ -236,7 +236,7 @@ export default function SetupPage() {
             label="Upstream DNS servers"
             multiline
             rows={3}
-            hint="Optional. Hub resolvers for non-wirehub names (server-side only). Leave empty to resolve *.wirehub only; e.g. 1.2.4.8"
+            hint="Optional. Hub resolvers for non-wirehub names (server-side only). Leave empty to resolve *.wirehub only; e.g. 114.114.114.114"
             value={upstreamDns}
             onChange={setUpstreamDns}
           />

@@ -11,7 +11,7 @@ import (
 	"github.com/touken928/wirehub/internal/domain"
 )
 
-// ResolveHost resolves a forward target to an IPv4 address using hub DNS and upstream resolvers.
+// ResolveHost resolves a forward target to an IPv4 address using hub DNS and host resolvers.
 func (s *Server) ResolveHost(host string) (netip.Addr, error) {
 	host, err := domain.ValidateForwardTargetHost(host)
 	if err != nil {
@@ -49,23 +49,79 @@ func (s *Server) ResolveHost(host string) (netip.Addr, error) {
 	return s.resolveUpstreamA(name)
 }
 
-func (s *Server) resolveUpstreamA(name string) (netip.Addr, error) {
-	if len(s.upstream) == 0 {
-		return netip.Addr{}, fmt.Errorf("no upstream DNS configured for %q", name)
+// ResolveForwardAddrs returns all IPv4 addresses for a forward target.
+func (s *Server) ResolveForwardAddrs(host string) ([]netip.Addr, error) {
+	host, err := domain.ValidateForwardTargetHost(host)
+	if err != nil {
+		return nil, err
 	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		addr, ok := netip.AddrFromSlice(ip.To4())
+		if !ok {
+			return nil, fmt.Errorf("invalid target ip")
+		}
+		return []netip.Addr{addr}, nil
+	}
+
+	name := strings.TrimSuffix(strings.ToLower(host), ".")
+	if s.isInternalName(name) {
+		addr, err := s.ResolveHost(host)
+		if err != nil {
+			return nil, err
+		}
+		return []netip.Addr{addr}, nil
+	}
+
+	return s.resolveUpstreamAll(name)
+}
+
+func (s *Server) resolveUpstreamAll(name string) ([]netip.Addr, error) {
+	msg := new(dns.Msg)
+	msg.SetQuestion(dns.Fqdn(name), dns.TypeA)
+	resp, err := s.exchangeUpstream(msg)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %q: %w", name, err)
+	}
+	addrs := allARecords(resp)
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("no A record for %q", name)
+	}
+	return addrs, nil
+}
+
+func (s *Server) resolveUpstreamA(name string) (netip.Addr, error) {
 	msg := new(dns.Msg)
 	msg.SetQuestion(dns.Fqdn(name), dns.TypeA)
 	resp, err := s.exchangeUpstream(msg)
 	if err != nil {
 		return netip.Addr{}, fmt.Errorf("resolve %q: %w", name, err)
 	}
+	if addr, ok := firstARecord(resp); ok {
+		return addr, nil
+	}
+	return netip.Addr{}, fmt.Errorf("no A record for %q", name)
+}
+
+func firstARecord(resp *dns.Msg) (netip.Addr, bool) {
+	addrs := allARecords(resp)
+	if len(addrs) == 0 {
+		return netip.Addr{}, false
+	}
+	return addrs[0], true
+}
+
+func allARecords(resp *dns.Msg) []netip.Addr {
+	if resp == nil {
+		return nil
+	}
+	var out []netip.Addr
 	for _, ans := range resp.Answer {
 		if a, ok := ans.(*dns.A); ok && a.A != nil {
-			addr, ok := netip.AddrFromSlice(a.A)
-			if ok {
-				return addr, nil
+			if addr, ok := netip.AddrFromSlice(a.A); ok {
+				out = append(out, addr)
 			}
 		}
 	}
-	return netip.Addr{}, fmt.Errorf("no A record for %q", name)
+	return out
 }

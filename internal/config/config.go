@@ -25,8 +25,8 @@ const (
 	DefaultStatusInterval = 1
 )
 
-// DefaultUpstreamDNS are example public resolvers (documentation / UI hints only).
-var DefaultUpstreamDNS = []string{"1.2.4.8", "1.1.1.1"}
+// DefaultUpstreamDNS are default hub upstream resolvers (setup UI hint and recommended settings).
+var DefaultUpstreamDNS = []string{"114.114.114.114", "1.1.1.1"}
 
 // RuntimeConfig holds process-level settings from CLI flags.
 // Persistent hub settings (endpoint, subnet, admin, MTU, etc.) live in the database after setup.

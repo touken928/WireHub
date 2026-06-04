@@ -285,7 +285,7 @@ export default function SettingsPage() {
               </Field>
               <Field
                 label="Upstream DNS servers"
-                hint="Optional. Hub resolvers for non-wirehub names (server-side only). Leave empty to resolve *.wirehub only; one IP per line, e.g. 1.2.4.8"
+                hint="Optional. Hub resolvers for non-wirehub names (server-side only). Leave empty to resolve *.wirehub only; one IP per line, e.g. 114.114.114.114"
               >
                 <Textarea
                   value={upstreamDns}

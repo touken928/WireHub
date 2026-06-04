@@ -223,18 +223,7 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 }
 
 func (s *Server) exchangeUpstream(req *dns.Msg) (*dns.Msg, error) {
-	client := &dns.Client{Net: "udp", Timeout: 3 * time.Second}
-	for _, upstream := range s.upstream {
-		target := net.JoinHostPort(upstream, "53")
-		resp, _, err := client.Exchange(req, target)
-		if err != nil {
-			continue
-		}
-		if resp != nil {
-			return resp, nil
-		}
-	}
-	return nil, fmt.Errorf("upstream dns unavailable")
+	return exchangeDNS(req, s.upstream)
 }
 
 func (s *Server) RegisterPeer(peer *repo.Peer) error {

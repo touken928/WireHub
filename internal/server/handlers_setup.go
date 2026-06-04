@@ -55,7 +55,7 @@ func (s *Server) handleSetupStatus(c *gin.Context) {
 			ListenPort:     config.DefaultEndpointPort,
 			MTU:            config.DefaultMTU,
 			StatusInterval: config.DefaultStatusInterval,
-			UpstreamDNS:    nil,
+			UpstreamDNS:    append([]string(nil), config.DefaultUpstreamDNS...),
 		},
 	})
 }

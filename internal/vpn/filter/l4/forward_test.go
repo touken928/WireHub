@@ -30,7 +30,7 @@ func TestForwardProxyTCPRelay(t *testing.T) {
 		fmt.Fprint(w, "forward-target-ok")
 	}))
 
-	proxy, err := NewForwardProxy(tnet, hub.String(), staticHostResolver{
+	proxy, err := NewForwardProxy(tnet, hub.String(), "100.127.0.0/24", staticHostResolver{
 		hosts: map[string]netip.Addr{backend.String(): backend},
 	})
 	if err != nil {
@@ -71,7 +71,7 @@ func TestForwardProxySkipsDisabledRules(t *testing.T) {
 	tnet, cleanup := newTestNetstack(t, hub)
 	defer cleanup()
 
-	proxy, err := NewForwardProxy(tnet, hub.String(), staticHostResolver{hosts: nil})
+	proxy, err := NewForwardProxy(tnet, hub.String(), "100.127.0.0/24", staticHostResolver{hosts: nil})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestForwardProxyRejectsUnsupportedProtocol(t *testing.T) {
 	tnet, cleanup := newTestNetstack(t, hub)
 	defer cleanup()
 
-	proxy, err := NewForwardProxy(tnet, hub.String(), staticHostResolver{hosts: nil})
+	proxy, err := NewForwardProxy(tnet, hub.String(), "100.127.0.0/24", staticHostResolver{hosts: nil})
 	if err != nil {
 		t.Fatal(err)
 	}

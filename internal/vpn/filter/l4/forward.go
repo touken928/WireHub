@@ -17,28 +17,35 @@ import (
 // HostResolver resolves forward target hostnames to IPv4 addresses.
 type HostResolver interface {
 	ResolveHost(host string) (netip.Addr, error)
+	ResolveForwardAddrs(host string) ([]netip.Addr, error)
 }
 
 // ForwardProxy listens on hub VPN IP ports and relays to configured targets (admin Forward rules).
 type ForwardProxy struct {
-	tnet     *netstack.Net
-	hubIP    netip.Addr
-	resolver HostResolver
+	tnet      *netstack.Net
+	hubIP     netip.Addr
+	vpnSubnet *net.IPNet
+	resolver  HostResolver
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
-func NewForwardProxy(tnet *netstack.Net, hubIP string, resolver HostResolver) (*ForwardProxy, error) {
+func NewForwardProxy(tnet *netstack.Net, hubIP, vpnSubnet string, resolver HostResolver) (*ForwardProxy, error) {
 	addr, err := netip.ParseAddr(hubIP)
 	if err != nil {
 		return nil, fmt.Errorf("parse hub ip: %w", err)
 	}
+	subnet, err := parseVPNSubnet(vpnSubnet)
+	if err != nil {
+		return nil, err
+	}
 	return &ForwardProxy{
-		tnet:     tnet,
-		hubIP:    addr,
-		resolver: resolver,
+		tnet:      tnet,
+		hubIP:     addr,
+		vpnSubnet: subnet,
+		resolver:  resolver,
 	}, nil
 }
 
@@ -121,15 +128,22 @@ func (m *ForwardProxy) runTCP(ctx context.Context, rule ForwardRule) error {
 func (m *ForwardProxy) proxyTCP(ctx context.Context, client net.Conn, targetHost string, targetPort int) {
 	defer client.Close()
 
-	addr, err := m.resolver.ResolveHost(targetHost)
+	addrs, err := m.resolver.ResolveForwardAddrs(targetHost)
 	if err != nil {
 		log.Printf("forward tcp resolve %q: %v", targetHost, err)
 		return
 	}
-	target := netip.AddrPortFrom(addr, uint16(targetPort))
-	remote, err := m.tnet.DialContext(ctx, "tcp", target.String())
-	if err != nil {
+	var remote net.Conn
+	var target netip.AddrPort
+	for _, addr := range addrs {
+		target = netip.AddrPortFrom(addr, uint16(targetPort))
+		remote, err = m.dialTarget(ctx, "tcp", target)
+		if err == nil {
+			break
+		}
 		log.Printf("forward tcp dial %s: %v", target, err)
+	}
+	if remote == nil {
 		return
 	}
 	defer remote.Close()
@@ -204,17 +218,24 @@ func (m *ForwardProxy) runUDP(ctx context.Context, rule ForwardRule) error {
 		mu.Lock()
 		sess, ok := sessions[key]
 		if !ok {
-			addr, resolveErr := m.resolver.ResolveHost(rule.TargetHost)
+			addrs, resolveErr := m.resolver.ResolveForwardAddrs(rule.TargetHost)
 			if resolveErr != nil {
 				mu.Unlock()
 				log.Printf("forward udp resolve %q: %v", rule.TargetHost, resolveErr)
 				continue
 			}
-			target := netip.AddrPortFrom(addr, uint16(rule.TargetPort))
-			backend, dialErr := m.tnet.DialContext(ctx, "udp", target.String())
+			var backend net.Conn
+			var dialErr error
+			for _, addr := range addrs {
+				target := netip.AddrPortFrom(addr, uint16(rule.TargetPort))
+				backend, dialErr = m.dialTarget(ctx, "udp", target)
+				if dialErr == nil {
+					break
+				}
+				log.Printf("forward udp dial %s: %v", target, dialErr)
+			}
 			if dialErr != nil {
 				mu.Unlock()
-				log.Printf("forward udp dial %s: %v", target, dialErr)
 				continue
 			}
 			sess = &session{backend: backend, lastActive: time.Now()}

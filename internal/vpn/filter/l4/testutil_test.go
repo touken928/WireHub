@@ -97,6 +97,14 @@ func (r staticHostResolver) ResolveHost(host string) (netip.Addr, error) {
 	return netip.Addr{}, errUnknownHost{host: host}
 }
 
+func (r staticHostResolver) ResolveForwardAddrs(host string) ([]netip.Addr, error) {
+	addr, err := r.ResolveHost(host)
+	if err != nil {
+		return nil, err
+	}
+	return []netip.Addr{addr}, nil
+}
+
 type errUnknownHost struct{ host string }
 
 func (e errUnknownHost) Error() string {
