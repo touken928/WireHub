@@ -6,7 +6,7 @@ import (
 	"net"
 	"strings"
 
-	"github.com/touken928/wirehub/internal/domain"
+	"github.com/touken928/wirehub/internal/domain/map"
 	"gorm.io/gorm"
 )
 
@@ -89,7 +89,7 @@ func (s *Store) ListMapDetails() ([]MapDetail, error) {
 			return nil, err
 		}
 		out[i] = MapDetail{
-			ServiceMap:  r,
+			ServiceMap:    r,
 			TargetDisplay: r.TargetHost,
 			AllowedGroups: groups,
 		}
@@ -259,7 +259,7 @@ func (s *Store) AllocateMapIP(subnet, hubIP, dnsIP string) (string, error) {
 		return "", fmt.Errorf("only IPv4 subnets supported")
 	}
 	mask, _ := ipNet.Mask.Size()
-	for i := 2; i < (1<<(32-mask)); i++ {
+	for i := 2; i < (1 << (32 - mask)); i++ {
 		ip := make(net.IP, 4)
 		copy(ip, base)
 		ip[3] = base[3] + byte(i)
@@ -272,15 +272,15 @@ func (s *Store) AllocateMapIP(subnet, hubIP, dnsIP string) (string, error) {
 }
 
 func normalizeMapInput(in MapInput) (*ServiceMap, []uint, error) {
-	slug, err := domain.ValidateMapSlug(in.Slug)
+	slug, err := mapdom.ValidateMapSlug(in.Slug)
 	if err != nil {
 		return nil, nil, err
 	}
-	target, err := domain.ValidateMapTargetHost(in.TargetHost)
+	target, err := mapdom.ValidateMapTargetHost(in.TargetHost)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := domain.ValidateMapGroupIDs(in.AllowedGroups); err != nil {
+	if err := mapdom.ValidateMapGroupIDs(in.AllowedGroups); err != nil {
 		return nil, nil, err
 	}
 
@@ -316,6 +316,7 @@ func (s *Store) MapVirtualIPs() ([]string, error) {
 	return out, nil
 }
 
+// LookupMapVIP resolves a map slug to its virtual IP (integration / legacy helpers).
 func (s *Store) LookupMapVIP(slug string) (string, bool) {
 	entry, err := s.GetServiceMapBySlug(slug)
 	if err != nil {

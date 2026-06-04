@@ -5,9 +5,10 @@ import (
 	"sync"
 	"time"
 
-	dnssvc "github.com/touken928/wirehub/internal/vpn/dns"
+	domainruntime "github.com/touken928/wirehub/internal/domain/runtime"
 	"github.com/touken928/wirehub/internal/repo"
-	"github.com/touken928/wirehub/internal/vpn/wg"
+	vpnruntime "github.com/touken928/wirehub/internal/vpn/runtime"
+	"github.com/touken928/wirehub/internal/vpn/tunnel"
 )
 
 var ErrNetworkUnavailable = errors.New("network runtime is not running")
@@ -17,14 +18,14 @@ type StatusPublisher interface {
 	Publish()
 }
 
-// Hub is the application service: persistence orchestration and optional live network attachments.
+// Hub manages VPN network lifecycle and dataplane access.
 type Hub struct {
-	Store *repo.Store
+	app *App
 
 	networkMu       sync.RWMutex
-	wg              *wg.Manager
-	dns             *dnssvc.Server
 	network         NetworkRuntime
+	dpMu            sync.RWMutex
+	liveDP          vpnruntime.Dataplane
 	statusStop      chan struct{}
 	statusPublisher StatusPublisher
 }
@@ -33,51 +34,43 @@ func (h *Hub) SetStatusPublisher(p StatusPublisher) {
 	h.statusPublisher = p
 }
 
-func NewHub(st *repo.Store) *Hub {
-	return &Hub{Store: st}
+func NewHub(a *App) *Hub {
+	return &Hub{app: a}
 }
 
 func (h *Hub) SetNetworkRuntime(nc NetworkRuntime) {
+	h.networkMu.Lock()
 	h.network = nc
+	h.networkMu.Unlock()
 }
 
 func (h *Hub) NetworkRuntime() NetworkRuntime {
+	h.networkMu.RLock()
+	defer h.networkMu.RUnlock()
 	return h.network
 }
 
-func (h *Hub) AttachNetwork(wgMgr *wg.Manager, dns *dnssvc.Server, statusIntervalSec int) {
-	h.networkMu.Lock()
-	h.wg = wgMgr
-	h.dns = dns
-	h.networkMu.Unlock()
-	h.StartStatusPoller(statusIntervalSec)
-	h.SyncAccessFilter()
+func (h *Hub) dataplane() vpnruntime.Dataplane {
+	h.dpMu.RLock()
+	defer h.dpMu.RUnlock()
+	return h.liveDP
 }
 
-func (h *Hub) DetachNetwork() {
+func (h *Hub) onStarted(dp vpnruntime.Dataplane) {
+	h.dpMu.Lock()
+	h.liveDP = dp
+	h.dpMu.Unlock()
+	if bundle, err := h.app.loadSyncBundle(); err == nil {
+		h.StartStatusPoller(bundle.Settings.StatusInterval)
+	}
+	_ = h.app.SyncAccessFilter()
+}
+
+func (h *Hub) onStopped() {
 	h.StopStatusPoller()
-	h.networkMu.Lock()
-	h.wg = nil
-	h.dns = nil
-	h.networkMu.Unlock()
-}
-
-func (h *Hub) wgManager() (*wg.Manager, error) {
-	h.networkMu.RLock()
-	defer h.networkMu.RUnlock()
-	if h.wg == nil {
-		return nil, ErrNetworkUnavailable
-	}
-	return h.wg, nil
-}
-
-func (h *Hub) dnsServer() (*dnssvc.Server, error) {
-	h.networkMu.RLock()
-	defer h.networkMu.RUnlock()
-	if h.dns == nil {
-		return nil, ErrNetworkUnavailable
-	}
-	return h.dns, nil
+	h.dpMu.Lock()
+	h.liveDP = nil
+	h.dpMu.Unlock()
 }
 
 func (h *Hub) StartStatusPoller(intervalSec int) {
@@ -104,22 +97,34 @@ func (h *Hub) StopStatusPoller() {
 }
 
 func (h *Hub) SyncPortForwards() error {
-	if h.network == nil {
+	nc := h.NetworkRuntime()
+	if nc == nil {
 		return nil
 	}
-	return h.network.SyncPortForwards()
+	return nc.SyncPortForwards()
+}
+
+func (h *Hub) SyncMaps() error {
+	nc := h.NetworkRuntime()
+	if nc == nil {
+		return nil
+	}
+	if err := nc.SyncMaps(); err != nil {
+		return err
+	}
+	return h.app.SyncAccessFilter()
 }
 
 func (h *Hub) pollPeerStats() {
-	wgMgr, err := h.wgManager()
+	dp := h.dataplane()
+	if dp == nil {
+		return
+	}
+	stats, err := dp.GetStats()
 	if err != nil {
 		return
 	}
-	stats, err := wgMgr.GetStats()
-	if err != nil {
-		return
-	}
-	peers, err := h.Store.ListPeers()
+	peers, err := h.app.Store.ListPeers()
 	if err != nil {
 		return
 	}
@@ -132,9 +137,23 @@ func (h *Hub) pollPeerStats() {
 		if !st.LastHandshake.IsZero() {
 			hs = st.LastHandshake.Unix()
 		}
-		_ = h.Store.UpdatePeerStats(p.ID, hs, st.RxBytes, st.TxBytes)
+		_ = h.app.Store.UpdatePeerStats(p.ID, hs, st.RxBytes, st.TxBytes)
 	}
 	if h.statusPublisher != nil {
 		h.statusPublisher.Publish()
 	}
 }
+
+func repoPeerToWG(p *repo.Peer) domainruntime.WGPeer {
+	return domainruntime.WGPeer{
+		ID:        p.ID,
+		PublicKey: p.PublicKey,
+		WGIP:      p.WGIP,
+		DNSName:   p.DNSName,
+		GroupID:   p.GroupID,
+		Enabled:   p.Enabled,
+	}
+}
+
+// PeerStats is re-exported for callers that need tunnel stats shape.
+type PeerStats = tunnel.PeerStats

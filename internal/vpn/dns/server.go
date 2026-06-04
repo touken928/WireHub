@@ -11,14 +11,12 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/touken928/wirehub/internal/config"
-	"github.com/touken928/wirehub/internal/domain"
-	"github.com/touken928/wirehub/internal/repo"
+	"github.com/touken928/wirehub/internal/domain/runtime"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
 type Server struct {
-	store    *repo.Store
-	hubIP    string
+	catalog  catalogStore
 	dnsIP    string
 	upstream []string
 	server   *dns.Server
@@ -27,16 +25,19 @@ type Server struct {
 	stopOnce sync.Once
 }
 
+// UpdateDNS replaces in-memory authoritative DNS state.
+func (s *Server) UpdateDNS(catalog runtime.DNSCatalog, peers []runtime.WGPeer) {
+	s.catalog.update(catalog, peers)
+}
+
 // SetUpstream replaces upstream resolver list used for external queries.
 func (s *Server) SetUpstream(upstream []string) {
 	s.upstream = append([]string(nil), upstream...)
 }
 
-func NewServer(st *repo.Store, hubIP, dnsIP string, upstream []string) *Server {
+func NewServer(dnsIP string, upstream []string) *Server {
 	up := append([]string(nil), upstream...)
 	return &Server{
-		store:    st,
-		hubIP:    hubIP,
 		dnsIP:    dnsIP,
 		upstream: up,
 	}
@@ -165,7 +166,11 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 			continue
 		}
 
-		ip, resolved := s.lookupIPForClient(slug, ok, dnsClientIP(w))
+		clientIP := netip.Addr{}
+		if host := dnsClientIP(w); host != "" {
+			clientIP, _ = netip.ParseAddr(host)
+		}
+		ip, resolved := s.lookupIPForClient(slug, ok, clientIP)
 		if !resolved {
 			internalMissing = true
 			continue
@@ -224,20 +229,4 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 
 func (s *Server) exchangeUpstream(req *dns.Msg) (*dns.Msg, error) {
 	return exchangeDNS(req, s.upstream)
-}
-
-func (s *Server) RegisterPeer(peer *repo.Peer) error {
-	slug := peer.Name
-	if slug == "" {
-		slug = domain.HostnameSlug(peer.Name)
-	}
-	peer.DNSName = slug
-	_ = s.store.DeleteDNSByPeerID(peer.ID)
-	record := &repo.DNSRecord{
-		Hostname: slug,
-		IP:       peer.WGIP,
-		PeerID:   &peer.ID,
-		Manual:   false,
-	}
-	return s.store.CreateDNSRecord(record)
 }

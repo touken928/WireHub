@@ -8,12 +8,12 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/touken928/wirehub/internal/config"
-	"github.com/touken928/wirehub/internal/domain"
+	"github.com/touken928/wirehub/internal/domain/forward"
 )
 
 // ResolveHost resolves a forward target to an IPv4 address using hub DNS and host resolvers.
 func (s *Server) ResolveHost(host string) (netip.Addr, error) {
-	host, err := domain.ValidateForwardTargetHost(host)
+	host, err := forward.ValidateForwardTargetHost(host)
 	if err != nil {
 		return netip.Addr{}, err
 	}
@@ -51,7 +51,7 @@ func (s *Server) ResolveHost(host string) (netip.Addr, error) {
 
 // ResolveForwardAddrs returns all IPv4 addresses for a forward target.
 func (s *Server) ResolveForwardAddrs(host string) ([]netip.Addr, error) {
-	host, err := domain.ValidateForwardTargetHost(host)
+	host, err := forward.ValidateForwardTargetHost(host)
 	if err != nil {
 		return nil, err
 	}

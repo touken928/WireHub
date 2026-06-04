@@ -3,40 +3,41 @@ package service
 import (
 	"fmt"
 
-	"github.com/touken928/wirehub/internal/domain"
+	"github.com/touken928/wirehub/internal/domain/client"
+	"github.com/touken928/wirehub/internal/domain/peer"
 	"github.com/touken928/wirehub/internal/repo"
-	"github.com/touken928/wirehub/internal/vpn/wg"
+	"github.com/touken928/wirehub/internal/vpn/tunnel"
 )
 
 // CreatePeer provisions a peer in the database and on the live network stack when running.
-func (h *Hub) CreatePeer(name string, groupID uint) (*repo.Peer, error) {
-	slug, err := domain.ValidateHostname(name)
+func (a *App) CreatePeer(name string, groupID uint) (*repo.Peer, error) {
+	slug, err := peer.ValidateHostname(name)
 	if err != nil {
 		return nil, err
 	}
 
-	if _, err := h.Store.GetGroup(groupID); err != nil {
+	if _, err := a.Store.GetGroup(groupID); err != nil {
 		return nil, fmt.Errorf("group not found")
 	}
 
-	existing, _ := h.Store.ListPeers()
+	existing, _ := a.Store.ListPeers()
 	for _, p := range existing {
 		if p.Name == slug {
 			return nil, fmt.Errorf("hostname already exists")
 		}
 	}
 
-	settings, err := h.Store.GetSettings()
+	settings, err := a.Store.GetSettings()
 	if err != nil {
 		return nil, err
 	}
 
-	priv, pub, err := wg.GenerateKeyPair()
+	priv, pub, err := tunnel.GenerateKeyPair()
 	if err != nil {
 		return nil, err
 	}
 
-	ip, err := h.Store.AllocateIP(settings.WGSubnet, settings.HubIP)
+	ip, err := a.Store.AllocateIP(settings.WGSubnet, settings.HubIP)
 	if err != nil {
 		return nil, err
 	}
@@ -51,33 +52,38 @@ func (h *Hub) CreatePeer(name string, groupID uint) (*repo.Peer, error) {
 		DNSName:    slug,
 	}
 
-	if err := h.Store.CreatePeer(peer); err != nil {
+	if err := a.Store.CreatePeer(peer); err != nil {
 		return nil, err
 	}
 
-	wgMgr, err := h.wgManager()
-	if err != nil {
+	if err := a.ensurePeerDNSRecord(peer); err != nil {
 		return nil, err
 	}
-	if err := wgMgr.SyncPeer(peer); err != nil {
+	_ = a.Store.UpdatePeer(peer)
+
+	dp := a.Hub.dataplane()
+	if dp != nil {
+		if err := dp.SyncPeer(repoPeerToWG(peer)); err != nil {
+			return nil, err
+		}
+		if err := a.syncDNSCatalog(); err != nil {
+			return nil, err
+		}
+	}
+	if err := a.SyncAccessFilter(); err != nil {
 		return nil, err
 	}
-	if dns, err := h.dnsServer(); err == nil {
-		_ = dns.RegisterPeer(peer)
-	}
-	_ = h.Store.UpdatePeer(peer)
-	h.SyncAccessFilter()
 	return peer, nil
 }
 
 // RenamePeer changes a peer hostname and refreshes authoritative DNS.
-func (h *Hub) RenamePeer(peerID uint, name string) (*repo.Peer, error) {
-	slug, err := domain.ValidateHostname(name)
+func (a *App) RenamePeer(peerID uint, name string) (*repo.Peer, error) {
+	slug, err := peer.ValidateHostname(name)
 	if err != nil {
 		return nil, err
 	}
 
-	peer, err := h.Store.GetPeer(peerID)
+	peer, err := a.Store.GetPeer(peerID)
 	if err != nil {
 		return nil, fmt.Errorf("peer not found")
 	}
@@ -85,7 +91,7 @@ func (h *Hub) RenamePeer(peerID uint, name string) (*repo.Peer, error) {
 		return peer, nil
 	}
 
-	existing, _ := h.Store.ListPeers()
+	existing, _ := a.Store.ListPeers()
 	for _, p := range existing {
 		if p.ID != peerID && p.Name == slug {
 			return nil, fmt.Errorf("hostname already exists")
@@ -94,94 +100,106 @@ func (h *Hub) RenamePeer(peerID uint, name string) (*repo.Peer, error) {
 
 	peer.Name = slug
 	peer.DNSName = slug
-	if err := h.Store.UpdatePeer(peer); err != nil {
+	if err := a.Store.UpdatePeer(peer); err != nil {
 		return nil, err
 	}
-	if dns, err := h.dnsServer(); err == nil {
-		_ = dns.RegisterPeer(peer)
+	if err := a.ensurePeerDNSRecord(peer); err != nil {
+		return nil, err
 	}
-	h.SyncAccessFilter()
+	if err := a.syncDNSCatalog(); err != nil {
+		return nil, err
+	}
+	if err := a.SyncAccessFilter(); err != nil {
+		return nil, err
+	}
 	return peer, nil
 }
 
 // UpdatePeerGroup moves a peer to another group and refreshes the network stack.
-func (h *Hub) UpdatePeerGroup(peerID, groupID uint) (*repo.Peer, error) {
-	peer, err := h.Store.GetPeer(peerID)
+func (a *App) UpdatePeerGroup(peerID, groupID uint) (*repo.Peer, error) {
+	peer, err := a.Store.GetPeer(peerID)
 	if err != nil {
 		return nil, fmt.Errorf("peer not found")
 	}
-	if _, err := h.Store.GetGroup(groupID); err != nil {
+	if _, err := a.Store.GetGroup(groupID); err != nil {
 		return nil, fmt.Errorf("group not found")
 	}
 	peer.GroupID = groupID
 
-	if err := h.Store.UpdatePeer(peer); err != nil {
+	if err := a.Store.UpdatePeer(peer); err != nil {
 		return nil, err
 	}
-	wgMgr, err := h.wgManager()
-	if err != nil {
+	dp := a.Hub.dataplane()
+	if dp != nil {
+		if err := dp.SyncPeer(repoPeerToWG(peer)); err != nil {
+			return nil, err
+		}
+	}
+	if err := a.SyncAccessFilter(); err != nil {
 		return nil, err
 	}
-	if err := wgMgr.SyncPeer(peer); err != nil {
-		return nil, err
-	}
-	h.SyncAccessFilter()
 	return peer, nil
 }
 
 // DeletePeer removes a peer from the database and live network.
-func (h *Hub) DeletePeer(peerID uint) error {
-	peer, err := h.Store.GetPeer(peerID)
+func (a *App) DeletePeer(peerID uint) error {
+	peer, err := a.Store.GetPeer(peerID)
 	if err != nil {
 		return fmt.Errorf("peer not found")
 	}
-	if wgMgr, err := h.wgManager(); err == nil {
-		_ = wgMgr.RemovePeer(peer.PublicKey)
+	if dp := a.Hub.dataplane(); dp != nil {
+		_ = dp.RemovePeer(peer.PublicKey)
 	}
-	_ = h.Store.DeleteDNSByPeerID(peerID)
-	if err := h.Store.DeletePeer(peerID); err != nil {
+	_ = a.Store.DeleteDNSByPeerID(peerID)
+	if err := a.Store.DeletePeer(peerID); err != nil {
 		return err
 	}
-	h.SyncAccessFilter()
-	return nil
+	if err := a.syncDNSCatalog(); err != nil {
+		return err
+	}
+	return a.SyncAccessFilter()
 }
 
 // TogglePeer enables or disables a peer on the live network.
-func (h *Hub) TogglePeer(peerID uint) (*repo.Peer, error) {
-	peer, err := h.Store.GetPeer(peerID)
+func (a *App) TogglePeer(peerID uint) (*repo.Peer, error) {
+	peer, err := a.Store.GetPeer(peerID)
 	if err != nil {
 		return nil, fmt.Errorf("peer not found")
 	}
 	peer.Enabled = !peer.Enabled
-	if err := h.Store.UpdatePeer(peer); err != nil {
+	if err := a.Store.UpdatePeer(peer); err != nil {
 		return nil, err
 	}
-	wgMgr, err := h.wgManager()
-	if err != nil {
-		return nil, err
-	}
-	if peer.Enabled {
-		if err := wgMgr.SyncPeer(peer); err != nil {
+	dp := a.Hub.dataplane()
+	if dp != nil {
+		if peer.Enabled {
+			if err := dp.SyncPeer(repoPeerToWG(peer)); err != nil {
+				return nil, err
+			}
+		} else {
+			_ = dp.RemovePeer(peer.PublicKey)
+		}
+		if err := a.syncDNSCatalog(); err != nil {
 			return nil, err
 		}
-	} else {
-		_ = wgMgr.RemovePeer(peer.PublicKey)
 	}
-	h.SyncAccessFilter()
+	if err := a.SyncAccessFilter(); err != nil {
+		return nil, err
+	}
 	return peer, nil
 }
 
 // ClientConfig renders the WireGuard client config for a peer.
-func (h *Hub) ClientConfig(peerID uint) (string, error) {
-	peer, err := h.Store.GetPeer(peerID)
+func (a *App) ClientConfig(peerID uint) (string, error) {
+	peer, err := a.Store.GetPeer(peerID)
 	if err != nil {
 		return "", fmt.Errorf("peer not found")
 	}
-	settings, err := h.Store.GetSettings()
+	settings, err := a.Store.GetSettings()
 	if err != nil {
 		return "", err
 	}
-	return domain.BuildClientConfig(domain.ClientConfigInput{
+	return client.BuildClientConfig(client.ClientConfigInput{
 		Endpoint:        settings.Endpoint,
 		ListenPort:      settings.ListenPort,
 		ServerPublicKey: settings.ServerPublicKey,

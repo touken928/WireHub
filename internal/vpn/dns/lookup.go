@@ -1,14 +1,14 @@
 package dns
 
 import (
+	"net/netip"
 	"strings"
 
 	"github.com/touken928/wirehub/internal/config"
-	"github.com/touken928/wirehub/internal/repo"
+	"github.com/touken928/wirehub/internal/domain/policy"
 )
 
 // dnsSlug strips a leading www. prefix for alias resolution.
-// www.{name}.wirehub -> {name}; www.hub.wirehub -> hub.
 func dnsSlug(slug string) string {
 	slug = strings.ToLower(strings.TrimSpace(slug))
 	if strings.HasPrefix(slug, "www.") {
@@ -18,42 +18,34 @@ func dnsSlug(slug string) string {
 }
 
 func (s *Server) lookupIP(raw string, ok bool) (string, bool) {
-	return s.lookupIPForClient(raw, ok, "")
+	return s.lookupIPForClient(raw, ok, netip.Addr{})
 }
 
-func (s *Server) lookupIPForClient(raw string, ok bool, clientIP string) (string, bool) {
+func (s *Server) lookupIPForClient(raw string, ok bool, clientIP netip.Addr) (string, bool) {
 	if !ok {
 		return "", false
 	}
 	raw = strings.ToLower(strings.TrimSpace(raw))
-
 	slug := dnsSlug(raw)
+	state := s.catalog.snapshot()
+
 	if slug == config.HubDNSLabel {
-		return s.hubIP, true
+		if state.catalog.HubIP != "" {
+			return state.catalog.HubIP, true
+		}
+		return "", false
 	}
-	if ip, found := s.store.LookupMapVIP(slug); found {
-		if clientIP != "" {
-			svcMap, err := s.store.GetServiceMapBySlug(slug)
-			if err != nil {
-				return "", false
-			}
-			allowed, err := s.store.MapAllowedForPeer(clientIP, svcMap.ID)
-			if err != nil || !allowed {
+	if ent, found := state.catalog.Maps[slug]; found {
+		if clientIP.IsValid() {
+			gid, ok := state.peerGroup[clientIP]
+			if !ok || !policy.GroupInAllowedSet(ent.AllowedGroupIDs, gid) {
 				return "", false
 			}
 		}
-		return ip, true
+		return ent.VirtualIP, true
 	}
-	return s.lookupPeer(slug)
-}
-
-func (s *Server) lookupPeer(slug string) (string, bool) {
-	if ip, found := s.store.ResolveDNS(slug); found {
+	if ip, found := state.catalog.Peers[slug]; found {
 		return ip, true
-	}
-	var peers []repo.Peer
-	if err := s.store.DB().Where("dns_name = ?", slug).Find(&peers).Error; err == nil && len(peers) > 0 {
-		return peers[0].WGIP, true
 	}
 	return "", false
 }

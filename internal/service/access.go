@@ -1,14 +1,14 @@
 package service
 
 import (
-	"github.com/touken928/wirehub/internal/domain"
+	"github.com/touken928/wirehub/internal/domain/policy"
 	"github.com/touken928/wirehub/internal/repo"
 )
 
-func peerEndpoints(peers []repo.Peer) []domain.PeerEndpoint {
-	out := make([]domain.PeerEndpoint, len(peers))
+func peerEndpoints(peers []repo.Peer) []policy.PeerEndpoint {
+	out := make([]policy.PeerEndpoint, len(peers))
 	for i, p := range peers {
-		out[i] = domain.PeerEndpoint{
+		out[i] = policy.PeerEndpoint{
 			ID:      p.ID,
 			Name:    p.Name,
 			DNSName: p.DNSName,
@@ -20,10 +20,10 @@ func peerEndpoints(peers []repo.Peer) []domain.PeerEndpoint {
 	return out
 }
 
-func groupLinkPairs(links []repo.GroupLink) []domain.GroupLinkPair {
-	out := make([]domain.GroupLinkPair, len(links))
+func groupLinkPairs(links []repo.GroupLink) []policy.GroupLinkPair {
+	out := make([]policy.GroupLinkPair, len(links))
 	for i, l := range links {
-		out[i] = domain.GroupLinkPair{
+		out[i] = policy.GroupLinkPair{
 			FromGroupID:   l.FromGroupID,
 			ToGroupID:     l.ToGroupID,
 			Bidirectional: l.Bidirectional,
@@ -32,10 +32,10 @@ func groupLinkPairs(links []repo.GroupLink) []domain.GroupLinkPair {
 	return out
 }
 
-func groupAccessList(groups []repo.PeerGroup) []domain.GroupAccess {
-	out := make([]domain.GroupAccess, len(groups))
+func groupAccessList(groups []repo.PeerGroup) []policy.GroupAccess {
+	out := make([]policy.GroupAccess, len(groups))
 	for i, g := range groups {
-		out[i] = domain.GroupAccess{
+		out[i] = policy.GroupAccess{
 			ID:              g.ID,
 			AllowIntraGroup: g.AllowIntraGroup,
 		}
@@ -43,53 +43,52 @@ func groupAccessList(groups []repo.PeerGroup) []domain.GroupAccess {
 	return out
 }
 
-func (h *Hub) buildAccessRules() error {
-	peers, err := h.Store.ListPeers()
+func (a *App) buildAccessPolicySpec() (policy.AccessPolicySpec, error) {
+	peers, err := a.Store.ListPeers()
 	if err != nil {
-		return err
+		return policy.AccessPolicySpec{}, err
 	}
-	links, err := h.Store.ListGroupLinks()
+	links, err := a.Store.ListGroupLinks()
 	if err != nil {
-		return err
+		return policy.AccessPolicySpec{}, err
 	}
-	groups, err := h.Store.ListGroups()
+	groups, err := a.Store.ListGroups()
 	if err != nil {
-		return err
+		return policy.AccessPolicySpec{}, err
 	}
-	mapPolicy, err := h.buildMapAccessPolicy()
+	mapPolicy, err := a.buildMapAccessPolicy()
 	if err != nil {
-		return err
+		return policy.AccessPolicySpec{}, err
 	}
-	policy, err := domain.BuildAccessPolicy(
+	return policy.BuildAccessPolicySpec(
 		peerEndpoints(peers),
 		groupLinkPairs(links),
-		domain.NewGroupAccessPolicy(groupAccessList(groups)),
+		policy.NewGroupAccessPolicy(groupAccessList(groups)),
 		mapPolicy,
 	)
+}
+
+// SyncAccessFilter rebuilds group ACL rules on the running dataplane.
+func (a *App) SyncAccessFilter() error {
+	spec, err := a.buildAccessPolicySpec()
 	if err != nil {
 		return err
 	}
-	wgMgr, err := h.wgManager()
-	if err != nil {
-		return err
+	dp := a.Hub.dataplane()
+	if dp == nil {
+		return nil
 	}
-	wgMgr.SetAccessPolicy(policy)
-	return nil
+	return dp.ApplyPolicy(spec)
 }
 
-// SyncAccessFilter rebuilds group ACL rules on the running WireGuard stack.
-func (h *Hub) SyncAccessFilter() {
-	_ = h.buildAccessRules()
-}
-
-func (h *Hub) buildMapAccessPolicy() (domain.MapAccessPolicy, error) {
-	details, err := h.Store.ListMapDetails()
+func (a *App) buildMapAccessPolicy() (policy.MapAccessPolicy, error) {
+	details, err := a.Store.ListMapDetails()
 	if err != nil {
-		return domain.MapAccessPolicy{}, err
+		return policy.MapAccessPolicy{}, err
 	}
-	maps := make([]domain.MapAccess, 0, len(details))
+	maps := make([]policy.MapAccess, 0, len(details))
 	for _, d := range details {
-		maps = append(maps, domain.NewMapAccess(d.VirtualIP, d.AllowedGroups))
+		maps = append(maps, policy.NewMapAccess(d.VirtualIP, d.AllowedGroups))
 	}
-	return domain.NewMapAccessPolicy(maps), nil
+	return policy.NewMapAccessPolicy(maps), nil
 }

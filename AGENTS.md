@@ -19,24 +19,28 @@ Hub-and-spoke topology: only the hub needs a public endpoint; peers connect outb
 ## Repository layout
 
 ```
-cmd/wirehub/              # composition root (main)
+cmd/wirehub/              # delegates to internal/bootstrap
 internal/
-  domain/                 # pure rules: ACL, hostnames, forwards, client .conf
-  service/                # use cases: Hub (peers, poller, VPN attach, ACL sync)
-  server/                 # Gin handlers + routes; wraps *service.Hub
-  repo/                   # GORM/SQLite persistence
+  bootstrap/              # composition root: repo, App, Stack, Gin, VPN start
+  api/
+    http/                 # Gin REST (handlers/, dto/, httputil/, auth/); calls service.App only
+    ws/                   # WebSocket status transport
+  domain/                 # portable rules (subpackages: peer, policy, forward, map, runtime, client, hub)
+  service/                # App + Hub; LoadSyncBundle; peers/groups/forwards/maps/settings/setup/status
+  repo/                   # GORM/SQLite + password.go (bcrypt helpers)
   vpn/
-    stack.go              # VPN lifecycle (NetworkRuntime)
-    wg/                   # WireGuard manager
-    dns/                  # authoritative *.wirehub on netstack
-    filter/               # TUN ACL, gVisor forwarding, tunnel HTTP
-      l4/                 # system listen, ForwardProxy, TransparentTable (SNAT)
-  auth/                   # JWT login middleware
-  password/               # bcrypt (shared by repo + auth; no import cycles)
+    runtime/              # Stack lifecycle (Dataplane); no repo import
+    tunnel/               # WireGuard + netstack TUN
+    tun/                  # TUN ACL + conntrack
+    snat/                 # unidirectional group-link transparent SNAT
+    ingress/              # ForwardProxy, MapProxy, tunnel Web
+    dns/                  # authoritative *.wirehub (in-memory catalog)
+    policy/               # domain.AccessPolicySpec → tun.AccessPolicy
+    netstack/             # gVisor stack helpers, IP forwarding
+    core/                 # shared constants (hub ports)
   config/                 # CLI flags, defaults, subnet/DNS helpers
-  ws/                     # WebSocket hub for live status broadcast
   static/                 # go:embed SPA (built from web/)
-  integration/            # black-box Go tests (slow; needs syscalls)
+  integration/            # VPN black-box tests: mesh.go/sync.go harness + *_test.go by feature
 web/                      # React + Vite + Fluent UI v9
 docs/                     # README_zh.md, assets/
 docker/                   # Dockerfile, compose.yml
@@ -49,36 +53,38 @@ docker/                   # Dockerfile, compose.yml
 ### Dependency direction
 
 ```
-cmd → server, service, repo, vpn, auth, config, static
-server → service, repo, auth, password, ws
-service → domain, repo, vpn/wg, vpn/dns
-vpn → service, repo, vpn/wg, vpn/dns, vpn/filter
-repo → domain, config, password
-domain → config, vpn/filter (ACL types only)
-auth → repo, password
+cmd → bootstrap
+bootstrap → api/http, service, repo, vpn/runtime, config, static
+api/http → service, repo (dto + VerifyPassword in handlers), api/http/auth, api/ws, vpn/core
+api/http/auth → repo (JWT + Gin middleware); login rate limit in api/http/httputil
+api/ws → (snapshot via service.Status)
+service → domain/*, repo, vpn/runtime, vpn/tunnel (keygen only)
+vpn/runtime → domain/runtime, domain/policy, vpn/* (Callbacks = service.App)
+vpn/* → domain/*, config, other vpn subpackages only
+repo → domain/*, config
+domain/* → config (and domain subpackages only)
 ```
 
-**Do not introduce** `repo → auth` or `internal → cmd` imports.
+**Do not introduce** `repo → api/http` or `internal → cmd` imports.
 
 ### Layer responsibilities
 
 | Layer | Role |
 |-------|------|
-| `cmd/wirehub` | Wire repo, server, auth, VPN stack; start HTTP; start VPN when configured |
-| `server` | Thin HTTP: validate input, call `service.Hub`, return JSON. No WG/DNS logic in handlers |
-| `service` | Orchestration: DB + WG + DNS + ACL sync, peer lifecycle, status poller |
-| `domain` | Portable rules and validation. No GORM, no Gin |
+| `cmd/wirehub` | Parse flags; call `bootstrap.Run` |
+| `bootstrap` | Wire repo, `service.App`, `api/http`, Stack, routes, optional `stack.Start(bundle)` |
+| `api/http` | Thin HTTP: validate input, call `service.App`, map via `dto/` |
+| `service` | `App` (Store + `Hub`); use cases in `peers.go`, `groups.go`, …; `LoadSyncBundle` |
+| `domain/*` | Portable rules; `domain/runtime.SyncBundle`, `domain/policy.AccessPolicySpec`, … |
 | `repo` | Models, queries, setup/import/export |
-| `vpn` | Data plane: netstack, WireGuard, DNS server, ACL filter, L4 proxies |
+| `vpn/runtime` | Data plane `Stack` / `Dataplane` |
 
 ### Startup sequence
 
 1. Parse CLI flags (`config.ParseFlags`).
-2. Open SQLite (`repo.New`).
-3. Create `server.Server` + `auth.Service`.
-4. Create `vpn.Stack`, register as `service.NetworkRuntime`.
-5. Register Gin routes + embed static SPA.
-6. If hub is configured → `stack.Start()` (WG, DNS, filter, forwards). Else log `/setup` URL only.
+2. `bootstrap.Run`: open SQLite, create `service.App` + `api/http.Server`, `runtime.Stack`, register routes.
+3. If hub is configured → `app.LoadSyncBundle()` then `stack.Start(bundle)`.
+4. Else log `/setup` URL only.
 
 ### Network stack (`internal/vpn`)
 
@@ -87,26 +93,27 @@ auth → repo, password
 - Control plane: Gin REST + React UI (JWT). Live status via WebSocket (`GET /api/ws/status?token=…`).
 - Data plane: WireGuard tunnels terminate in netstack. Peer-to-peer traffic is forwarded and ACL-filtered. Traffic to the hub itself (Web, DNS, forward listeners) is not subject to peer ACL rules.
 
-**L4 modes (`vpn/filter/l4`)**
+**L4 modes (`vpn/ingress` + `vpn/snat`)**
 
-| Mode | Purpose |
-|------|---------|
-| System listen | DNS `:53`, tunnel Web TCP `:80` on hub VPN IP; WireGuard UDP on host (CLI `--port`) |
-| ForwardProxy | Admin **Forward** rules: peer dials `hub_ip:listen_port` → target host:port |
-| MapProxy | Admin **Maps** rules: `{slug}.wirehub` → virtual IP; TCP/UDP same-port to `target_host`; group allow list |
-| TransparentTable | Unidirectional group link: peer dials target peer IP:port; hub SNAT on TUN |
+| Mode | Package | Purpose |
+|------|---------|---------|
+| System listen | `dns`, `ingress` | DNS `:53`, tunnel Web TCP `:80` on hub VPN IP; WG UDP on host (CLI `--port`) |
+| ForwardProxy | `ingress` | Admin **Forward**: `hub_ip:listen_port` → target |
+| MapProxy | `ingress` | Admin **Maps**: `{slug}.wirehub` → VIP; same-port TCP/UDP |
+| TransparentTable | `snat` + `tun` | Unidirectional group links; hub SNAT on TUN |
 
-Shared IPv4 rewrite and ephemeral port pool. `l4.ReservedHubPorts(tunnelWebPort, forwards)` reserves port 53, tunnel Web TCP (80), and Forward listen ports from the SNAT range via `wg.Manager.ReserveHubPorts`.
+`ingress.ReservedHubPorts` + `tunnel.Manager.ReserveHubPorts` keep SNAT ephemeral ports away from hub listeners.
 
 **Group ACL**
 
-- `domain.BuildAccessPolicy(peers, links, groups, maps)` → `vpn/filter.AccessPolicy` (block list + `l4.TransparentTable`) → `wg.Manager.SetAccessPolicy`.
+- `domain/policy.BuildAccessPolicySpec(...)` → `vpn/policy.Apply(spec)` → `tunnel.Manager.SetAccessPolicy`.
+- Control plane pushes `domain/runtime.SyncBundle` via `App.LoadSyncBundle()`; runtime applies peers, DNS catalog, ingress, policy.
 - Map VIPs: blocked on TUN when peer’s group not in `MapGroupAllow`; DNS NXDOMAIN; `MapProxy` rejects disallowed traffic.
 - `repo.PeerGroup.AllowIntraGroup` (default `true`, JSON `allow_intra_group`) — UI label **Same-group interconnect** on Groups detail panel.
 - Same group: direct WireGuard IP connectivity when `AllowIntraGroup` is true; peers blocked from each other when false (hub Web/DNS/forwards still reachable).
 - Cross group: default deny; explicit link on Groups graph required.
 - Bidirectional link: both groups may initiate to each other.
-- Unidirectional link (`A → B`): `domain.BuildTransparentTable` → TUN transparent relay in `vpn/filter/l4`.
+- Unidirectional link (`A → B`): `domain/policy.BuildTransparentSpec` → `vpn/policy.Apply` → `vpn/snat` on TUN.
 
 **DNS**
 
@@ -117,21 +124,21 @@ Shared IPv4 rewrite and ephemeral port pool. `l4.ReservedHubPorts(tunnelWebPort,
 
 **Port forwards**
 
-- Model: `repo.PortForward` → runtime `l4.ForwardProxy`.
+- Model: `repo.PortForward` → `ingress.ForwardProxy` via `SyncBundle.Forwards`.
 - After CRUD: `vpn.Stack.SyncPortForwards()`.
-- Handlers: `internal/server/handlers_forwards.go`, routes under `/api/forwards`.
+- Handlers: `internal/api/http/handlers/forwards.go`, routes under `/api/forwards`.
 
 **Service maps**
 
-- Model: `repo.ServiceMap`, `repo.MapGroupAllow` (SQLite tables `service_relays`, `relay_group_allows`) → runtime `l4.MapProxy` + VIP on netstack NIC.
+- Model: `repo.ServiceMap`, `repo.MapGroupAllow` → `ingress.MapProxy` + VIP on netstack NIC via `SyncBundle.Maps`.
 - After CRUD: `vpn.Stack.SyncMaps()` + `SyncAccessFilter()`.
-- Handlers: `internal/server/handlers_maps.go`, routes under `/api/maps`.
+- Handlers: `internal/api/http/handlers/maps.go`, routes under `/api/maps`.
 - Validation: `domain.ValidateMapSlug`, `domain.ValidateMapGroupIDs` (≥1 group).
 
 **Group links**
 
 - Model: `repo.GroupLink` with `Bidirectional`; stored as directed `from_group_id → to_group_id`.
-- Handlers: `handlers_groups.go`. Routes: `POST/DELETE /api/groups/links`.
+- Handlers: `internal/api/http/handlers/groups.go`. Routes: `POST/DELETE /api/groups/links`.
 - UI: icon-only toolbar on Groups canvas (`LinkDrawToolbar`).
 
 ## Configuration
@@ -174,11 +181,11 @@ Docker local build: `docker compose -f docker/compose.yml up -d --build`.
 
 ## Backend conventions
 
-### HTTP handlers (`internal/server`)
+### HTTP handlers (`internal/api/http`)
 
-- Delegate peer/network work to `service.Hub` methods.
-- One handler file per area: `handlers_peers.go`, `handlers_groups.go`, `handlers_forwards.go`, `handlers_settings.go`, `handlers_setup.go`, `handlers_ws.go`.
-- Register routes in `router.go` only.
+- Handlers live in `handlers/`; call `service.App` only (no direct `repo.Store` in handlers).
+- JSON shapes in `dto/`; path/query helpers in `httputil/`.
+- Register routes in `internal/api/http/router.go` only.
 - WebSocket auth uses query param `?token=` (browsers cannot set `Authorization` on upgrade).
 
 ### Domain (`internal/domain`)
@@ -189,8 +196,7 @@ Docker local build: `docker compose -f docker/compose.yml up -d --build`.
 
 ### Passwords
 
-- Use `password.Hash` / `password.Verify` only.
-- Never import `auth` from `repo` (cycle).
+- Use `repo.HashPassword` / `repo.VerifyPassword` only (see `repo/password.go`).
 
 ### VPN lifecycle
 
@@ -258,7 +264,7 @@ Auth shell: `LoginLayout` + `styles/loginPage.ts` shared by Login and Setup.
 | Scope | Command | Notes |
 |-------|---------|-------|
 | All packages | `go test ./...` | Required before finishing backend changes |
-| Integration | `internal/integration/` | Real netstack/WG; slow; needs network/syscalls |
+| Integration | `internal/integration/` | Harness in `mesh.go`/`sync.go`/…; scenarios in `dns_test.go`, `forward_test.go`, …; external forward tests need network |
 | Unit packages | `domain`, `repo`, `vpn/dns`, `vpn/filter`, `config`, … | Fast; run targeted tests when touching one area |
 
 Add or update tests when changing behavior in `domain`, `repo`, or `vpn/filter`. Integration tests cover DNS, forwards, unidirectional links, peers.
@@ -270,7 +276,7 @@ Frontend: run `cd web && npm run build` to catch TypeScript and bundle errors.
 1. **Model / persistence** → `internal/repo` (models, queries).
 2. **Validation / portable logic** → `internal/domain`.
 3. **Orchestration** (DB + WG + DNS + ACL) → `internal/service`.
-4. **HTTP** → handler file + route in `internal/server/router.go`.
+4. **HTTP** → `internal/api/http/handlers/*.go` + route in `internal/api/http/router.go`.
 5. **UI** → `web/src/api/types.ts`, relevant page/component.
 6. **Verify** → `go test ./...` and `cd web && npm run build`.
 

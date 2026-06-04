@@ -1,57 +1,61 @@
 package service
 
 import (
-	"net/netip"
+	"errors"
 
-	"github.com/touken928/wirehub/internal/domain"
 	"github.com/touken928/wirehub/internal/repo"
-	"github.com/touken928/wirehub/internal/vpn/filter/l4"
 )
 
-func (h *Hub) SyncMaps() error {
-	if h.network == nil {
-		return nil
-	}
-	type mapSyncer interface {
-		SyncMaps() error
-	}
-	if rs, ok := h.network.(mapSyncer); ok {
-		return rs.SyncMaps()
-	}
-	return nil
+var errAllowedGroupNotFound = errors.New("allowed group not found")
+
+// ListMapDetails returns all service maps with allowed groups.
+func (a *App) ListMapDetails() ([]repo.MapDetail, error) {
+	return a.Store.ListMapDetails()
 }
 
-// MapRulesFromStore builds runtime map rules from persisted map details.
-func MapRulesFromStore(st *repo.Store) ([]l4.MapRule, error) {
-	details, err := st.ListMapDetails()
+// CreateServiceMap adds a map after validating allowed groups exist.
+func (a *App) CreateServiceMap(in repo.MapInput) (*repo.MapDetail, error) {
+	for _, gid := range in.AllowedGroups {
+		if _, err := a.Store.GetGroup(gid); err != nil {
+			return nil, errAllowedGroupNotFound
+		}
+	}
+	detail, err := a.Store.CreateServiceMap(in)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]l4.MapRule, 0, len(details))
-	for _, d := range details {
-		vip, err := netip.ParseAddr(d.VirtualIP)
-		if err != nil {
-			continue
-		}
-		allowed := domain.AllowedGroupIDSet(d.AllowedGroups)
-		rule := l4.MapRule{
-			ID:          d.ID,
-			Slug:        d.Slug,
-			TargetHost:  d.TargetHost,
-			VirtualIP:   vip,
-			AllowedPeer: mapAllowedPeerFunc(st, allowed),
-		}
-		out = append(out, rule)
+	if err := a.Hub.SyncMaps(); err != nil {
+		return nil, err
 	}
-	return out, nil
+	return detail, nil
 }
 
-func mapAllowedPeerFunc(st *repo.Store, allowed map[uint]struct{}) func(netip.Addr) bool {
-	return func(peerWGIP netip.Addr) bool {
-		peer, err := st.GetPeerByWGIP(peerWGIP.String())
-		if err != nil {
-			return false
+// UpdateServiceMap updates a map and syncs runtime state.
+func (a *App) UpdateServiceMap(id uint, in repo.MapInput) (*repo.MapDetail, error) {
+	for _, gid := range in.AllowedGroups {
+		if _, err := a.Store.GetGroup(gid); err != nil {
+			return nil, errAllowedGroupNotFound
 		}
-		return domain.GroupInAllowedSet(allowed, peer.GroupID)
 	}
+	detail, err := a.Store.UpdateServiceMap(id, in)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Hub.SyncMaps(); err != nil {
+		return nil, err
+	}
+	return detail, nil
+}
+
+// DeleteServiceMap removes a map and syncs runtime state.
+func (a *App) DeleteServiceMap(id uint) error {
+	if err := a.Store.DeleteServiceMap(id); err != nil {
+		return err
+	}
+	return a.Hub.SyncMaps()
+}
+
+// ClassifyMapErr reports whether an error is a slug conflict.
+func ClassifyMapErr(err error) bool {
+	return errors.Is(err, repo.ErrMapSlugConflict)
 }

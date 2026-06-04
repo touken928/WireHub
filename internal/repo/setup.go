@@ -3,9 +3,8 @@ package repo
 import (
 	"fmt"
 
-	"github.com/touken928/wirehub/internal/password"
 	"github.com/touken928/wirehub/internal/config"
-	"github.com/touken928/wirehub/internal/domain"
+	"github.com/touken928/wirehub/internal/domain/hub"
 	"gorm.io/gorm"
 )
 
@@ -43,7 +42,7 @@ func (s *Store) Setup(in SetupInput) error {
 		return fmt.Errorf("already configured")
 	}
 
-	draft := domain.HubConfig{
+	draft := hub.HubConfig{
 		Endpoint:       in.Endpoint,
 		Subnet:         in.Subnet,
 		AdminUsername:  in.AdminUsername,
@@ -51,15 +50,15 @@ func (s *Store) Setup(in SetupInput) error {
 		StatusInterval: in.StatusInterval,
 		UpstreamDNS:    in.UpstreamDNS,
 	}
-	if err := domain.ValidateHubConfig(draft, true); err != nil {
+	if err := hub.ValidateHubConfig(draft, true); err != nil {
 		return err
 	}
-	norm := domain.NormalizeHubConfig(draft)
+	norm := hub.NormalizeHubConfig(draft)
 
 	if in.AdminPassword == "" {
 		return fmt.Errorf("admin password is required")
 	}
-	hash, err := password.Hash(in.AdminPassword)
+	hash, err := HashPassword(in.AdminPassword)
 	if err != nil {
 		return err
 	}

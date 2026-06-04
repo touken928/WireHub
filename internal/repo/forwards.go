@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/touken928/wirehub/internal/domain"
+	"github.com/touken928/wirehub/internal/domain/forward"
 )
 
 var ErrPortForwardConflict = errors.New("listen port and protocol already in use")
@@ -82,17 +82,17 @@ func (s *Store) DeletePortForward(id uint) error {
 }
 
 func normalizePortForward(in PortForwardInput, hubTunnelWebPort int) (*PortForward, error) {
-	proto, err := domain.ValidateForwardProtocol(in.Protocol)
+	proto, err := forward.ValidateForwardProtocol(in.Protocol)
 	if err != nil {
 		return nil, err
 	}
-	if err := domain.ValidateForwardListenPort(in.ListenPort, hubTunnelWebPort, proto); err != nil {
+	if err := forward.ValidateForwardListenPort(in.ListenPort, hubTunnelWebPort, proto); err != nil {
 		return nil, err
 	}
-	if err := domain.ValidateForwardPort(in.TargetPort, "target port"); err != nil {
+	if err := forward.ValidateForwardPort(in.TargetPort, "target port"); err != nil {
 		return nil, err
 	}
-	targetHost, err := domain.ValidateForwardTargetHost(in.TargetHost)
+	targetHost, err := forward.ValidateForwardTargetHost(in.TargetHost)
 	if err != nil {
 		return nil, err
 	}

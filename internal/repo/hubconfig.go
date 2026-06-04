@@ -1,14 +1,13 @@
 package repo
 
 import (
-	"github.com/touken928/wirehub/internal/password"
 	"github.com/touken928/wirehub/internal/config"
-	"github.com/touken928/wirehub/internal/domain"
+	"github.com/touken928/wirehub/internal/domain/hub"
 )
 
-func (s *Settings) ToHubConfig(adminUsername string) domain.HubConfig {
-	return domain.HubConfig{
-		Version:        domain.HubConfigVersion,
+func (s *Settings) ToHubConfig(adminUsername string) hub.HubConfig {
+	return hub.HubConfig{
+		Version:        hub.HubConfigVersion,
 		Endpoint:       s.Endpoint,
 		Subnet:         s.WGSubnet,
 		AdminUsername:  adminUsername,
@@ -23,8 +22,8 @@ func (s *Store) UpdateMutableSettings(mtu, statusInterval int, upstreamDNS []str
 	if err != nil {
 		return err
 	}
-	draft := domain.HubConfig{
-		Version:        domain.HubConfigVersion,
+	draft := hub.HubConfig{
+		Version:        hub.HubConfigVersion,
 		Endpoint:       settings.Endpoint,
 		Subnet:         settings.WGSubnet,
 		AdminUsername:  config.DefaultAdminUsername,
@@ -32,10 +31,10 @@ func (s *Store) UpdateMutableSettings(mtu, statusInterval int, upstreamDNS []str
 		StatusInterval: statusInterval,
 		UpstreamDNS:    upstreamDNS,
 	}
-	if err := domain.ValidateHubConfig(draft, true); err != nil {
+	if err := hub.ValidateHubConfig(draft, true); err != nil {
 		return err
 	}
-	norm := domain.NormalizeHubConfig(draft)
+	norm := hub.NormalizeHubConfig(draft)
 	settings.MTU = norm.MTU
 	settings.StatusInterval = norm.StatusInterval
 	settings.UpstreamDNS = norm.UpstreamDNS
@@ -51,7 +50,7 @@ func (s *Store) GetPrimaryAdmin() (*Admin, error) {
 }
 
 func (s *Store) UpdateAdminPassword(adminID uint, newPassword string) error {
-	hash, err := password.Hash(newPassword)
+	hash, err := HashPassword(newPassword)
 	if err != nil {
 		return err
 	}
