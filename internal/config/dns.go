@@ -24,7 +24,7 @@ func ParseUpstreamDNS(raw []string) ([]string, error) {
 		}
 	}
 	if len(lines) == 0 {
-		return append([]string(nil), DefaultUpstreamDNS...), nil
+		return nil, nil
 	}
 
 	seen := make(map[string]struct{}, len(lines))

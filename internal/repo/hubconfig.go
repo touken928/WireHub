@@ -14,7 +14,7 @@ func (s *Settings) ToHubConfig(adminUsername string) domain.HubConfig {
 		AdminUsername:  adminUsername,
 		MTU:            s.MTU,
 		StatusInterval: s.StatusInterval,
-		UpstreamDNS:    append([]string(nil), s.UpstreamDNSOrDefault()...),
+		UpstreamDNS:    append([]string(nil), s.UpstreamDNS...),
 	}
 }
 

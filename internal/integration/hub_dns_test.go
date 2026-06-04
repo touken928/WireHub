@@ -47,6 +47,33 @@ func TestHubDNSAAAANODATA(t *testing.T) {
 	}
 }
 
+func TestHubDNSHTTPSNODATA(t *testing.T) {
+	env, tnet, cleanup := setupHub(t)
+	defer cleanup()
+
+	hubFQDN := domain.HubFQDN()
+	rcode, err := queryRcode(tnet, env.dnsIP, hubFQDN, dns.TypeHTTPS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rcode != dns.RcodeSuccess {
+		t.Fatalf("HTTPS %s rcode = %s, want NOERROR (NODATA for IPv4-only hub)", hubFQDN, dns.RcodeToString[rcode])
+	}
+}
+
+func TestHubDNSExternalRefusedWithoutUpstream(t *testing.T) {
+	env, tnet, cleanup := setupHub(t)
+	defer cleanup()
+
+	rcode, err := queryRcode(tnet, env.dnsIP, "example.com", dns.TypeA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rcode != dns.RcodeRefused {
+		t.Fatalf("external name rcode = %s, want REFUSED without upstream", dns.RcodeToString[rcode])
+	}
+}
+
 func TestHubDNSUnknownNXDOMAIN(t *testing.T) {
 	env, tnet, cleanup := setupHub(t)
 	defer cleanup()

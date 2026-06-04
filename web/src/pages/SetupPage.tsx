@@ -233,10 +233,10 @@ export default function SetupPage() {
           />
           <AuthField
             id="setup-upstream-dns"
-            label="Additional DNS servers"
+            label="Upstream DNS servers"
             multiline
             rows={3}
-            hint="Public resolvers in client configs after the hub DNS IP; one per line"
+            hint="Optional. Hub resolvers for non-wirehub names (server-side only). Leave empty to resolve *.wirehub only; e.g. 1.2.4.8"
             value={upstreamDns}
             onChange={setUpstreamDns}
           />

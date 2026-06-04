@@ -109,7 +109,8 @@ Shared IPv4 rewrite and ephemeral port pool. `l4.ReservedHubPorts(webPort, forwa
 
 - Suffix: `wirehub` (`config.DNSDomain`). Hub label: `hub` → `hub.wirehub`.
 - `hub.wirehub`, `{peer}.wirehub`, and `www.*` aliases are authoritative on hub VPN IP (UDP 53).
-- Bare `wirehub` / `www.wirehub` are not served. Other names forward to upstream resolvers from settings.
+- Bare `wirehub` / `www.wirehub` are not served. When upstream resolvers are configured in settings, other names forward server-side; with none, external names are refused.
+- Peer `.conf` `DNS` line: hub VPN IP only (`repo.Settings.ClientDNS()`). Upstream resolvers are not pushed to clients.
 
 **Port forwards**
 
@@ -133,6 +134,7 @@ Shared IPv4 rewrite and ephemeral port pool. `l4.ReservedHubPorts(webPort, forwa
 | Data directory | `./data` | CLI `--data-dir` → `wirehub.db`, `.jwt_secret` |
 | DNS suffix | `wirehub` | `config.DNSDomain` |
 | Hub DNS name | `hub.wirehub` | `config.HubDNSLabel` + suffix |
+| Upstream DNS | — (optional) | DB `settings.upstream_dns`; hub forwards external queries when set |
 
 `settings.listen_port` is written to generated peer configs only. It does **not** change the hub bind port (CLI `--port`).
 

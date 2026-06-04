@@ -3,13 +3,13 @@ package config
 import "testing"
 
 func TestParseUpstreamDNS(t *testing.T) {
-	t.Run("defaults when empty", func(t *testing.T) {
+	t.Run("empty when empty", func(t *testing.T) {
 		got, err := ParseUpstreamDNS(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(got) != len(DefaultUpstreamDNS) {
-			t.Fatalf("got %v", got)
+		if len(got) != 0 {
+			t.Fatalf("got %v, want empty", got)
 		}
 	})
 

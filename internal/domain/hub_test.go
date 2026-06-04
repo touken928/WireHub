@@ -42,7 +42,7 @@ func TestNormalizeHubConfig(t *testing.T) {
 	if n.Subnet != "100.127.0.0/24" {
 		t.Fatalf("subnet default: %q", n.Subnet)
 	}
-	if len(n.UpstreamDNS) == 0 {
-		t.Fatal("expected default upstream dns")
+	if len(n.UpstreamDNS) != 0 {
+		t.Fatalf("upstream dns: got %v, want empty", n.UpstreamDNS)
 	}
 }

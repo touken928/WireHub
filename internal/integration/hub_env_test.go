@@ -132,7 +132,7 @@ func setupPeerMesh(t *testing.T, specs []meshPeerSpec, linkPairs [][2]string) (*
 		t.Fatal(err)
 	}
 
-	dnsServer := dnssvc.NewServer(st, settings.HubIP, settings.DNSIP, settings.UpstreamDNSOrDefault())
+	dnsServer := dnssvc.NewServer(st, settings.HubIP, settings.DNSIP, settings.UpstreamDNSResolvers())
 	groupIDs := map[string]uint{}
 
 	ensureGroup := func(name string) uint {

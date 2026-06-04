@@ -56,7 +56,7 @@ func (s *Server) handleGetSettings(c *gin.Context) {
 		ServerPublicKey: settings.ServerPublicKey,
 		MTU:             settings.MTU,
 		StatusInterval:  settings.StatusInterval,
-		UpstreamDNS:     settings.UpstreamDNSOrDefault(),
+		UpstreamDNS:     settings.UpstreamDNSResolvers(),
 	})
 }
 
@@ -88,7 +88,7 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 	mtuChanged := settings.MTU != oldMTU
 	networkReload := mtuChanged
 
-	s.SetDNSUpstream(settings.UpstreamDNSOrDefault())
+	s.SetDNSUpstream(settings.UpstreamDNSResolvers())
 	s.StopStatusPoller()
 	s.StartStatusPoller(settings.StatusInterval)
 

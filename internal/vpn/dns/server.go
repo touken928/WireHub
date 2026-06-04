@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -21,6 +22,9 @@ type Server struct {
 	dnsIP    string
 	upstream []string
 	server   *dns.Server
+	serveMu  sync.Mutex
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // SetUpstream replaces upstream resolver list used for external queries.
@@ -39,34 +43,87 @@ func NewServer(st *repo.Store, hubIP, dnsIP string, upstream []string) *Server {
 }
 
 func (s *Server) StartOnNetstack(tnet *netstack.Net, dnsIP string, port int) error {
-	addr, err := netip.ParseAddr(dnsIP)
+	if s.stopCh == nil {
+		s.stopCh = make(chan struct{})
+	}
+	conn, err := s.listenUDP(tnet, dnsIP, port)
 	if err != nil {
-		return fmt.Errorf("parse dns ip: %w", err)
+		return err
 	}
-
-	conn, err := tnet.ListenUDPAddrPort(netip.AddrPortFrom(addr, uint16(port)))
-	if err != nil {
-		return fmt.Errorf("listen udp on netstack %s:%d: %w", dnsIP, port, err)
-	}
-
-	s.server = &dns.Server{
-		PacketConn: conn,
-		Handler:    dns.HandlerFunc(s.handle),
-	}
-	go func() {
-		if err := s.server.ActivateAndServe(); err != nil {
-			log.Printf("dns server stopped: %v", err)
-		}
-	}()
+	go s.serveNetstack(tnet, dnsIP, port, conn)
 	log.Printf("dns listening on %s:%d (netstack, domain %s, upstream %v)", dnsIP, port, config.DNSDomain, s.upstream)
 	return nil
 }
 
-func (s *Server) Stop() error {
-	if s.server != nil {
-		return s.server.Shutdown()
+func (s *Server) listenUDP(tnet *netstack.Net, dnsIP string, port int) (net.PacketConn, error) {
+	addr, err := netip.ParseAddr(dnsIP)
+	if err != nil {
+		return nil, fmt.Errorf("parse dns ip: %w", err)
 	}
-	return nil
+	conn, err := tnet.ListenUDPAddrPort(netip.AddrPortFrom(addr, uint16(port)))
+	if err != nil {
+		return nil, fmt.Errorf("listen udp on netstack %s:%d: %w", dnsIP, port, err)
+	}
+	return conn, nil
+}
+
+func (s *Server) serveNetstack(tnet *netstack.Net, dnsIP string, port int, conn net.PacketConn) {
+	for {
+		srv := &dns.Server{
+			PacketConn: conn,
+			Handler:    dns.HandlerFunc(s.handle),
+		}
+		s.serveMu.Lock()
+		s.server = srv
+		s.serveMu.Unlock()
+		if err := srv.ActivateAndServe(); err != nil {
+			log.Printf("dns server stopped: %v", err)
+		}
+		_ = conn.Close()
+		if !s.waitOrStop(time.Second) {
+			return
+		}
+		var err error
+		conn, err = s.listenUDP(tnet, dnsIP, port)
+		if err != nil {
+			log.Printf("dns listen on netstack %s:%d: %v", dnsIP, port, err)
+			if !s.waitOrStop(2 * time.Second) {
+				return
+			}
+			continue
+		}
+	}
+}
+
+func (s *Server) waitOrStop(d time.Duration) bool {
+	if d == 0 {
+		select {
+		case <-s.stopCh:
+			return false
+		default:
+			return true
+		}
+	}
+	select {
+	case <-s.stopCh:
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
+func (s *Server) Stop() error {
+	var err error
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+	})
+	s.serveMu.Lock()
+	srv := s.server
+	s.serveMu.Unlock()
+	if srv != nil {
+		err = srv.Shutdown()
+	}
+	return err
 }
 
 func (s *Server) isInternalName(name string) bool {
@@ -133,19 +190,25 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 		}
 	}
 
-	if len(external) > 0 && len(s.upstream) > 0 {
-		fwd := r.Copy()
-		fwd.Question = external
-		if resp, err := s.exchangeUpstream(fwd); err == nil && resp != nil {
-			m.Answer = append(m.Answer, resp.Answer...)
-			m.Ns = append(m.Ns, resp.Ns...)
-			m.Extra = append(m.Extra, resp.Extra...)
-			if len(resp.Answer) > 0 {
-				m.Rcode = resp.Rcode
-				m.Authoritative = resp.Authoritative
+	if len(external) > 0 {
+		if len(s.upstream) == 0 {
+			if len(m.Answer) == 0 {
+				m.Rcode = dns.RcodeRefused
 			}
-		} else if len(m.Answer) == 0 {
-			m.Rcode = dns.RcodeServerFailure
+		} else {
+			fwd := r.Copy()
+			fwd.Question = external
+			if resp, err := s.exchangeUpstream(fwd); err == nil && resp != nil {
+				m.Answer = append(m.Answer, resp.Answer...)
+				m.Ns = append(m.Ns, resp.Ns...)
+				m.Extra = append(m.Extra, resp.Extra...)
+				if len(resp.Answer) > 0 {
+					m.Rcode = resp.Rcode
+					m.Authoritative = resp.Authoritative
+				}
+			} else if len(m.Answer) == 0 {
+				m.Rcode = dns.RcodeServerFailure
+			}
 		}
 	}
 

@@ -168,8 +168,14 @@ export default function DashboardPage() {
           </div>
           <div className={styles.infoTile}>
             <Text size={200} className={styles.label}>Client DNS</Text>
+            <Text className={styles.monoText}>{settings.dns_ip}</Text>
+          </div>
+          <div className={styles.infoTile}>
+            <Text size={200} className={styles.label}>Upstream DNS</Text>
             <Text className={styles.monoText}>
-              {[settings.dns_ip, ...(settings.upstream_dns ?? [])].join(', ')}
+              {(settings.upstream_dns ?? []).length > 0
+                ? (settings.upstream_dns ?? []).join(', ')
+                : '—'}
             </Text>
           </div>
           <div className={styles.infoTile}>

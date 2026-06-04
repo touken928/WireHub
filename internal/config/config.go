@@ -25,7 +25,7 @@ const (
 	DefaultStatusInterval = 1
 )
 
-// DefaultUpstreamDNS are fallback public resolvers pushed to clients after the hub DNS IP.
+// DefaultUpstreamDNS are example public resolvers (documentation / UI hints only).
 var DefaultUpstreamDNS = []string{"1.2.4.8", "1.1.1.1"}
 
 // RuntimeConfig holds process-level settings from CLI flags.

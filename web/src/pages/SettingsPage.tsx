@@ -220,8 +220,8 @@ export default function SettingsPage() {
           <Input type="number" value={statusInterval} onChange={(_, data) => setStatusInterval(data.value)} />
         </Field>
         <Field
-          label="Additional DNS servers"
-          hint="Listed in client configs after the hub DNS IP; one address per line"
+          label="Upstream DNS servers"
+          hint="Optional. Hub resolvers for non-wirehub names (server-side only). Leave empty to resolve *.wirehub only; e.g. 1.2.4.8"
         >
           <Textarea rows={3} value={upstreamDns} onChange={(_, data) => setUpstreamDns(data.value)} />
         </Field>

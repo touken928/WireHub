@@ -115,7 +115,7 @@ On a fresh install the HTTP server starts immediately; WireGuard and DNS start o
 | Admin password | — | Required; min 8 characters |
 | MTU | `1420` | Editable later; change restarts VPN stack |
 | Status interval | `1` s | Peer stats poll interval |
-| Additional DNS | `1.2.4.8`, `1.1.1.1` | Upstream resolvers for non-`wirehub` queries |
+| Upstream DNS | — (optional) | Hub resolvers for non-`wirehub` queries; empty = `*.wirehub` only |
 
 JWT secret: `{data-dir}/.jwt_secret` (created on first launch).
 
@@ -136,7 +136,7 @@ JWT secret: `{data-dir}/.jwt_secret` (created on first launch).
 | Setting | Editable in UI | Notes |
 |---------|----------------|-------|
 | Public endpoint, subnet, admin username, client endpoint port | No | Set at setup or via DB import |
-| MTU, status interval, additional DNS | Yes | **Settings** |
+| MTU, status interval, upstream DNS | Yes | **Settings** |
 | Admin password | Yes | **Settings** |
 | Export / reset | — | Full `wirehub.db` export; reset wipes data (password required) |
 
@@ -158,7 +158,7 @@ Destructive actions require confirmation; hub reset also requires the admin pass
 2. Download `.conf` or scan the QR code
 3. Import into a WireGuard client and connect
 
-Generated configs include keys, `Endpoint`, `AllowedIPs` (full subnet), `DNS` (hub IP then upstream resolvers), and MTU. The config comment points to `http://hub.wirehub` for the admin UI over the tunnel.
+Generated configs include keys, `Endpoint`, `AllowedIPs` (full subnet), `DNS` (hub VPN IP only), and MTU. The config comment points to `http://hub.wirehub` for the admin UI over the tunnel.
 
 ## Networking
 
@@ -171,7 +171,7 @@ Resolver on hub VPN IP (UDP 53). Suffix is fixed: `wirehub`; hub label is `hub`.
 | `hub.wirehub`, `www.hub.wirehub` | Hub VPN IP |
 | `{peer}.wirehub`, `www.{peer}.wirehub` | Peer VPN IP |
 
-Bare `wirehub` / `www.wirehub` are not served. Other names are forwarded to **additional DNS** from settings.
+Bare `wirehub` / `www.wirehub` are not served. When upstream DNS is configured, other names are forwarded server-side (not listed in peer configs). With no upstream, external names are not resolved.
 
 ### Access control
 
@@ -189,7 +189,7 @@ Rules listen on the **hub VPN IP** and proxy to a target. Peers connect to `{hub
 | Target | Resolution |
 |--------|------------|
 | `*.wirehub` FQDN | Hub authoritative DNS |
-| External hostname | Additional DNS (A record) |
+| External hostname | Upstream DNS (A record) |
 | IPv4 | Literal address |
 
 Target must be a FQDN or IPv4 (not a bare peer name). Toggle **Enabled** to apply without restarting the VPN stack. This is explicit L4 proxying, separate from unidirectional group SNAT.

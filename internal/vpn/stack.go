@@ -91,7 +91,7 @@ func (s *Stack) Start() error {
 		return fmt.Errorf("netstack forwarding: %w", err)
 	}
 
-	dnsServer := vpndns.NewServer(s.repo, settings.HubIP, settings.DNSIP, settings.UpstreamDNSOrDefault())
+	dnsServer := vpndns.NewServer(s.repo, settings.HubIP, settings.DNSIP, settings.UpstreamDNSResolvers())
 	if err := dnsServer.StartOnNetstack(wgMgr.Net(), settings.DNSIP, l4.HubDNSPort); err != nil {
 		_ = wgMgr.Close()
 		return fmt.Errorf("dns server: %w", err)
