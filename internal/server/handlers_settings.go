@@ -40,15 +40,14 @@ func (s *Server) handleGetSettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	admin, err := s.Store.GetPrimaryAdmin()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+	adminUsername := ""
+	if admin, err := s.Store.GetPrimaryAdmin(); err == nil {
+		adminUsername = admin.Username
 	}
 	c.JSON(http.StatusOK, settingsViewResponse{
 		Endpoint:        settings.Endpoint,
 		Subnet:          settings.WGSubnet,
-		AdminUsername:   admin.Username,
+		AdminUsername:   adminUsername,
 		HubIP:           settings.HubIP,
 		DNSIP:           settings.DNSIP,
 		DNSSuffix:       settings.DNSSuffix,

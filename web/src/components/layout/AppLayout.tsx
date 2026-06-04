@@ -19,12 +19,15 @@ import { useEffect } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { clearToken } from '@/api';
 import { useTheme } from '@/app/useTheme';
+import { RouteErrorBoundary } from '@/components/common/RouteErrorBoundary';
 import { LAYOUT } from '@/styles/layout';
 
 const useStyles = makeStyles({
   shell: {
     display: 'flex',
+    height: '100vh',
     minHeight: '100vh',
+    overflow: 'hidden',
     backgroundColor: tokens.colorNeutralBackground2,
   },
   shellFill: {
@@ -41,6 +44,8 @@ const useStyles = makeStyles({
     display: 'flex',
     flexDirection: 'column',
     gap: '8px',
+    height: '100vh',
+    overflowY: 'auto',
   },
   brand: {
     fontSize: tokens.fontSizeBase500,
@@ -68,8 +73,10 @@ const useStyles = makeStyles({
   main: {
     flex: 1,
     minWidth: 0,
+    minHeight: 0,
     display: 'flex',
     flexDirection: 'column',
+    overflow: 'hidden',
   },
   mainFill: {
     minHeight: 0,
@@ -88,8 +95,9 @@ const useStyles = makeStyles({
   },
   content: {
     flex: 1,
+    minHeight: 0,
     padding: '16px 20px',
-    overflow: 'visible',
+    overflow: 'auto',
   },
   contentFill: {
     display: 'flex',
@@ -133,8 +141,11 @@ export function AppLayout() {
   const isFill = location.pathname.startsWith('/groups');
 
   useEffect(() => {
+    document.documentElement.classList.add('app-shell');
     document.documentElement.classList.toggle('layout-fill', isFill);
-    return () => document.documentElement.classList.remove('layout-fill');
+    return () => {
+      document.documentElement.classList.remove('app-shell', 'layout-fill');
+    };
   }, [isFill]);
 
   const navClass = (path: string, exact: boolean) => {
@@ -157,7 +168,7 @@ export function AppLayout() {
           </Text>
         </div>
       </aside>
-      <div className={`${styles.main} ${isFill ? styles.mainFill : ''}`}>
+      <div className={styles.main}>
         <div className={styles.topBar}>
           <Button
             size="small"
@@ -180,7 +191,9 @@ export function AppLayout() {
         </div>
         <div className={`${styles.content} ${isFill ? styles.contentFill : ''}`}>
           <div className={`${styles.contentInner} ${isFill ? styles.contentInnerFill : ''}`}>
-            <Outlet />
+            <RouteErrorBoundary>
+              <Outlet />
+            </RouteErrorBoundary>
           </div>
         </div>
       </div>

@@ -27,7 +27,7 @@ import { AddRegular, DeleteRegular, EditRegular } from '@fluentui/react-icons';
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/api';
 import type { PortForward } from '@/api/types';
-import { DNS_DOMAIN } from '@/constants';
+import { DNS_DOMAIN, hubFQDN } from '@/constants';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { useConfirm } from '@/components/common/useConfirm';
 import { validateForwardTargetHost } from '@/lib/forwardTarget';
@@ -92,18 +92,14 @@ const useStyles = makeStyles({
     width: '72px',
   },
   colListen: {
-    minWidth: '200px',
+    minWidth: '180px',
     paddingRight: tokens.spacingHorizontalL,
+  },
+  colProtocol: {
+    width: '80px',
   },
   colTarget: {
     minWidth: '200px',
-  },
-  colArrow: {
-    width: '32px',
-    textAlign: 'center',
-    color: tokens.colorNeutralForeground3,
-    paddingLeft: 0,
-    paddingRight: 0,
   },
   endpoint: {
     whiteSpace: 'nowrap',
@@ -146,8 +142,8 @@ const emptyForm = (): ForwardForm => ({
   target_port: '',
 });
 
-function formatListen(hubIP: string, port: number, proto: string) {
-  return `${hubIP}:${port}/${proto}`;
+function formatListen(port: number) {
+  return `${hubFQDN()}:${port}`;
 }
 
 export default function ForwardPage() {
@@ -156,7 +152,6 @@ export default function ForwardPage() {
   const { confirm } = useConfirm();
 
   const [rules, setRules] = useState<PortForward[]>([]);
-  const [hubIP, setHubIP] = useState('');
   const [hubPort, setHubPort] = useState(80);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -173,7 +168,6 @@ export default function ForwardPage() {
     try {
       const data = await api.listPortForwards();
       setRules(data.rules);
-      setHubIP(data.hub_ip);
       setHubPort(data.hub_port);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load forwards');
@@ -297,9 +291,9 @@ export default function ForwardPage() {
         description="Proxy hub VPN ports to internal hosts on the hub VPN address."
       />
 
-      {hubIP && (
+      {!loading && (
         <div className={styles.infoBanner}>
-          Clients dial <span className={styles.mono}>{hubIP}:&lt;port&gt;</span> on the hub VPN
+          Clients dial <span className={styles.mono}>{hubFQDN()}:&lt;port&gt;</span> on the hub VPN
           address. Reserved:{' '}
           <span className={styles.reservedPorts}>
             <span className={styles.mono}>DNS :53</span>
@@ -335,8 +329,8 @@ export default function ForwardPage() {
                 <TableRow>
                   <TableHeaderCell>Name</TableHeaderCell>
                   <TableHeaderCell className={styles.colListen}>Listen</TableHeaderCell>
-                  <TableHeaderCell className={styles.colArrow} aria-hidden />
                   <TableHeaderCell className={styles.colTarget}>Target</TableHeaderCell>
+                  <TableHeaderCell className={styles.colProtocol}>Protocol</TableHeaderCell>
                   <TableHeaderCell className={styles.colEnabled}>On</TableHeaderCell>
                   <TableHeaderCell className={styles.colActions} />
                 </TableRow>
@@ -349,18 +343,16 @@ export default function ForwardPage() {
                     </TableCell>
                     <TableCell className={styles.colListen}>
                       <Text className={`${styles.mono} ${styles.endpoint}`}>
-                        {hubIP
-                          ? formatListen(hubIP, rule.listen_port, rule.protocol)
-                          : `${rule.protocol}:${rule.listen_port}`}
+                        {formatListen(rule.listen_port)}
                       </Text>
-                    </TableCell>
-                    <TableCell className={styles.colArrow}>
-                      <Text>→</Text>
                     </TableCell>
                     <TableCell className={styles.colTarget}>
                       <Text className={`${styles.mono} ${styles.endpoint}`}>
                         {rule.target_display}
                       </Text>
+                    </TableCell>
+                    <TableCell className={styles.colProtocol}>
+                      <Text>{rule.protocol.toUpperCase()}</Text>
                     </TableCell>
                     <TableCell>
                       <Switch
@@ -412,7 +404,7 @@ export default function ForwardPage() {
                   onChange={(_, d) => setForm((f) => ({ ...f, name: d.value }))}
                 />
               </Field>
-              <Field label="Listen port" required hint={hubIP ? `On ${hubIP}` : undefined}>
+              <Field label="Listen port" required hint={`On ${hubFQDN()}`}>
                 <Input
                   type="number"
                   min={1}

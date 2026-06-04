@@ -27,7 +27,7 @@ func Mount(r *gin.Engine) error {
 		return err
 	}
 
-	r.Use(corsMiddleware)
+	r.Use(corsMiddleware, noCacheAssetsMiddleware)
 
 	if assetsFS, err := fs.Sub(webFS, "assets"); err == nil {
 		r.StaticFS("/assets", http.FS(assetsFS))
@@ -70,6 +70,13 @@ func Mount(r *gin.Engine) error {
 	return nil
 }
 
+func noCacheAssetsMiddleware(c *gin.Context) {
+	if strings.HasPrefix(c.Request.URL.Path, "/assets/") {
+		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	}
+	c.Next()
+}
+
 func corsMiddleware(c *gin.Context) {
 	origin := c.GetHeader("Origin")
 	if origin != "" {
@@ -96,6 +103,27 @@ func isLikelyAssetPath(path string) bool {
 	}
 }
 
+func assetContentType(name string) string {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".js", ".mjs":
+		return "text/javascript; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".svg":
+		return "image/svg+xml"
+	case ".json":
+		return "application/json; charset=utf-8"
+	case ".wasm":
+		return "application/wasm"
+	default:
+		ctype := mime.TypeByExtension(filepath.Ext(name))
+		if ctype == "" {
+			return "application/octet-stream"
+		}
+		return ctype
+	}
+}
+
 func serveIndexHTML(webFS fs.FS) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		data, err := fs.ReadFile(webFS, "index.html")
@@ -115,10 +143,6 @@ func serveFile(webFS fs.FS, name string) gin.HandlerFunc {
 			c.Status(http.StatusNotFound)
 			return
 		}
-		ctype := mime.TypeByExtension(filepath.Ext(name))
-		if ctype == "" {
-			ctype = "application/octet-stream"
-		}
-		c.Data(http.StatusOK, ctype, data)
+		c.Data(http.StatusOK, assetContentType(name), data)
 	}
 }

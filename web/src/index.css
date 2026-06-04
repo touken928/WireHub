@@ -30,7 +30,15 @@ body {
   overflow-y: auto;
 }
 
-/* Groups: lock viewport; peer panel scrolls internally */
+/* App shell: fixed sidebar + scrollable main (Dashboard, Settings, …) */
+html.app-shell,
+html.app-shell body,
+html.app-shell #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Groups: fill viewport; peer panel scrolls internally */
 html.layout-fill,
 html.layout-fill body,
 html.layout-fill #root {
