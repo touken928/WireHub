@@ -10,7 +10,7 @@ const (
 	// EphemeralPortMin/Max is the hub source port range for transparent SNAT flows.
 	EphemeralPortMin = 20000
 	EphemeralPortMax = 65000
-	// SessionIdle is the idle timeout for transparent SNAT and explicit UDP relay sessions.
+	// SessionIdle is the idle timeout for transparent SNAT and explicit UDP map sessions.
 	SessionIdle = 2 * time.Minute
 )
 

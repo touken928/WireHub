@@ -36,10 +36,11 @@ type livePeer struct {
 }
 
 type peerMeshEnv struct {
-	wgMgr      *wg.Manager
-	dnsServer  *dnssvc.Server
+	wgMgr        *wg.Manager
+	dnsServer    *dnssvc.Server
 	forwardProxy *l4.ForwardProxy
-	hubIP      string
+	mapProxy   *l4.MapProxy
+	hubIP        string
 	hubPubKey  string
 	listenPort int
 	store      *repo.Store
@@ -118,7 +119,7 @@ func setupPeerMesh(t *testing.T, specs []meshPeerSpec, linkPairs [][2]string) (*
 		t.Fatal(err)
 	}
 
-	wgMgr, err := wg.NewManager(settings.HubIP, settings.DNSIP, settings.ListenPort, settings.MTU)
+	wgMgr, err := wg.NewManager(settings.HubIP, settings.DNSIP, nil, settings.ListenPort, settings.MTU)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,6 +223,9 @@ func setupPeerMesh(t *testing.T, specs []meshPeerSpec, linkPairs [][2]string) (*
 		}
 		if env.forwardProxy != nil {
 			env.forwardProxy.Stop()
+		}
+		if env.mapProxy != nil {
+			env.mapProxy.Stop()
 		}
 		_ = dnsServer.Stop()
 		_ = wgMgr.Down()

@@ -50,7 +50,6 @@ func TestPortForwardTCPToHostNetworkTarget(t *testing.T) {
 		Protocol:   domain.ForwardProtoTCP,
 		TargetHost: "127.0.0.1",
 		TargetPort: backendPort,
-		Enabled:    true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +138,6 @@ func TestPortForwardTCPToPublicWebPage(t *testing.T) {
 		Protocol:   domain.ForwardProtoTCP,
 		TargetHost: targetIP,
 		TargetPort: 80,
-		Enabled:    true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +182,6 @@ func TestPortForwardTCPToPublicWebPageViaFQDN(t *testing.T) {
 		Protocol:   domain.ForwardProtoTCP,
 		TargetHost: "example.com",
 		TargetPort: 80,
-		Enabled:    true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +218,6 @@ func TestPortForwardTCPToPublicAPI(t *testing.T) {
 		Protocol:   domain.ForwardProtoTCP,
 		TargetHost: targetIP,
 		TargetPort: 80,
-		Enabled:    true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +261,6 @@ func TestPortForwardTCPToPublicHTTPS(t *testing.T) {
 		Protocol:   domain.ForwardProtoTCP,
 		TargetHost: "example.com",
 		TargetPort: 443,
-		Enabled:    true,
 	}); err != nil {
 		t.Fatal(err)
 	}

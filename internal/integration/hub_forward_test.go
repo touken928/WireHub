@@ -33,7 +33,6 @@ func TestPortForwardTCPToPeerHostname(t *testing.T) {
 		Protocol:   domain.ForwardProtoTCP,
 		TargetHost: domain.PeerFQDN("app"),
 		TargetPort: backendPort,
-		Enabled:    true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +70,6 @@ func TestPortForwardTCPToPeerIP(t *testing.T) {
 		Protocol:   domain.ForwardProtoTCP,
 		TargetHost: svc.Peer.WGIP,
 		TargetPort: backendPort,
-		Enabled:    true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +108,6 @@ func TestPortForwardTCPViaFQDN(t *testing.T) {
 		Protocol:   domain.ForwardProtoTCP,
 		TargetHost: targetHost,
 		TargetPort: backendPort,
-		Enabled:    true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -123,40 +120,6 @@ func TestPortForwardTCPViaFQDN(t *testing.T) {
 	}
 	if body != "fqdn-ok" {
 		t.Fatalf("body = %q", body)
-	}
-}
-
-func TestPortForwardTCPDisabled(t *testing.T) {
-	env, _, cleanup := setupPeerMesh(t, []meshPeerSpec{
-		{Name: "app", GroupName: "default"},
-	}, nil)
-	defer cleanup()
-	env.connectPeers(t)
-
-	app := env.peerNamed("app")
-	if app == nil {
-		t.Fatal("missing peer app")
-	}
-
-	backendPort := freeTCPPort(t)
-	stopBackend := startPeerHTTPServer(t, app.Net, app.Peer.WGIP, backendPort, "disabled")
-	defer stopBackend()
-
-	listenPort := freeTCPPort(t)
-	if _, err := env.store.CreatePortForward(l4.HubTunnelWebPort, repo.PortForwardInput{
-		ListenPort: listenPort,
-		Protocol:   domain.ForwardProtoTCP,
-		TargetHost: domain.PeerFQDN("app"),
-		TargetPort: backendPort,
-		Enabled:    false,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	env.syncPortForwards(t)
-
-	url := fmt.Sprintf("http://%s:%d/", env.hubIP, listenPort)
-	if _, err := peerHTTPGet(app.Net, url, 2*time.Second); err == nil {
-		t.Fatal("expected disabled forward to refuse connections")
 	}
 }
 
@@ -182,7 +145,6 @@ func TestPortForwardUDPToPeer(t *testing.T) {
 		Protocol:   domain.ForwardProtoUDP,
 		TargetHost: domain.PeerFQDN("app"),
 		TargetPort: backendPort,
-		Enabled:    true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -214,38 +176,45 @@ func TestPortForwardReapplyAfterUpdate(t *testing.T) {
 	stopBackend := startPeerHTTPServer(t, app.Net, app.Peer.WGIP, backendPort, "enabled")
 	defer stopBackend()
 
-	listenPort := freeTCPPort(t)
+	listenPort1 := freeTCPPort(t)
+	listenPort2 := freeTCPPort(t)
 	rule, err := env.store.CreatePortForward(l4.HubTunnelWebPort, repo.PortForwardInput{
-		ListenPort: listenPort,
+		ListenPort: listenPort1,
 		Protocol:   domain.ForwardProtoTCP,
 		TargetHost: domain.PeerFQDN("app"),
 		TargetPort: backendPort,
-		Enabled:    false,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	env.syncPortForwards(t)
 
-	url := fmt.Sprintf("http://%s:%d/", env.hubIP, listenPort)
-	if _, err := peerHTTPGet(app.Net, url, 2*time.Second); err == nil {
-		t.Fatal("expected forward to be off")
+	url1 := fmt.Sprintf("http://%s:%d/", env.hubIP, listenPort1)
+	body, err := peerHTTPGet(app.Net, url1, 5*time.Second)
+	if err != nil {
+		t.Fatalf("initial forward: %v", err)
+	}
+	if body != "enabled" {
+		t.Fatalf("body = %q", body)
 	}
 
 	if _, err := env.store.UpdatePortForward(rule.ID, l4.HubTunnelWebPort, repo.PortForwardInput{
-		ListenPort: listenPort,
+		ListenPort: listenPort2,
 		Protocol:   domain.ForwardProtoTCP,
 		TargetHost: domain.PeerFQDN("app"),
 		TargetPort: backendPort,
-		Enabled:    true,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	env.syncPortForwards(t)
 
-	body, err := peerHTTPGet(app.Net, url, 5*time.Second)
+	if _, err := peerHTTPGet(app.Net, url1, 2*time.Second); err == nil {
+		t.Fatal("old listen port should stop after reapply")
+	}
+	url2 := fmt.Sprintf("http://%s:%d/", env.hubIP, listenPort2)
+	body, err = peerHTTPGet(app.Net, url2, 5*time.Second)
 	if err != nil {
-		t.Fatalf("after enable: %v", err)
+		t.Fatalf("after listen port update: %v", err)
 	}
 	if body != "enabled" {
 		t.Fatalf("body = %q", body)

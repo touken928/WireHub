@@ -33,7 +33,7 @@ type Manager struct {
 	listenPort int
 }
 
-func NewManager(hubIP string, dnsIP string, listenPort int, mtu int) (*Manager, error) {
+func NewManager(hubIP string, dnsIP string, mapVIPAddrs []netip.Addr, listenPort int, mtu int) (*Manager, error) {
 	hub, err := netip.ParseAddr(hubIP)
 	if err != nil {
 		return nil, fmt.Errorf("parse hub ip: %w", err)
@@ -43,7 +43,8 @@ func NewManager(hubIP string, dnsIP string, listenPort int, mtu int) (*Manager, 
 		return nil, fmt.Errorf("parse dns ip: %w", err)
 	}
 
-	rawTUN, tnet, err := netstack.CreateNetTUN([]netip.Addr{hub}, []netip.Addr{dns}, mtu)
+	local := uniqueAddrs(append([]netip.Addr{hub, dns}, mapVIPAddrs...))
+	rawTUN, tnet, err := netstack.CreateNetTUN(local, []netip.Addr{dns}, mtu)
 	if err != nil {
 		return nil, fmt.Errorf("create netstack tun: %w", err)
 	}
@@ -209,4 +210,20 @@ func parseInt64(s string) (int64, error) {
 
 func (m *Manager) HubIP() netip.Addr {
 	return m.hubIP
+}
+
+func uniqueAddrs(addrs []netip.Addr) []netip.Addr {
+	seen := make(map[netip.Addr]struct{}, len(addrs))
+	out := make([]netip.Addr, 0, len(addrs))
+	for _, a := range addrs {
+		if !a.IsValid() {
+			continue
+		}
+		if _, ok := seen[a]; ok {
+			continue
+		}
+		seen[a] = struct{}{}
+		out = append(out, a)
+	}
+	return out
 }

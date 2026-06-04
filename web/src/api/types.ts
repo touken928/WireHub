@@ -99,7 +99,6 @@ export interface PortForward {
   protocol: 'tcp' | 'udp';
   target_host: string;
   target_port: number;
-  enabled: boolean;
   target_display: string;
 }
 
@@ -107,6 +106,21 @@ export interface PortForwardList {
   rules: PortForward[];
   hub_ip: string;
   hub_port: number;
+}
+
+export interface ServiceMap {
+  id: number;
+  name: string;
+  slug: string;
+  target_host: string;
+  virtual_ip: string;
+  target_display: string;
+  allowed_group_ids: number[];
+  fqdn: string;
+}
+
+export interface MapList {
+  maps: ServiceMap[];
 }
 
 export interface PeerStatus {

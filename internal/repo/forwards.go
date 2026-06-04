@@ -16,7 +16,6 @@ type PortForwardInput struct {
 	Protocol   string
 	TargetHost string
 	TargetPort int
-	Enabled    bool
 }
 
 func (s *Store) ListPortForwards() ([]PortForward, error) {
@@ -107,6 +106,5 @@ func normalizePortForward(in PortForwardInput, hubTunnelWebPort int) (*PortForwa
 		Protocol:   proto,
 		TargetHost: targetHost,
 		TargetPort: in.TargetPort,
-		Enabled:    in.Enabled,
 	}, nil
 }

@@ -18,6 +18,10 @@ func dnsSlug(slug string) string {
 }
 
 func (s *Server) lookupIP(raw string, ok bool) (string, bool) {
+	return s.lookupIPForClient(raw, ok, "")
+}
+
+func (s *Server) lookupIPForClient(raw string, ok bool, clientIP string) (string, bool) {
 	if !ok {
 		return "", false
 	}
@@ -26,6 +30,19 @@ func (s *Server) lookupIP(raw string, ok bool) (string, bool) {
 	slug := dnsSlug(raw)
 	if slug == config.HubDNSLabel {
 		return s.hubIP, true
+	}
+	if ip, found := s.store.LookupMapVIP(slug); found {
+		if clientIP != "" {
+			svcMap, err := s.store.GetServiceMapBySlug(slug)
+			if err != nil {
+				return "", false
+			}
+			allowed, err := s.store.MapAllowedForPeer(clientIP, svcMap.ID)
+			if err != nil || !allowed {
+				return "", false
+			}
+		}
+		return ip, true
 	}
 	return s.lookupPeer(slug)
 }

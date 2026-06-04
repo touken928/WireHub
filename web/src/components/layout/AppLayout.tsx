@@ -10,6 +10,7 @@ import {
   PeopleTeamRegular,
   PersonRegular,
   ArrowRoutingRegular,
+  GlobeRegular,
   SettingsRegular,
   SignOutRegular,
   WeatherMoonRegular,
@@ -131,6 +132,7 @@ const NAV_ITEMS = [
   { path: '/groups', label: 'Groups', icon: PeopleTeamRegular, exact: false },
   { path: '/peers', label: 'Peers', icon: PersonRegular, exact: false },
   { path: '/forward', label: 'Forward', icon: ArrowRoutingRegular, exact: false },
+  { path: '/maps', label: 'Maps', icon: GlobeRegular, exact: false },
   { path: '/settings', label: 'Settings', icon: SettingsRegular, exact: false },
 ] as const;
 

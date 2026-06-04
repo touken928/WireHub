@@ -20,7 +20,7 @@ type HostResolver interface {
 	ResolveForwardAddrs(host string) ([]netip.Addr, error)
 }
 
-// ForwardProxy listens on hub VPN IP ports and relays to configured targets (admin Forward rules).
+// ForwardProxy listens on hub VPN IP ports and maps to configured targets (admin Forward rules).
 type ForwardProxy struct {
 	tnet      *netstack.Net
 	hubIP     netip.Addr
@@ -61,9 +61,6 @@ func (m *ForwardProxy) Apply(rules []ForwardRule) error {
 	m.mu.Unlock()
 
 	for _, rule := range rules {
-		if !rule.Enabled {
-			continue
-		}
 		rule := rule
 		m.wg.Add(1)
 		go func() {

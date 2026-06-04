@@ -18,19 +18,19 @@ func TestReservedHubPorts(t *testing.T) {
 			want:      []int{53, 80},
 		},
 		{
-			name:      "includes enabled forward listen ports",
+			name:      "includes forward listen ports",
 			tunnelWeb: HubTunnelWebPort,
 			forwards: []ForwardRule{
-				{ListenPort: 9000, Enabled: true},
-				{ListenPort: 9001, Enabled: false},
+				{ListenPort: 9000},
+				{ListenPort: 9001},
 			},
-			want: []int{53, 80, 9000},
+			want: []int{53, 80, 9000, 9001},
 		},
 		{
 			name:      "deduplicates when forward matches tunnel web port",
 			tunnelWeb: 9000,
 			forwards: []ForwardRule{
-				{ListenPort: 9000, Enabled: true},
+				{ListenPort: 9000},
 			},
 			want: []int{53, 9000},
 		},
@@ -38,9 +38,9 @@ func TestReservedHubPorts(t *testing.T) {
 			name:      "ignores invalid port numbers",
 			tunnelWeb: HubTunnelWebPort,
 			forwards: []ForwardRule{
-				{ListenPort: 0, Enabled: true},
-				{ListenPort: 70000, Enabled: true},
-				{ListenPort: 9100, Enabled: true},
+				{ListenPort: 0},
+				{ListenPort: 70000},
+				{ListenPort: 9100},
 			},
 			want: []int{53, 80, 9100},
 		},

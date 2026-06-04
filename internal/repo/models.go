@@ -71,5 +71,4 @@ type PortForward struct {
 	Protocol   string `gorm:"not null;uniqueIndex:idx_forward_listen" json:"protocol"` // tcp or udp
 	TargetHost string `gorm:"not null" json:"target_host"`
 	TargetPort int    `gorm:"not null" json:"target_port"`
-	Enabled    bool   `gorm:"not null" json:"enabled"`
 }

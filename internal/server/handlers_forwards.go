@@ -62,21 +62,15 @@ type portForwardRequest struct {
 	Protocol   string `json:"protocol" binding:"required"`
 	TargetHost string `json:"target_host" binding:"required"`
 	TargetPort int    `json:"target_port" binding:"required"`
-	Enabled    *bool  `json:"enabled"`
 }
 
 func (req *portForwardRequest) toInput() repo.PortForwardInput {
-	enabled := true
-	if req.Enabled != nil {
-		enabled = *req.Enabled
-	}
 	return repo.PortForwardInput{
 		Name:       req.Name,
 		ListenPort: req.ListenPort,
 		Protocol:   req.Protocol,
 		TargetHost: req.TargetHost,
 		TargetPort: req.TargetPort,
-		Enabled:    enabled,
 	}
 }
 

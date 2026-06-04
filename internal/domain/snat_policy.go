@@ -6,7 +6,7 @@ import (
 	"github.com/touken928/wirehub/internal/vpn/filter/l4"
 )
 
-// BuildTransparentTable configures hub transparent relay for unidirectional group links.
+// BuildTransparentTable configures hub transparent map for unidirectional group links.
 func BuildTransparentTable(peers []PeerEndpoint, links []GroupLinkPair) *l4.TransparentTable {
 	tbl := l4.NewTransparentTable()
 	for _, p := range peers {

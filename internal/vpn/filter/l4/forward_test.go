@@ -43,7 +43,6 @@ func TestForwardProxyTCPRelay(t *testing.T) {
 		Protocol:   "tcp",
 		TargetHost: backend.String(),
 		TargetPort: backendPort,
-		Enabled:    true,
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -64,37 +63,6 @@ func TestForwardProxyTCPRelay(t *testing.T) {
 	}
 }
 
-func TestForwardProxySkipsDisabledRules(t *testing.T) {
-	hub := netip.MustParseAddr("100.127.0.1")
-	const listenPort = 19003
-
-	tnet, cleanup := newTestNetstack(t, hub)
-	defer cleanup()
-
-	proxy, err := NewForwardProxy(tnet, hub.String(), "100.127.0.0/24", staticHostResolver{hosts: nil})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer proxy.Stop()
-
-	if err := proxy.Apply([]ForwardRule{{
-		ListenPort: listenPort,
-		Protocol:   "tcp",
-		TargetHost: "100.127.0.2",
-		TargetPort: 80,
-		Enabled:    false,
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(20 * time.Millisecond)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	if _, err := tnet.DialContext(ctx, "tcp", netip.AddrPortFrom(hub, listenPort).String()); err == nil {
-		t.Fatal("disabled forward rule must not listen")
-	}
-}
-
 func TestForwardProxyRejectsUnsupportedProtocol(t *testing.T) {
 	hub := netip.MustParseAddr("100.127.0.1")
 	tnet, cleanup := newTestNetstack(t, hub)
@@ -112,7 +80,6 @@ func TestForwardProxyRejectsUnsupportedProtocol(t *testing.T) {
 		Protocol:   "sctp",
 		TargetHost: "100.127.0.2",
 		TargetPort: 80,
-		Enabled:    true,
 	}}); err != nil {
 		t.Fatal(err)
 	}

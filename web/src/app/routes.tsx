@@ -4,6 +4,7 @@ import { RequireAuth } from '@/app/guards/RequireAuth';
 import { StatusProvider } from '@/app/StatusProvider';
 import DashboardPage from '@/pages/DashboardPage';
 import ForwardPage from '@/pages/ForwardPage';
+import MapsPage from '@/pages/MapsPage';
 import GroupsPage from '@/pages/GroupsPage';
 import LoginPage from '@/pages/LoginPage';
 import PeersPage from '@/pages/PeersPage';
@@ -29,6 +30,7 @@ export function AppRoutes() {
         <Route path="groups" element={<GroupsPage />} />
         <Route path="peers" element={<PeersPage />} />
         <Route path="forward" element={<ForwardPage />} />
+        <Route path="maps" element={<MapsPage />} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

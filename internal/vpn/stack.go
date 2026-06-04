@@ -28,6 +28,7 @@ type Stack struct {
 	dnsServer    *vpndns.Server
 	tunnelSrv    *http.Server
 	forwardProxy *l4.ForwardProxy
+	mapProxy  *l4.MapProxy
 }
 
 func NewStack(cfg *config.RuntimeConfig, st *repo.Store, hub *service.Hub, handler http.Handler) *Stack {
@@ -62,7 +63,9 @@ func (s *Stack) Start() error {
 	}
 
 	wgPort := s.cfg.Port
-	wgMgr, err := wg.NewManager(settings.HubIP, settings.DNSIP, wgPort, mtu)
+	mapVIPStrs, _ := s.repo.MapVirtualIPs()
+	mapVIP := l4.ParseMapVIP(mapVIPStrs)
+	wgMgr, err := wg.NewManager(settings.HubIP, settings.DNSIP, mapVIP, wgPort, mtu)
 	if err != nil {
 		return fmt.Errorf("wireguard: %w", err)
 	}
@@ -124,12 +127,61 @@ func (s *Stack) Start() error {
 		return fmt.Errorf("port forwards: %w", err)
 	}
 
+	if err := s.applyMaps(settings); err != nil {
+		s.hub.DetachNetwork()
+		_ = dnsServer.Stop()
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = tunnelSrv.Shutdown(shutCtx)
+		shutCancel()
+		if s.forwardProxy != nil {
+			s.forwardProxy.Stop()
+			s.forwardProxy = nil
+		}
+		_ = wgMgr.Close()
+		s.wgMgr = nil
+		s.dnsServer = nil
+		s.tunnelSrv = nil
+		return fmt.Errorf("maps: %w", err)
+	}
+
 	log.Printf("WireHub VPN stack started (WG UDP port %d, client endpoint port %d)", wgPort, settings.ListenPort)
 	return nil
 }
 
 func (s *Stack) HubListenPort() int {
 	return s.cfg.Port
+}
+
+func (s *Stack) SyncMaps() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wgMgr == nil || s.dnsServer == nil {
+		return nil
+	}
+	settings, err := s.repo.GetSettings()
+	if err != nil {
+		return err
+	}
+	return s.applyMaps(settings)
+}
+
+func (s *Stack) applyMaps(settings *repo.Settings) error {
+	if s.mapProxy == nil {
+		m, err := l4.NewMapProxy(s.wgMgr.Net(), settings.WGSubnet, s.dnsServer)
+		if err != nil {
+			return err
+		}
+		s.mapProxy = m
+	}
+	rules, err := service.MapRulesFromStore(s.repo)
+	if err != nil {
+		return err
+	}
+	if err := s.mapProxy.Apply(rules); err != nil {
+		return err
+	}
+	s.hub.SyncAccessFilter()
+	return nil
 }
 
 func (s *Stack) SyncPortForwards() error {
@@ -171,16 +223,12 @@ func (s *Stack) applyPortForwards(hubIP string) error {
 func forwardRulesFromRepo(rules []repo.PortForward) []l4.ForwardRule {
 	out := make([]l4.ForwardRule, 0, len(rules))
 	for _, r := range rules {
-		if !r.Enabled {
-			continue
-		}
 		out = append(out, l4.ForwardRule{
 			ID:         r.ID,
 			ListenPort: r.ListenPort,
 			Protocol:   r.Protocol,
 			TargetHost: r.TargetHost,
 			TargetPort: r.TargetPort,
-			Enabled:    true,
 		})
 	}
 	return out
@@ -215,6 +263,11 @@ func (s *Stack) Stop() error {
 	if s.forwardProxy != nil {
 		s.forwardProxy.Stop()
 		s.forwardProxy = nil
+	}
+
+	if s.mapProxy != nil {
+		s.mapProxy.Stop()
+		s.mapProxy = nil
 	}
 
 	s.closeWireGuard()

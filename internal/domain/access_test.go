@@ -84,7 +84,7 @@ func TestBuildAccessRules_SameGroupInterconnect(t *testing.T) {
 		{ID: 2, WGIP: "100.127.0.3", GroupID: 10, Enabled: true},
 		{ID: 3, WGIP: "100.127.0.4", GroupID: 10, Enabled: true},
 	}
-	rules, err := BuildAccessRules(peers, nil, GroupAccessPolicy{})
+	rules, err := BuildAccessRules(peers, nil, GroupAccessPolicy{}, MapAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestBuildAccessRules_SameGroupIntraDisabled(t *testing.T) {
 	}
 	grp := groupPolicy(GroupAccess{ID: 10, AllowIntraGroup: false})
 
-	rules, err := BuildAccessRules(peers, nil, grp)
+	rules, err := BuildAccessRules(peers, nil, grp, MapAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestBuildAccessRules_MixedIntraGroupSettings(t *testing.T) {
 		GroupAccess{ID: 10, AllowIntraGroup: false},
 		GroupAccess{ID: 20, AllowIntraGroup: true},
 	)
-	rules, err := BuildAccessRules(peers, nil, grp)
+	rules, err := BuildAccessRules(peers, nil, grp, MapAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestBuildAccessRules_CrossGroupIsolation(t *testing.T) {
 		{ID: 2, WGIP: "100.127.0.3", GroupID: 2, Enabled: true},
 		{ID: 3, WGIP: "100.127.0.4", GroupID: 3, Enabled: true},
 	}
-	rules, err := BuildAccessRules(peers, nil, GroupAccessPolicy{})
+	rules, err := BuildAccessRules(peers, nil, GroupAccessPolicy{}, MapAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestBuildAccessRules_LinkedGroupsInterconnect(t *testing.T) {
 	}
 	links := []GroupLinkPair{{FromGroupID: 2, ToGroupID: 3, Bidirectional: true}}
 
-	rules, err := BuildAccessRules(peers, links, GroupAccessPolicy{})
+	rules, err := BuildAccessRules(peers, links, GroupAccessPolicy{}, MapAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestBuildAccessRules_LinkedGroupsUnaffectedByIntraDisabled(t *testing.T) {
 	links := []GroupLinkPair{{FromGroupID: 1, ToGroupID: 2, Bidirectional: true}}
 	grp := groupPolicy(GroupAccess{ID: 1, AllowIntraGroup: false})
 
-	rules, err := BuildAccessRules(peers, links, grp)
+	rules, err := BuildAccessRules(peers, links, grp, MapAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestBuildAccessRules_LinkIsNotTransitive(t *testing.T) {
 		{FromGroupID: 2, ToGroupID: 3, Bidirectional: true},
 	}
 
-	rules, err := BuildAccessRules(peers, links, GroupAccessPolicy{})
+	rules, err := BuildAccessRules(peers, links, GroupAccessPolicy{}, MapAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestBuildAccessRules_DisabledPeerSkipped(t *testing.T) {
 		{ID: 1, WGIP: "100.127.0.2", GroupID: 1, Enabled: true},
 		{ID: 2, WGIP: "100.127.0.3", GroupID: 2, Enabled: false},
 	}
-	rules, err := BuildAccessRules(peers, nil, GroupAccessPolicy{})
+	rules, err := BuildAccessRules(peers, nil, GroupAccessPolicy{}, MapAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestBuildAccessRules_NoGroupPeerSkipped(t *testing.T) {
 		{ID: 1, WGIP: "100.127.0.2", GroupID: 1, Enabled: true},
 		{ID: 2, WGIP: "100.127.0.3", GroupID: 0, Enabled: true},
 	}
-	rules, err := BuildAccessRules(peers, nil, GroupAccessPolicy{})
+	rules, err := BuildAccessRules(peers, nil, GroupAccessPolicy{}, MapAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestBuildAccessRules_MultipleLinks(t *testing.T) {
 		{FromGroupID: 3, ToGroupID: 4, Bidirectional: true},
 	}
 
-	rules, err := BuildAccessRules(peers, links, GroupAccessPolicy{})
+	rules, err := BuildAccessRules(peers, links, GroupAccessPolicy{}, MapAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestBuildAccessRules(t *testing.T) {
 	}
 	links := []GroupLinkPair{{FromGroupID: 2, ToGroupID: 3, Bidirectional: true}}
 
-	rules, err := BuildAccessRules(peers, links, GroupAccessPolicy{})
+	rules, err := BuildAccessRules(peers, links, GroupAccessPolicy{}, MapAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +378,7 @@ func TestBuildAccessRules_UnidirectionalSNATPath(t *testing.T) {
 	}
 	links := []GroupLinkPair{{FromGroupID: 1, ToGroupID: 2, Bidirectional: false}}
 
-	policy, err := BuildAccessPolicy(peers, links, GroupAccessPolicy{})
+	policy, err := BuildAccessPolicy(peers, links, GroupAccessPolicy{}, MapAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,6 +387,27 @@ func TestBuildAccessRules_UnidirectionalSNATPath(t *testing.T) {
 	}
 	if peerCanSend(policy.Rules, "100.127.0.3", "100.127.0.2") {
 		t.Fatal("service must not reach client")
+	}
+}
+
+func TestBuildAccessRules_MapGroupACL(t *testing.T) {
+	peers := []PeerEndpoint{
+		{ID: 1, WGIP: "100.127.0.2", GroupID: 10, Enabled: true},
+		{ID: 2, WGIP: "100.127.0.3", GroupID: 20, Enabled: true},
+	}
+	maps := NewMapAccessPolicy([]MapAccess{{
+		VirtualIP:       "100.127.0.50",
+		AllowedGroupIDs: map[uint]struct{}{10: {}},
+	}})
+	rules, err := BuildAccessRules(peers, nil, GroupAccessPolicy{}, maps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !peerCanSend(rules, "100.127.0.2", "100.127.0.50") {
+		t.Fatal("group 10 should reach map vip")
+	}
+	if peerCanSend(rules, "100.127.0.3", "100.127.0.50") {
+		t.Fatal("group 20 must not reach map vip")
 	}
 }
 
@@ -399,7 +420,7 @@ func TestBuildAccessRules_UnidirectionalSNAT_IntraDisabledDoesNotBlockCrossGroup
 	links := []GroupLinkPair{{FromGroupID: 1, ToGroupID: 2, Bidirectional: false}}
 	grp := groupPolicy(GroupAccess{ID: 1, AllowIntraGroup: false})
 
-	policy, err := BuildAccessPolicy(peers, links, grp)
+	policy, err := BuildAccessPolicy(peers, links, grp, MapAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}

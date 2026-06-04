@@ -1,4 +1,4 @@
-// Package l4 is hub Layer-4 relay on the VPN netstack address.
+// Package l4 is hub Layer-4 map on the VPN netstack address.
 //
 // Three mechanisms share packet/port helpers but differ in how clients connect:
 //
@@ -9,7 +9,7 @@
 //   - Forward listen: admin Forward rules — client dials hub:listenPort;
 //     ForwardProxy accepts and dials targetHost:targetPort.
 //
-//   - Transparent relay: unidirectional group links — client dials target peer
+//   - Transparent map: unidirectional group links — client dials target peer
 //     WG IP:servicePort unchanged; TransparentTable SNATs on the hub TUN path
 //     (ephemeral hub source ports, return DNAT on TUN Write).
 //

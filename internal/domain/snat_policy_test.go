@@ -43,10 +43,10 @@ func TestBuildTransparentTable_UniLinkEnablesRelay(t *testing.T) {
 
 	tbl := BuildTransparentTable(peers, links)
 	if !transparentRelayApplies(tbl, "100.127.0.1", "100.127.0.2", "100.127.0.3") {
-		t.Fatal("uni link 1→2 must enable transparent relay")
+		t.Fatal("uni link 1→2 must enable transparent map")
 	}
 	if transparentRelayApplies(tbl, "100.127.0.1", "100.127.0.3", "100.127.0.2") {
-		t.Fatal("reverse direction must not relay")
+		t.Fatal("reverse direction must not map")
 	}
 }
 
@@ -59,7 +59,7 @@ func TestBuildTransparentTable_SkipsBidirectionalLinks(t *testing.T) {
 
 	tbl := BuildTransparentTable(peers, links)
 	if transparentRelayApplies(tbl, "100.127.0.1", "100.127.0.2", "100.127.0.3") {
-		t.Fatal("bidirectional links use direct WG IP, not transparent relay")
+		t.Fatal("bidirectional links use direct WG IP, not transparent map")
 	}
 }
 
@@ -73,6 +73,6 @@ func TestBuildTransparentTable_SkipsDisabledAndNoGroupPeers(t *testing.T) {
 
 	tbl := BuildTransparentTable(peers, links)
 	if transparentRelayApplies(tbl, "100.127.0.1", "100.127.0.3", "100.127.0.4") {
-		t.Fatal("disabled / no-group peers must not participate in relay table")
+		t.Fatal("disabled / no-group peers must not participate in map table")
 	}
 }

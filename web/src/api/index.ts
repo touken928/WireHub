@@ -7,6 +7,8 @@ import type {
   PeerGroup,
   PortForward,
   PortForwardList,
+  MapList,
+  ServiceMap,
   SetupStatus,
 } from '@/api/types';
 
@@ -109,7 +111,6 @@ export const api = {
     protocol: string;
     target_host: string;
     target_port: number;
-    enabled?: boolean;
   }) =>
     request<PortForward>('/forwards', { method: 'POST', body: JSON.stringify(body) }),
   updatePortForward: (
@@ -120,12 +121,29 @@ export const api = {
       protocol: string;
       target_host: string;
       target_port: number;
-      enabled?: boolean;
     },
   ) =>
     request<PortForward>(`/forwards/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   deletePortForward: (id: number) =>
     request<{ ok: boolean }>(`/forwards/${id}`, { method: 'DELETE' }),
+
+  listMaps: () => request<MapList>('/maps'),
+  createMap: (body: {
+    name?: string;
+    slug: string;
+    target_host: string;
+    allowed_group_ids: number[];
+  }) => request<ServiceMap>('/maps', { method: 'POST', body: JSON.stringify(body) }),
+  updateMap: (
+    id: number,
+    body: {
+      name?: string;
+      slug: string;
+      target_host: string;
+      allowed_group_ids: number[];
+    },
+  ) => request<ServiceMap>(`/maps/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  deleteMap: (id: number) => request<{ ok: boolean }>(`/maps/${id}`, { method: 'DELETE' }),
 
   listPeers: () => request<Peer[]>('/peers'),
   createPeer: (body: { name: string; group_id: number }) =>

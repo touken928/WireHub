@@ -29,6 +29,7 @@
 - **Group access control** — one group per peer; per-group **Same-group interconnect** toggle; **bidirectional** or **unidirectional** links on the topology graph (default deny across groups)
 - **Live status** — WebSocket push: handshake, RX/TX, traffic charts
 - **Port forwarding** — TCP/UDP listeners on hub VPN IP → FQDN or IPv4
+- **Service maps** — `{slug}.wirehub` resolves to a virtual IP; TCP/UDP to that IP uses the same port on a LAN/external target; allowed groups only (default deny)
 - **Settings and backup** — runtime options, password change, database export, password protected reset
 - **Userspace WireGuard** — [wireguard-go](https://github.com/WireGuard/wireguard-go) + gVisor netstack; no host TUN on the hub
 
@@ -47,6 +48,7 @@ flowchart TB
   wg --> dns["DNS :53 on hub IP"]
   wg --> filter["L3 forward + ACL filter"]
   wg --> fwd["L4 forwards on hub IP"]
+  wg --> mapsNode["L4 map VIPs"]
 
   filter --> p1[Peer A]
   filter --> p2[Peer B]
@@ -148,6 +150,7 @@ JWT secret: `{data-dir}/.jwt_secret` (created on first launch).
 | **Groups** | Topology graph; link mode (bidirectional / unidirectional); per-group peer cards; **Same-group interconnect** switch; rename peers, change group |
 | **Peers** | All peers with search and filters; create, rename, move group, config download, enable/disable, delete |
 | **Forward** | TCP/UDP listeners on hub VPN IP → target host:port |
+| **Maps** | Virtual IP + DNS name per mapping; port-preserving TCP/UDP to target host; group allow list |
 | **Settings** | Runtime options, password, export, reset |
 
 Destructive actions require confirmation; hub reset also requires the admin password.
@@ -170,6 +173,7 @@ Resolver on hub VPN IP (UDP 53). Suffix is fixed: `wirehub`; hub label is `hub`.
 |------|--------|
 | `hub.wirehub`, `www.hub.wirehub` | Hub VPN IP |
 | `{peer}.wirehub`, `www.{peer}.wirehub` | Peer VPN IP |
+| `{slug}.wirehub` (service map) | Map virtual IP (only if the peer’s group is allowed) |
 
 Bare `wirehub` / `www.wirehub` are not served. When upstream DNS is configured, other names are forwarded server-side (not listed in peer configs). With no upstream, external names are not resolved. Other VPN or proxy tools (e.g. Clash TUN) may hijack DNS and prevent `*.wirehub` from resolving.
 
@@ -193,7 +197,19 @@ Rules listen on the **hub VPN IP** and proxy to a target. Peers connect to `{hub
 | External hostname | Upstream DNS (A record) |
 | IPv4 | Literal address |
 
-Target must be a FQDN or IPv4 (not a bare peer name). Toggle **Enabled** to apply without restarting the VPN stack. This is explicit L4 proxying, separate from unidirectional group SNAT.
+Target must be a FQDN or IPv4 (not a bare peer name). Rules take effect after save without restarting the VPN stack. Delete a rule to stop forwarding. This is explicit L4 proxying, separate from unidirectional group SNAT.
+
+### Service maps
+
+Maps a DNS name inside the VPN to an external or LAN host with **port-preserving TCP and UDP** (e.g. `https://db.wirehub` → `https://192.168.1.10` when the client uses port 443).
+
+| Aspect | Behavior |
+|--------|----------|
+| DNS | `{slug}.wirehub` → dedicated virtual IP in the VPN subnet |
+| Access | At least one allowed group required; peers outside those groups get NXDOMAIN and cannot reach the VIP |
+| Protocol | TCP and UDP; same port on target as on the virtual IP |
+
+Configure under **Maps** in the admin UI. Distinct from **Forward** (listener on hub IP + fixed target port) and from group SNAT.
 
 ## Development
 

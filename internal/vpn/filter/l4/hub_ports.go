@@ -9,21 +9,18 @@ type ForwardRule struct {
 	Protocol   string
 	TargetHost string
 	TargetPort int
-	Enabled    bool
 }
 
 func forwardListenPorts(rules []ForwardRule) []int {
 	out := make([]int, 0, len(rules))
 	for _, r := range rules {
-		if r.Enabled {
-			out = append(out, r.ListenPort)
-		}
+		out = append(out, r.ListenPort)
 	}
 	return out
 }
 
 // ReservedHubPorts lists hub port numbers that must not be used as SNAT ephemeral ports.
-// Includes system listeners on the hub VPN address (DNS, tunnel Web TCP) and enabled Forward listen ports.
+// Includes system listeners on the hub VPN address (DNS, tunnel Web TCP) and Forward listen ports.
 func ReservedHubPorts(tunnelWebTCPPort int, forwards []ForwardRule) []int {
 	seen := make(map[int]struct{})
 	add := func(p int) {

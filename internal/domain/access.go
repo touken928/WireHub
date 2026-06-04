@@ -130,8 +130,51 @@ func needsTransparentRelay(p, q PeerEndpoint, links []GroupLinkPair, groups Grou
 	return !allowDirectPeerIP(p, q, links, groups)
 }
 
+// MapAccess describes a map virtual IP and which groups may use it.
+type MapAccess struct {
+	VirtualIP       string
+	AllowedGroupIDs map[uint]struct{}
+}
+
+// MapAccessPolicy maps map VIPs to allowed groups (default deny).
+type MapAccessPolicy struct {
+	byVIP map[netip.Addr]MapAccess
+}
+
+// NewMapAccessPolicy builds map ACL state from repo maps.
+func NewMapAccessPolicy(maps []MapAccess) MapAccessPolicy {
+	byVIP := make(map[netip.Addr]MapAccess, len(maps))
+	for _, r := range maps {
+		addr, err := netip.ParseAddr(r.VirtualIP)
+		if err != nil || !addr.IsValid() {
+			continue
+		}
+		byVIP[addr] = r
+	}
+	return MapAccessPolicy{byVIP: byVIP}
+}
+
+// PeerMayAccessMap reports whether a peer group may reach the map VIP.
+func (p MapAccessPolicy) PeerMayAccessMap(peerGroupID uint, vip netip.Addr) bool {
+	if peerGroupID == 0 || !vip.IsValid() {
+		return false
+	}
+	if p.byVIP == nil {
+		return false
+	}
+	r, ok := p.byVIP[vip]
+	if !ok {
+		return false
+	}
+	if len(r.AllowedGroupIDs) == 0 {
+		return false
+	}
+	_, ok = r.AllowedGroupIDs[peerGroupID]
+	return ok
+}
+
 // BuildAccessPolicy configures ACL blocking and hub SNAT for unidirectional group links.
-func BuildAccessPolicy(peers []PeerEndpoint, links []GroupLinkPair, groups GroupAccessPolicy) (*filter.AccessPolicy, error) {
+func BuildAccessPolicy(peers []PeerEndpoint, links []GroupLinkPair, groups GroupAccessPolicy, maps MapAccessPolicy) (*filter.AccessPolicy, error) {
 	rules := filter.NewRuleSet()
 	transparent := BuildTransparentTable(peers, links)
 
@@ -163,14 +206,19 @@ func BuildAccessPolicy(peers []PeerEndpoint, links []GroupLinkPair, groups Group
 			}
 			blocked = append(blocked, toIP)
 		}
+		for vip := range maps.byVIP {
+			if !maps.PeerMayAccessMap(p.GroupID, vip) {
+				blocked = append(blocked, vip)
+			}
+		}
 		rules.SetBlocked(fromIP, blocked)
 	}
 	return &filter.AccessPolicy{Rules: rules, Transparent: transparent}, nil
 }
 
 // BuildAccessRules is kept for tests that only need the block list.
-func BuildAccessRules(peers []PeerEndpoint, links []GroupLinkPair, groups GroupAccessPolicy) (*filter.RuleSet, error) {
-	p, err := BuildAccessPolicy(peers, links, groups)
+func BuildAccessRules(peers []PeerEndpoint, links []GroupLinkPair, groups GroupAccessPolicy, maps MapAccessPolicy) (*filter.RuleSet, error) {
+	p, err := BuildAccessPolicy(peers, links, groups, maps)
 	if err != nil {
 		return nil, err
 	}

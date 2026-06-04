@@ -165,7 +165,7 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 			continue
 		}
 
-		ip, resolved := s.lookupIP(slug, ok)
+		ip, resolved := s.lookupIPForClient(slug, ok, dnsClientIP(w))
 		if !resolved {
 			internalMissing = true
 			continue

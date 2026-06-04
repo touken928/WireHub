@@ -25,8 +25,15 @@ import { useState } from 'react';
 import { DNS_DOMAIN } from '@/constants';
 import { RenameDialog } from '@/components/common/RenameDialog';
 import { PeerStatusBadge } from '@/components/peers/PeerStatusBadge';
+import {
+  MemberRowActions,
+  MemberRowCard,
+  MemberRowIdentity,
+  MemberRowStat,
+} from '@/components/common/MemberRowCard';
 import { formatBytes, formatHandshake } from '@/lib/format';
 import { getErrorMessage } from '@/lib/error';
+import { useMemberRowCardStyles } from '@/styles/memberRowCard';
 
 const useStyles = makeStyles({
   card: {
@@ -100,45 +107,6 @@ const useStyles = makeStyles({
     paddingLeft: '6px',
     paddingRight: '6px',
   },
-  rowCard: {
-    padding: '16px 18px',
-    borderRadius: tokens.borderRadiusXLarge,
-    border: `1px solid ${tokens.colorNeutralStroke2}`,
-    backgroundColor: tokens.colorNeutralBackground1,
-    boxShadow: tokens.shadow2,
-    display: 'grid',
-    gridTemplateColumns: 'minmax(160px, 1.2fr) repeat(4, minmax(0, 1fr)) auto',
-    gap: '12px 16px',
-    alignItems: 'center',
-    '@media (max-width: 960px)': {
-      gridTemplateColumns: '1fr',
-    },
-  },
-  rowIdentity: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '6px',
-    minWidth: 0,
-  },
-  rowStat: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '2px',
-    minWidth: 0,
-  },
-  rowStatValue: {
-    fontSize: tokens.fontSizeBase300,
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-  },
-  rowActions: {
-    display: 'flex',
-    gap: '6px',
-    flexWrap: 'wrap',
-    justifyContent: 'flex-end',
-    alignItems: 'center',
-  },
 });
 
 export type PeerMemberCardGroup = {
@@ -184,6 +152,7 @@ export function PeerMemberCard({
   onDelete,
 }: PeerMemberCardProps) {
   const styles = useStyles();
+  const rowStyles = useMemberRowCardStyles();
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   const [renameError, setRenameError] = useState('');
@@ -229,43 +198,37 @@ export function PeerMemberCard({
   return (
     <>
       {layout === 'row' ? (
-        <Card className={styles.rowCard}>
-          <div className={styles.rowIdentity}>
-            <div className={styles.nameRow}>
-              <Text weight="semibold">{peer.name}</Text>
-              <PeerStatusBadge enabled={peer.enabled} online={peer.online} />
-            </div>
-            {showGroupTag && (
-              <span className={styles.groupTag}>
+        <MemberRowCard statColumns={4}>
+          <MemberRowIdentity
+            title={peer.name}
+            badge={<PeerStatusBadge enabled={peer.enabled} online={peer.online} />}
+          >
+            {showGroupTag ? (
+              <span className={rowStyles.groupTag}>
                 <PeopleTeamRegular fontSize={14} />
                 {peer.group_name || '—'}
               </span>
-            )}
-          </div>
-          <div className={styles.rowStat}>
-            <span className={styles.metaLabel}>WireGuard IP</span>
-            <span className={`${styles.rowStatValue} ${styles.mono}`}>{peer.wg_ip}</span>
-          </div>
-          <div className={styles.rowStat}>
-            <span className={styles.metaLabel}>DNS</span>
-            <span className={`${styles.rowStatValue} ${styles.mono}`}>{peer.fqdn || `${peer.name}.${DNS_DOMAIN}`}</span>
-          </div>
-          <div className={styles.rowStat}>
-            <span className={styles.metaLabel}>Last handshake</span>
-            <span className={styles.rowStatValue}>{formatHandshake(peer.last_handshake)}</span>
-          </div>
-          <div className={styles.rowStat}>
-            <span className={styles.metaLabel}>Traffic</span>
-            <span className={styles.rowStatValue}>{formatBytes(peer.rx_bytes)} / {formatBytes(peer.tx_bytes)}</span>
-          </div>
-          <div className={styles.rowActions}>
+            ) : null}
+          </MemberRowIdentity>
+          <MemberRowStat label="WireGuard IP" value={peer.wg_ip} mono />
+          <MemberRowStat
+            label="DNS"
+            value={peer.fqdn || `${peer.name}.${DNS_DOMAIN}`}
+            mono
+          />
+          <MemberRowStat label="Last handshake" value={formatHandshake(peer.last_handshake)} />
+          <MemberRowStat
+            label="Traffic"
+            value={`${formatBytes(peer.rx_bytes)} / ${formatBytes(peer.tx_bytes)}`}
+          />
+          <MemberRowActions>
             <Button size="small" icon={<PeopleTeamRegular />} onClick={openMove}>Group</Button>
             <Button size="small" icon={<ArrowDownloadRegular />} onClick={() => onShowConfig(peer.id)}>Config</Button>
             <Button size="small" icon={<PowerRegular />} onClick={() => onToggle(peer.id)}>Toggle</Button>
             <Button size="small" icon={<EditRegular />} appearance="subtle" aria-label="Rename peer" onClick={openRename} />
             <Button size="small" icon={<DeleteRegular />} appearance="subtle" aria-label="Delete peer" onClick={() => onDelete(peer.id, peer.name)} />
-          </div>
-        </Card>
+          </MemberRowActions>
+        </MemberRowCard>
       ) : (
         <Card className={styles.card}>
           <div className={styles.header}>

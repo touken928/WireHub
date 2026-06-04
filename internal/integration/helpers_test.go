@@ -11,9 +11,10 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/touken928/wirehub/internal/domain"
+	"github.com/touken928/wirehub/internal/repo"
+	"github.com/touken928/wirehub/internal/service"
 	"github.com/touken928/wirehub/internal/vpn/filter"
 	"github.com/touken928/wirehub/internal/vpn/filter/l4"
-	"github.com/touken928/wirehub/internal/repo"
 	"github.com/touken928/wirehub/internal/vpn/wg"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
@@ -172,6 +173,27 @@ func peerHTTPGet(tnet *netstack.Net, url string, timeout time.Duration) (string,
 	return string(body), nil
 }
 
+func startHostUDPEcho(t *testing.T, port int) func() {
+	t.Helper()
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, addr, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if _, err := pc.WriteTo(buf[:n], addr); err != nil {
+				return
+			}
+		}
+	}()
+	return func() { _ = pc.Close() }
+}
+
 func startPeerUDPEcho(t *testing.T, tnet *netstack.Net, ip string, port int) func() {
 	t.Helper()
 	pc, err := tnet.ListenUDP(&net.UDPAddr{IP: net.ParseIP(ip), Port: port})
@@ -247,7 +269,6 @@ func toForwardRules(rules []repo.PortForward) []l4.ForwardRule {
 			Protocol:   r.Protocol,
 			TargetHost: r.TargetHost,
 			TargetPort: r.TargetPort,
-			Enabled:    r.Enabled,
 		})
 	}
 	return out
@@ -273,6 +294,32 @@ func (env *peerMeshEnv) syncPortForwards(t *testing.T) {
 	runtime := toForwardRules(rules)
 	env.wgMgr.ReserveHubPorts(l4.ReservedHubPorts(l4.HubTunnelWebPort, runtime))
 	if err := env.forwardProxy.Apply(runtime); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
+func (env *peerMeshEnv) syncMaps(t *testing.T) {
+	t.Helper()
+	settings, err := env.store.GetSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.mapProxy == nil {
+		mgr, err := l4.NewMapProxy(env.wgMgr.Net(), settings.WGSubnet, env.dnsServer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		env.mapProxy = mgr
+	}
+	rules, err := service.MapRulesFromStore(env.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.mapProxy.Apply(rules); err != nil {
+		t.Fatal(err)
+	}
+	if err := reloadAccessRules(env.store, env.wgMgr); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(100 * time.Millisecond)
@@ -308,5 +355,13 @@ func buildAccessPolicyFromStore(st *repo.Store) (*filter.AccessPolicy, error) {
 	for i, g := range groups {
 		groupAccess[i] = domain.GroupAccess{ID: g.ID, AllowIntraGroup: g.AllowIntraGroup}
 	}
-	return domain.BuildAccessPolicy(eps, pairs, domain.NewGroupAccessPolicy(groupAccess))
+	maps, err := st.ListMapDetails()
+	if err != nil {
+		return nil, err
+	}
+	mapAccess := make([]domain.MapAccess, 0, len(maps))
+	for _, r := range maps {
+		mapAccess = append(mapAccess, domain.NewMapAccess(r.VirtualIP, r.AllowedGroups))
+	}
+	return domain.BuildAccessPolicy(eps, pairs, domain.NewGroupAccessPolicy(groupAccess), domain.NewMapAccessPolicy(mapAccess))
 }

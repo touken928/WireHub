@@ -116,7 +116,7 @@ func TestWireGuardTCPWithFilterAndForwarding(t *testing.T) {
 	peerPrivHex, _ := wg.KeyToHex(peerPriv)
 	hubPubHex, _ := wg.KeyToHex(hubPub)
 
-	hubMgr, err := wg.NewManager("10.8.0.1", "10.8.0.1", hubPort, 1420)
+	hubMgr, err := wg.NewManager("10.8.0.1", "10.8.0.1", nil, hubPort, 1420)
 	if err != nil {
 		t.Fatal(err)
 	}

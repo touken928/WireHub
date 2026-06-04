@@ -176,6 +176,11 @@ export default function PeersPage() {
       <PageHeader
         title="Peers"
         description="All peers with live status. Create peers, rename, change group, download config, or toggle access from each row."
+        actions={(
+          <Button appearance="primary" icon={<AddRegular />} onClick={openCreateDialog}>
+            Add peer
+          </Button>
+        )}
       />
 
       {groups.length === 0 ? (
@@ -184,55 +189,48 @@ export default function PeersPage() {
         </div>
       ) : (
         <>
-          <div className={styles.toolbar}>
-            {peers.length > 0 ? (
-              <>
-                <Field label="Search" className={styles.searchField}>
-                  <Input
-                    value={searchQuery}
-                    placeholder="Name, DNS, IP, group…"
-                    contentBefore={<SearchRegular />}
-                    onChange={(_, data) => setSearchQuery(data.value)}
-                  />
-                </Field>
-                <Field label="Group" className={styles.filterField}>
-                  <Select
-                    value={groupFilter}
-                    onChange={(_, data) => setGroupFilter(data.value)}
-                  >
-                    <option value="">All groups</option>
-                    {groups.map((group) => (
-                      <option key={group.id} value={String(group.id)}>{group.name}</option>
-                    ))}
-                  </Select>
-                </Field>
-                <Field label="Status" className={styles.filterField}>
-                  <Select
-                    value={statusFilter}
-                    onChange={(_, data) => setStatusFilter(data.value as PeerConnectionFilter)}
-                  >
-                    <option value="all">All statuses</option>
-                    <option value="online">Online</option>
-                    <option value="offline">Offline</option>
-                    <option value="disabled">Disabled</option>
-                  </Select>
-                </Field>
-                <Button
-                  appearance="subtle"
-                  icon={<DismissRegular />}
-                  disabled={!filtersActive}
-                  onClick={clearFilters}
+          {peers.length > 0 ? (
+            <div className={styles.toolbar}>
+              <Field label="Search" className={styles.searchField}>
+                <Input
+                  value={searchQuery}
+                  placeholder="Name, DNS, IP, group…"
+                  contentBefore={<SearchRegular />}
+                  onChange={(_, data) => setSearchQuery(data.value)}
+                />
+              </Field>
+              <Field label="Group" className={styles.filterField}>
+                <Select
+                  value={groupFilter}
+                  onChange={(_, data) => setGroupFilter(data.value)}
                 >
-                  Clear
-                </Button>
-              </>
-            ) : null}
-            <div className={styles.toolbarActions}>
-              <Button appearance="primary" icon={<AddRegular />} onClick={openCreateDialog}>
-                Add peer
+                  <option value="">All groups</option>
+                  {groups.map((group) => (
+                    <option key={group.id} value={String(group.id)}>{group.name}</option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="Status" className={styles.filterField}>
+                <Select
+                  value={statusFilter}
+                  onChange={(_, data) => setStatusFilter(data.value as PeerConnectionFilter)}
+                >
+                  <option value="all">All statuses</option>
+                  <option value="online">Online</option>
+                  <option value="offline">Offline</option>
+                  <option value="disabled">Disabled</option>
+                </Select>
+              </Field>
+              <Button
+                appearance="subtle"
+                icon={<DismissRegular />}
+                disabled={!filtersActive}
+                onClick={clearFilters}
+              >
+                Clear
               </Button>
             </div>
-          </div>
+          ) : null}
 
           {peers.length === 0 ? (
             <div className={styles.empty}>

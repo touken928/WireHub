@@ -93,13 +93,15 @@ auth → repo, password
 |------|---------|
 | System listen | DNS `:53`, tunnel Web TCP `:80` on hub VPN IP; WireGuard UDP on host (CLI `--port`) |
 | ForwardProxy | Admin **Forward** rules: peer dials `hub_ip:listen_port` → target host:port |
+| MapProxy | Admin **Maps** rules: `{slug}.wirehub` → virtual IP; TCP/UDP same-port to `target_host`; group allow list |
 | TransparentTable | Unidirectional group link: peer dials target peer IP:port; hub SNAT on TUN |
 
 Shared IPv4 rewrite and ephemeral port pool. `l4.ReservedHubPorts(tunnelWebPort, forwards)` reserves port 53, tunnel Web TCP (80), and Forward listen ports from the SNAT range via `wg.Manager.ReserveHubPorts`.
 
 **Group ACL**
 
-- `domain.BuildAccessPolicy(peers, links, groups)` → `vpn/filter.AccessPolicy` (block list + `l4.TransparentTable`) → `wg.Manager.SetAccessPolicy`.
+- `domain.BuildAccessPolicy(peers, links, groups, maps)` → `vpn/filter.AccessPolicy` (block list + `l4.TransparentTable`) → `wg.Manager.SetAccessPolicy`.
+- Map VIPs: blocked on TUN when peer’s group not in `MapGroupAllow`; DNS NXDOMAIN; `MapProxy` rejects disallowed traffic.
 - `repo.PeerGroup.AllowIntraGroup` (default `true`, JSON `allow_intra_group`) — UI label **Same-group interconnect** on Groups detail panel.
 - Same group: direct WireGuard IP connectivity when `AllowIntraGroup` is true; peers blocked from each other when false (hub Web/DNS/forwards still reachable).
 - Cross group: default deny; explicit link on Groups graph required.
@@ -118,6 +120,13 @@ Shared IPv4 rewrite and ephemeral port pool. `l4.ReservedHubPorts(tunnelWebPort,
 - Model: `repo.PortForward` → runtime `l4.ForwardProxy`.
 - After CRUD: `vpn.Stack.SyncPortForwards()`.
 - Handlers: `internal/server/handlers_forwards.go`, routes under `/api/forwards`.
+
+**Service maps**
+
+- Model: `repo.ServiceMap`, `repo.MapGroupAllow` (SQLite tables `service_relays`, `relay_group_allows`) → runtime `l4.MapProxy` + VIP on netstack NIC.
+- After CRUD: `vpn.Stack.SyncMaps()` + `SyncAccessFilter()`.
+- Handlers: `internal/server/handlers_maps.go`, routes under `/api/maps`.
+- Validation: `domain.ValidateMapSlug`, `domain.ValidateMapGroupIDs` (≥1 group).
 
 **Group links**
 
@@ -210,7 +219,7 @@ web/src/
     groups/         # React Flow graph, LinkDrawToolbar, GroupDetailPanel
     layout/         # AppLayout, LoginLayout, PageHeader
     peers/          # PeerMemberCard, CreatePeerDialog, ConfigDialog
-  pages/            # Dashboard, Groups, Peers, Forward, Settings, Login, Setup
+  pages/            # Dashboard, Groups, Peers, Forward, Maps, Settings, Login, Setup
   hooks/
   lib/
   styles/           # loginPage, layout, pageLayout

@@ -56,10 +56,15 @@ func (h *Hub) buildAccessRules() error {
 	if err != nil {
 		return err
 	}
+	mapPolicy, err := h.buildMapAccessPolicy()
+	if err != nil {
+		return err
+	}
 	policy, err := domain.BuildAccessPolicy(
 		peerEndpoints(peers),
 		groupLinkPairs(links),
 		domain.NewGroupAccessPolicy(groupAccessList(groups)),
+		mapPolicy,
 	)
 	if err != nil {
 		return err
@@ -75,4 +80,16 @@ func (h *Hub) buildAccessRules() error {
 // SyncAccessFilter rebuilds group ACL rules on the running WireGuard stack.
 func (h *Hub) SyncAccessFilter() {
 	_ = h.buildAccessRules()
+}
+
+func (h *Hub) buildMapAccessPolicy() (domain.MapAccessPolicy, error) {
+	details, err := h.Store.ListMapDetails()
+	if err != nil {
+		return domain.MapAccessPolicy{}, err
+	}
+	maps := make([]domain.MapAccess, 0, len(details))
+	for _, d := range details {
+		maps = append(maps, domain.NewMapAccess(d.VirtualIP, d.AllowedGroups))
+	}
+	return domain.NewMapAccessPolicy(maps), nil
 }
