@@ -26,7 +26,7 @@
 - **Setup wizard** — new hub or import `wirehub.db`; Hub / Admin / Advanced sections
 - **Peer lifecycle** — create from Groups or Peers; rename, move group, enable/disable, delete; export `.conf` or QR code
 - **Built in DNS** — `hub.wirehub`, `{peer}.wirehub`; `www.*` aliases; upstream resolvers for other names
-- **Group access control** — one group per peer; **bidirectional** or **unidirectional** links on the topology graph (default deny across groups)
+- **Group access control** — one group per peer; per-group **Same-group interconnect** toggle; **bidirectional** or **unidirectional** links on the topology graph (default deny across groups)
 - **Live status** — WebSocket push: handshake, RX/TX, traffic charts
 - **Port forwarding** — TCP/UDP listeners on hub VPN IP → FQDN or IPv4
 - **Settings and backup** — runtime options, password change, database export, password protected reset
@@ -145,7 +145,7 @@ JWT secret: `{data-dir}/.jwt_secret` (created on first launch).
 | Page | Purpose |
 |------|---------|
 | **Dashboard** | Hub summary, endpoint, live peer stats and traffic chart |
-| **Groups** | Topology graph; link mode (bidirectional / unidirectional); per-group peer cards; rename peers, change group |
+| **Groups** | Topology graph; link mode (bidirectional / unidirectional); per-group peer cards; **Same-group interconnect** switch; rename peers, change group |
 | **Peers** | All peers with search and filters; create, rename, move group, config download, enable/disable, delete |
 | **Forward** | TCP/UDP listeners on hub VPN IP → target host:port |
 | **Settings** | Runtime options, password, export, reset |
@@ -175,7 +175,8 @@ Bare `wirehub` / `www.wirehub` are not served. When upstream DNS is configured, 
 
 ### Access control
 
-- Each peer belongs to **one group**. Peers in the same group may reach each other directly.
+- Each peer belongs to **one group**. By default, peers in the same group may reach each other directly over WireGuard.
+- **Same-group interconnect** (per group, on the Groups detail panel) — when off, peers in that group cannot reach each other’s VPN IPs; they can still use the hub (Web UI, DNS, port forwards). New groups default to on (non-breaking for existing deployments).
 - **Cross-group** access requires an explicit link on the **Groups** graph (default deny).
   - **Bidirectional** — both groups may initiate to each other over WireGuard.
   - **Unidirectional** (`A → B`) — peers in `A` dial `B`’s IP and port as usual; the hub SNATs outbound traffic so `B` sees the hub. Return traffic is rewritten for `A`. `B` cannot initiate to `A`.

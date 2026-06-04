@@ -7,6 +7,55 @@ import (
 	"github.com/touken928/wirehub/internal/config"
 )
 
+func TestCreateGroup_DefaultAllowIntraGroup(t *testing.T) {
+	dir := t.TempDir()
+	st, err := New(&config.RuntimeConfig{DatabasePath: filepath.Join(dir, "wirehub.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := st.CreateGroup("isolated-candidates", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !g.AllowIntraGroup {
+		t.Fatal("new group should allow intra-group peer traffic by default")
+	}
+
+	got, err := st.GetGroup(g.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.AllowIntraGroup {
+		t.Fatal("persisted group should allow intra-group by default")
+	}
+}
+
+func TestUpdateGroup_AllowIntraGroup(t *testing.T) {
+	dir := t.TempDir()
+	st, err := New(&config.RuntimeConfig{DatabasePath: filepath.Join(dir, "wirehub.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := st.CreateGroup("team", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.AllowIntraGroup = false
+	if err := st.UpdateGroup(g); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.GetGroup(g.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AllowIntraGroup {
+		t.Fatal("expected allow_intra_group=false after update")
+	}
+}
+
 func TestRenameGroup(t *testing.T) {
 	dir := t.TempDir()
 	st, err := New(&config.RuntimeConfig{DatabasePath: filepath.Join(dir, "wirehub.db")})

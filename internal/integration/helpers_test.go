@@ -300,5 +300,13 @@ func buildAccessPolicyFromStore(st *repo.Store) (*filter.AccessPolicy, error) {
 			FromGroupID: l.FromGroupID, ToGroupID: l.ToGroupID, Bidirectional: l.Bidirectional,
 		}
 	}
-	return domain.BuildAccessPolicy(eps, pairs)
+	groups, err := st.ListGroups()
+	if err != nil {
+		return nil, err
+	}
+	groupAccess := make([]domain.GroupAccess, len(groups))
+	for i, g := range groups {
+		groupAccess[i] = domain.GroupAccess{ID: g.ID, AllowIntraGroup: g.AllowIntraGroup}
+	}
+	return domain.BuildAccessPolicy(eps, pairs, domain.NewGroupAccessPolicy(groupAccess))
 }

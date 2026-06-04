@@ -43,6 +43,7 @@ export interface PeerGroup {
   pos_x: number;
   pos_y: number;
   member_count: number;
+  allow_intra_group: boolean;
 }
 
 export interface GroupLink {
@@ -67,6 +68,7 @@ export interface GroupGraphNode {
   pos_x: number;
   pos_y: number;
   member_count: number;
+  allow_intra_group: boolean;
   peers: GroupGraphPeer[];
 }
 

@@ -32,6 +32,17 @@ func groupLinkPairs(links []repo.GroupLink) []domain.GroupLinkPair {
 	return out
 }
 
+func groupAccessList(groups []repo.PeerGroup) []domain.GroupAccess {
+	out := make([]domain.GroupAccess, len(groups))
+	for i, g := range groups {
+		out[i] = domain.GroupAccess{
+			ID:              g.ID,
+			AllowIntraGroup: g.AllowIntraGroup,
+		}
+	}
+	return out
+}
+
 func (h *Hub) buildAccessRules() error {
 	peers, err := h.Store.ListPeers()
 	if err != nil {
@@ -41,7 +52,15 @@ func (h *Hub) buildAccessRules() error {
 	if err != nil {
 		return err
 	}
-	policy, err := domain.BuildAccessPolicy(peerEndpoints(peers), groupLinkPairs(links))
+	groups, err := h.Store.ListGroups()
+	if err != nil {
+		return err
+	}
+	policy, err := domain.BuildAccessPolicy(
+		peerEndpoints(peers),
+		groupLinkPairs(links),
+		domain.NewGroupAccessPolicy(groupAccessList(groups)),
+	)
 	if err != nil {
 		return err
 	}

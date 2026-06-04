@@ -212,6 +212,12 @@ export default function GroupsPage() {
     await refreshDetail();
   };
 
+  const handleAllowIntraGroupChange = async (allow: boolean) => {
+    if (!detailGroup) return;
+    await api.updateGroup(detailGroup.id, { allow_intra_group: allow });
+    await refreshDetail();
+  };
+
   const handleRenamePeer = async (peerId: number, name: string) => {
     await api.updatePeer(peerId, { name });
     await refreshDetail();
@@ -273,6 +279,7 @@ export default function GroupsPage() {
           onNewPeerNameChange={setNewPeerName}
           onCreatePeer={() => void handleCreatePeerInGroup()}
           onRenameGroup={handleRenameGroup}
+          onAllowIntraGroupChange={handleAllowIntraGroupChange}
           onRenamePeer={handleRenamePeer}
           onMovePeer={handleMovePeer}
           onShowConfig={(id) => void peerConfig.showConfig(id)}

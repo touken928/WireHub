@@ -99,8 +99,9 @@ Shared IPv4 rewrite and ephemeral port pool. `l4.ReservedHubPorts(tunnelWebPort,
 
 **Group ACL**
 
-- `domain.BuildAccessPolicy(peers, links)` → `vpn/filter.AccessPolicy` (block list + `l4.TransparentTable`) → `wg.Manager.SetAccessPolicy`.
-- Same group: direct WireGuard IP connectivity.
+- `domain.BuildAccessPolicy(peers, links, groups)` → `vpn/filter.AccessPolicy` (block list + `l4.TransparentTable`) → `wg.Manager.SetAccessPolicy`.
+- `repo.PeerGroup.AllowIntraGroup` (default `true`, JSON `allow_intra_group`) — UI label **Same-group interconnect** on Groups detail panel.
+- Same group: direct WireGuard IP connectivity when `AllowIntraGroup` is true; peers blocked from each other when false (hub Web/DNS/forwards still reachable).
 - Cross group: default deny; explicit link on Groups graph required.
 - Bidirectional link: both groups may initiate to each other.
 - Unidirectional link (`A → B`): `domain.BuildTransparentTable` → TUN transparent relay in `vpn/filter/l4`.

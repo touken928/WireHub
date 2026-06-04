@@ -11,6 +11,10 @@ func addr(s string) netip.Addr {
 	return netip.MustParseAddr(s)
 }
 
+func groupPolicy(entries ...GroupAccess) GroupAccessPolicy {
+	return NewGroupAccessPolicy(entries)
+}
+
 // peerCanSend mirrors TUN filtering: each packet is allowed only when src→dst is permitted.
 func peerCanSend(rules *filter.RuleSet, from, to string) bool {
 	return rules.CanAccess(addr(from), addr(to))
@@ -21,8 +25,29 @@ func peersCanReach(rules *filter.RuleSet, from, to string) bool {
 	return peerCanSend(rules, from, to) && peerCanSend(rules, to, from)
 }
 
+func TestGroupAccessPolicy_DefaultAllowsIntraGroup(t *testing.T) {
+	p := GroupAccessPolicy{}
+	if !p.AllowsIntraGroup(10) {
+		t.Fatal("missing group id should default to allow intra-group")
+	}
+	if p.AllowsIntraGroup(0) {
+		t.Fatal("group id 0 must not allow intra-group")
+	}
+}
+
+func TestGroupAccessPolicy_ExplicitDeny(t *testing.T) {
+	p := groupPolicy(GroupAccess{ID: 10, AllowIntraGroup: false})
+	if p.AllowsIntraGroup(10) {
+		t.Fatal("group 10 should deny intra-group")
+	}
+	if !p.AllowsIntraGroup(20) {
+		t.Fatal("other groups should still default to allow")
+	}
+}
+
 func TestGroupsCanAccess(t *testing.T) {
 	links := []GroupLinkPair{{FromGroupID: 2, ToGroupID: 3, Bidirectional: true}}
+	grp := GroupAccessPolicy{}
 
 	tests := []struct {
 		name string
@@ -39,10 +64,17 @@ func TestGroupsCanAccess(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := GroupsCanAccess(tc.a, tc.b, links); got != tc.want {
+			if got := GroupsCanAccess(tc.a, tc.b, links, grp); got != tc.want {
 				t.Fatalf("GroupsCanAccess(%d, %d) = %v, want %v", tc.a, tc.b, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestGroupsCanAccess_SameGroupIntraDisabled(t *testing.T) {
+	grp := groupPolicy(GroupAccess{ID: 1, AllowIntraGroup: false})
+	if GroupsCanAccess(1, 1, nil, grp) {
+		t.Fatal("same group with intra disabled must not connect")
 	}
 }
 
@@ -52,7 +84,7 @@ func TestBuildAccessRules_SameGroupInterconnect(t *testing.T) {
 		{ID: 2, WGIP: "100.127.0.3", GroupID: 10, Enabled: true},
 		{ID: 3, WGIP: "100.127.0.4", GroupID: 10, Enabled: true},
 	}
-	rules, err := BuildAccessRules(peers, nil)
+	rules, err := BuildAccessRules(peers, nil, GroupAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,13 +101,64 @@ func TestBuildAccessRules_SameGroupInterconnect(t *testing.T) {
 	}
 }
 
+func TestBuildAccessRules_SameGroupIntraDisabled(t *testing.T) {
+	peers := []PeerEndpoint{
+		{ID: 1, WGIP: "100.127.0.2", GroupID: 10, Enabled: true},
+		{ID: 2, WGIP: "100.127.0.3", GroupID: 10, Enabled: true},
+		{ID: 3, WGIP: "100.127.0.4", GroupID: 20, Enabled: true},
+	}
+	grp := groupPolicy(GroupAccess{ID: 10, AllowIntraGroup: false})
+
+	rules, err := BuildAccessRules(peers, nil, grp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	isolated := [][2]string{
+		{"100.127.0.2", "100.127.0.3"},
+		{"100.127.0.3", "100.127.0.2"},
+	}
+	for _, p := range isolated {
+		if peersCanReach(rules, p[0], p[1]) {
+			t.Fatalf("intra disabled: %s and %s must be isolated", p[0], p[1])
+		}
+	}
+	if peerCanSend(rules, "100.127.0.2", "100.127.0.4") || peerCanSend(rules, "100.127.0.4", "100.127.0.2") {
+		t.Fatal("cross-group without link should remain isolated both ways")
+	}
+}
+
+func TestBuildAccessRules_MixedIntraGroupSettings(t *testing.T) {
+	peers := []PeerEndpoint{
+		{ID: 1, WGIP: "100.127.0.2", GroupID: 10, Enabled: true},
+		{ID: 2, WGIP: "100.127.0.3", GroupID: 10, Enabled: true},
+		{ID: 3, WGIP: "100.127.0.4", GroupID: 20, Enabled: true},
+		{ID: 4, WGIP: "100.127.0.5", GroupID: 20, Enabled: true},
+	}
+	grp := groupPolicy(
+		GroupAccess{ID: 10, AllowIntraGroup: false},
+		GroupAccess{ID: 20, AllowIntraGroup: true},
+	)
+	rules, err := BuildAccessRules(peers, nil, grp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if peersCanReach(rules, "100.127.0.2", "100.127.0.3") {
+		t.Fatal("group 10 intra disabled")
+	}
+	if !peersCanReach(rules, "100.127.0.4", "100.127.0.5") {
+		t.Fatal("group 20 intra enabled")
+	}
+}
+
 func TestBuildAccessRules_CrossGroupIsolation(t *testing.T) {
 	peers := []PeerEndpoint{
 		{ID: 1, WGIP: "100.127.0.2", GroupID: 1, Enabled: true},
 		{ID: 2, WGIP: "100.127.0.3", GroupID: 2, Enabled: true},
 		{ID: 3, WGIP: "100.127.0.4", GroupID: 3, Enabled: true},
 	}
-	rules, err := BuildAccessRules(peers, nil)
+	rules, err := BuildAccessRules(peers, nil, GroupAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +183,7 @@ func TestBuildAccessRules_LinkedGroupsInterconnect(t *testing.T) {
 	}
 	links := []GroupLinkPair{{FromGroupID: 2, ToGroupID: 3, Bidirectional: true}}
 
-	rules, err := BuildAccessRules(peers, links)
+	rules, err := BuildAccessRules(peers, links, GroupAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,6 +199,31 @@ func TestBuildAccessRules_LinkedGroupsInterconnect(t *testing.T) {
 	}
 }
 
+func TestBuildAccessRules_LinkedGroupsUnaffectedByIntraDisabled(t *testing.T) {
+	peers := []PeerEndpoint{
+		{ID: 1, WGIP: "100.127.0.2", GroupID: 1, Enabled: true},
+		{ID: 2, WGIP: "100.127.0.3", GroupID: 1, Enabled: true},
+		{ID: 3, WGIP: "100.127.0.4", GroupID: 2, Enabled: true},
+	}
+	links := []GroupLinkPair{{FromGroupID: 1, ToGroupID: 2, Bidirectional: true}}
+	grp := groupPolicy(GroupAccess{ID: 1, AllowIntraGroup: false})
+
+	rules, err := BuildAccessRules(peers, links, grp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if peersCanReach(rules, "100.127.0.2", "100.127.0.3") {
+		t.Fatal("intra-group must stay disabled")
+	}
+	if !peersCanReach(rules, "100.127.0.2", "100.127.0.4") {
+		t.Fatal("cross-group bidirectional link must still work")
+	}
+	if !peersCanReach(rules, "100.127.0.3", "100.127.0.4") {
+		t.Fatal("cross-group bidirectional link must still work")
+	}
+}
+
 func TestBuildAccessRules_LinkIsNotTransitive(t *testing.T) {
 	peers := []PeerEndpoint{
 		{ID: 1, WGIP: "100.127.0.2", GroupID: 1, Enabled: true},
@@ -127,7 +235,7 @@ func TestBuildAccessRules_LinkIsNotTransitive(t *testing.T) {
 		{FromGroupID: 2, ToGroupID: 3, Bidirectional: true},
 	}
 
-	rules, err := BuildAccessRules(peers, links)
+	rules, err := BuildAccessRules(peers, links, GroupAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,16 +256,14 @@ func TestBuildAccessRules_DisabledPeerSkipped(t *testing.T) {
 		{ID: 1, WGIP: "100.127.0.2", GroupID: 1, Enabled: true},
 		{ID: 2, WGIP: "100.127.0.3", GroupID: 2, Enabled: false},
 	}
-	rules, err := BuildAccessRules(peers, nil)
+	rules, err := BuildAccessRules(peers, nil, GroupAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Active peer does not block toward disabled peer (disabled peer is omitted from policy).
 	if !rules.CanAccess(addr("100.127.0.2"), addr("100.127.0.3")) {
 		t.Fatal("enabled peer should not block disabled peer destination")
 	}
-	// Disabled peer has no rule entry; filter treats missing rule as allow on that side.
 	if !rules.CanAccess(addr("100.127.0.3"), addr("100.127.0.2")) {
 		t.Fatal("disabled peer has no outbound block list")
 	}
@@ -168,7 +274,7 @@ func TestBuildAccessRules_NoGroupPeerSkipped(t *testing.T) {
 		{ID: 1, WGIP: "100.127.0.2", GroupID: 1, Enabled: true},
 		{ID: 2, WGIP: "100.127.0.3", GroupID: 0, Enabled: true},
 	}
-	rules, err := BuildAccessRules(peers, nil)
+	rules, err := BuildAccessRules(peers, nil, GroupAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +299,7 @@ func TestBuildAccessRules_MultipleLinks(t *testing.T) {
 		{FromGroupID: 3, ToGroupID: 4, Bidirectional: true},
 	}
 
-	rules, err := BuildAccessRules(peers, links)
+	rules, err := BuildAccessRules(peers, links, GroupAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +322,6 @@ func TestBuildAccessRules_MultipleLinks(t *testing.T) {
 	}
 }
 
-// TestBuildAccessRules is the original scenario: groups 2↔3 linked, group 1 isolated.
 func TestBuildAccessRules(t *testing.T) {
 	peers := []PeerEndpoint{
 		{ID: 1, WGIP: "100.127.0.2", GroupID: 1, Enabled: true},
@@ -225,7 +330,7 @@ func TestBuildAccessRules(t *testing.T) {
 	}
 	links := []GroupLinkPair{{FromGroupID: 2, ToGroupID: 3, Bidirectional: true}}
 
-	rules, err := BuildAccessRules(peers, links)
+	rules, err := BuildAccessRules(peers, links, GroupAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,19 +347,27 @@ func TestBuildAccessRules(t *testing.T) {
 }
 
 func TestGroupsCanAccessSameGroup(t *testing.T) {
-	if !GroupsCanAccess(1, 1, nil) {
-		t.Fatal("same group should always connect")
+	if !GroupsCanAccess(1, 1, nil, GroupAccessPolicy{}) {
+		t.Fatal("same group should connect by default")
 	}
 }
 
 func TestLinkAllowsInit_Unidirectional(t *testing.T) {
 	links := []GroupLinkPair{{FromGroupID: 1, ToGroupID: 2, Bidirectional: false}}
+	grp := GroupAccessPolicy{}
 
-	if !LinkAllowsInit(1, 2, links) {
+	if !LinkAllowsInit(1, 2, links, grp) {
 		t.Fatal("source group should reach target")
 	}
-	if LinkAllowsInit(2, 1, links) {
+	if LinkAllowsInit(2, 1, links, grp) {
 		t.Fatal("reverse direction must be blocked")
+	}
+}
+
+func TestLinkAllowsInit_SameGroupIntraDisabled(t *testing.T) {
+	grp := groupPolicy(GroupAccess{ID: 5, AllowIntraGroup: false})
+	if LinkAllowsInit(5, 5, nil, grp) {
+		t.Fatal("same group with intra disabled must not allow init")
 	}
 }
 
@@ -265,11 +378,10 @@ func TestBuildAccessRules_UnidirectionalSNATPath(t *testing.T) {
 	}
 	links := []GroupLinkPair{{FromGroupID: 1, ToGroupID: 2, Bidirectional: false}}
 
-	policy, err := BuildAccessPolicy(peers, links)
+	policy, err := BuildAccessPolicy(peers, links, GroupAccessPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Raw WG IP path is not blocked; hub SNAT handles client → service.
 	if !peerCanSend(policy.Rules, "100.127.0.2", "100.127.0.3") {
 		t.Fatal("client should not be blocked toward service (SNAT applies on hub TUN)")
 	}
@@ -278,3 +390,27 @@ func TestBuildAccessRules_UnidirectionalSNATPath(t *testing.T) {
 	}
 }
 
+func TestBuildAccessRules_UnidirectionalSNAT_IntraDisabledDoesNotBlockCrossGroup(t *testing.T) {
+	peers := []PeerEndpoint{
+		{ID: 1, WGIP: "100.127.0.2", GroupID: 1, Enabled: true},
+		{ID: 2, WGIP: "100.127.0.3", GroupID: 1, Enabled: true},
+		{ID: 3, WGIP: "100.127.0.4", GroupID: 2, Enabled: true},
+	}
+	links := []GroupLinkPair{{FromGroupID: 1, ToGroupID: 2, Bidirectional: false}}
+	grp := groupPolicy(GroupAccess{ID: 1, AllowIntraGroup: false})
+
+	policy, err := BuildAccessPolicy(peers, links, grp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if peerCanSend(policy.Rules, "100.127.0.2", "100.127.0.3") {
+		t.Fatal("same group intra disabled")
+	}
+	if !peerCanSend(policy.Rules, "100.127.0.2", "100.127.0.4") {
+		t.Fatal("uni link SNAT path must remain open")
+	}
+	if peerCanSend(policy.Rules, "100.127.0.4", "100.127.0.2") {
+		t.Fatal("reverse uni direction blocked")
+	}
+}

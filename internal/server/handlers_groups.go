@@ -60,9 +60,10 @@ func (s *Server) handleCreateGroup(c *gin.Context) {
 }
 
 type updateGroupRequest struct {
-	Name *string  `json:"name"`
-	PosX *float64 `json:"pos_x"`
-	PosY *float64 `json:"pos_y"`
+	Name              *string  `json:"name"`
+	PosX              *float64 `json:"pos_x"`
+	PosY              *float64 `json:"pos_y"`
+	AllowIntraGroup   *bool    `json:"allow_intra_group"`
 }
 
 func (s *Server) handleUpdateGroup(c *gin.Context) {
@@ -95,13 +96,17 @@ func (s *Server) handleUpdateGroup(c *gin.Context) {
 	if req.PosY != nil {
 		g.PosY = *req.PosY
 	}
-	if req.PosX != nil || req.PosY != nil {
+	if req.AllowIntraGroup != nil {
+		g.AllowIntraGroup = *req.AllowIntraGroup
+	}
+	needsSave := req.PosX != nil || req.PosY != nil || req.AllowIntraGroup != nil
+	if needsSave {
 		if err := s.Store.UpdateGroup(g); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		s.SyncAccessFilter()
 	}
-	s.SyncAccessFilter()
 	resp, _ := toGroupResponse(s.Store, *g)
 	c.JSON(http.StatusOK, resp)
 }
@@ -144,12 +149,13 @@ func (s *Server) handleGroupGraph(c *gin.Context) {
 	for _, g := range groups {
 		count, _ := s.Store.CountPeersInGroup(g.ID)
 		groupOut = append(groupOut, gin.H{
-			"id":           g.ID,
-			"name":         g.Name,
-			"pos_x":        g.PosX,
-			"pos_y":        g.PosY,
-			"member_count": count,
-			"peers":        groupPeers[g.ID],
+			"id":                g.ID,
+			"name":              g.Name,
+			"pos_x":             g.PosX,
+			"pos_y":             g.PosY,
+			"allow_intra_group": g.AllowIntraGroup,
+			"member_count":      count,
+			"peers":             groupPeers[g.ID],
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{

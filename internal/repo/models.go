@@ -39,10 +39,11 @@ type Peer struct {
 }
 
 type PeerGroup struct {
-	ID   uint    `gorm:"primaryKey" json:"id"`
-	Name string  `gorm:"uniqueIndex;not null" json:"name"`
-	PosX float64 `json:"pos_x"`
-	PosY float64 `json:"pos_y"`
+	ID              uint    `gorm:"primaryKey" json:"id"`
+	Name            string  `gorm:"uniqueIndex;not null" json:"name"`
+	PosX            float64 `json:"pos_x"`
+	PosY            float64 `json:"pos_y"`
+	AllowIntraGroup bool    `gorm:"not null;default:true" json:"allow_intra_group"`
 }
 
 // GroupLink connects two groups. Bidirectional links use FromGroupID < ToGroupID.

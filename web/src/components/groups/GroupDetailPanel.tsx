@@ -2,6 +2,8 @@ import {
   Button,
   Field,
   Input,
+  Subtitle1,
+  Switch,
   Text,
   makeStyles,
   tokens,
@@ -36,10 +38,26 @@ const useStyles = makeStyles({
   header: {
     flexShrink: 0,
     display: 'flex',
-    alignItems: 'center',
-    gap: '10px',
+    flexDirection: 'column',
+    gap: '4px',
     padding: '14px 16px',
     borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
+  },
+  headerRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+  },
+  groupName: {
+    flex: 1,
+    minWidth: 0,
+    margin: 0,
+  },
+  intraRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '12px',
   },
   peerList: {
     minHeight: 0,
@@ -86,6 +104,7 @@ type GroupDetailPanelProps = {
   onNewPeerNameChange: (value: string) => void;
   onCreatePeer: () => void;
   onRenameGroup: (name: string) => Promise<void>;
+  onAllowIntraGroupChange: (allow: boolean) => Promise<void>;
   onRenamePeer: (peerId: number, name: string) => Promise<void>;
   onMovePeer: (peerId: number, groupId: number) => Promise<void>;
   onShowConfig: (peerId: number) => void;
@@ -118,6 +137,7 @@ export function GroupDetailPanel({
   onNewPeerNameChange,
   onCreatePeer,
   onRenameGroup,
+  onAllowIntraGroupChange,
   onRenamePeer,
   onMovePeer,
   onShowConfig,
@@ -161,15 +181,27 @@ export function GroupDetailPanel({
   return (
     <aside className={styles.panel}>
       <div className={styles.header}>
-        <Text weight="semibold" block style={{ flex: 1 }}>{group.name}</Text>
-        <Button
-          size="small"
-          appearance="subtle"
-          icon={<EditRegular />}
-          aria-label="Rename group"
-          onClick={openGroupRename}
-        />
-        <Text size={200} className={mutedClassName}>{peers.length} peer(s)</Text>
+        <div className={styles.headerRow}>
+          <Subtitle1 block truncate className={styles.groupName}>
+            {group.name}
+          </Subtitle1>
+          <Button
+            size="small"
+            appearance="subtle"
+            icon={<EditRegular />}
+            aria-label="Rename group"
+            onClick={openGroupRename}
+          />
+          <Text size={200} className={mutedClassName}>{peers.length} peer(s)</Text>
+        </div>
+        <div className={styles.intraRow}>
+          <Text size={300}>Same-group interconnect</Text>
+          <Switch
+            checked={group.allow_intra_group !== false}
+            aria-label="Allow peers in this group to reach each other"
+            onChange={(_, data) => void onAllowIntraGroupChange(Boolean(data.checked))}
+          />
+        </div>
       </div>
       <div className={styles.peerList}>
         {peers.length === 0 ? (

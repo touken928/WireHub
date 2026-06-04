@@ -16,6 +16,40 @@ type PeerEndpoint struct {
 	Enabled bool
 }
 
+// GroupAccess describes per-group ACL options used when building access policy.
+type GroupAccess struct {
+	ID              uint
+	AllowIntraGroup bool
+}
+
+// GroupAccessPolicy holds group-level ACL settings. Missing group IDs default to allow intra-group traffic.
+type GroupAccessPolicy struct {
+	byID map[uint]bool
+}
+
+// NewGroupAccessPolicy builds a lookup table from repo groups.
+func NewGroupAccessPolicy(groups []GroupAccess) GroupAccessPolicy {
+	byID := make(map[uint]bool, len(groups))
+	for _, g := range groups {
+		byID[g.ID] = g.AllowIntraGroup
+	}
+	return GroupAccessPolicy{byID: byID}
+}
+
+// AllowsIntraGroup reports whether peers in the same group may reach each other directly.
+func (p GroupAccessPolicy) AllowsIntraGroup(groupID uint) bool {
+	if groupID == 0 {
+		return false
+	}
+	if p.byID == nil {
+		return true
+	}
+	if allow, ok := p.byID[groupID]; ok {
+		return allow
+	}
+	return true
+}
+
 // GroupLinkPair is a directed or bidirectional link between two peer groups.
 type GroupLinkPair struct {
 	FromGroupID   uint
@@ -43,12 +77,12 @@ func findLinkBetween(a, b uint, links []GroupLinkPair) *GroupLinkPair {
 }
 
 // LinkAllowsInit reports whether traffic may flow from fromGroup to toGroup (policy).
-func LinkAllowsInit(fromGroup, toGroup uint, links []GroupLinkPair) bool {
+func LinkAllowsInit(fromGroup, toGroup uint, links []GroupLinkPair, groups GroupAccessPolicy) bool {
 	if fromGroup == 0 || toGroup == 0 {
 		return false
 	}
 	if fromGroup == toGroup {
-		return true
+		return groups.AllowsIntraGroup(fromGroup)
 	}
 	for _, l := range links {
 		if l.Bidirectional {
@@ -66,17 +100,17 @@ func LinkAllowsInit(fromGroup, toGroup uint, links []GroupLinkPair) bool {
 }
 
 // GroupsCanAccess is true when any access (either direction) is allowed between groups.
-func GroupsCanAccess(a, b uint, links []GroupLinkPair) bool {
-	return LinkAllowsInit(a, b, links) || LinkAllowsInit(b, a, links)
+func GroupsCanAccess(a, b uint, links []GroupLinkPair, groups GroupAccessPolicy) bool {
+	return LinkAllowsInit(a, b, links, groups) || LinkAllowsInit(b, a, links, groups)
 }
 
-// allowDirectPeerIP is true for same-group or bidirectional cross-group (direct WG IP).
-func allowDirectPeerIP(p, q PeerEndpoint, links []GroupLinkPair) bool {
+// allowDirectPeerIP is true for same-group (when allowed) or bidirectional cross-group (direct WG IP).
+func allowDirectPeerIP(p, q PeerEndpoint, links []GroupLinkPair, groups GroupAccessPolicy) bool {
 	if p.GroupID == 0 || q.GroupID == 0 {
 		return false
 	}
 	if p.GroupID == q.GroupID {
-		return true
+		return groups.AllowsIntraGroup(p.GroupID)
 	}
 	l := findLinkBetween(p.GroupID, q.GroupID, links)
 	if l == nil {
@@ -86,18 +120,18 @@ func allowDirectPeerIP(p, q PeerEndpoint, links []GroupLinkPair) bool {
 }
 
 // needsTransparentRelay is true for unidirectional cross-group traffic (hub TUN SNAT).
-func needsTransparentRelay(p, q PeerEndpoint, links []GroupLinkPair) bool {
+func needsTransparentRelay(p, q PeerEndpoint, links []GroupLinkPair, groups GroupAccessPolicy) bool {
 	if p.GroupID == 0 || q.GroupID == 0 || p.GroupID == q.GroupID {
 		return false
 	}
-	if !LinkAllowsInit(p.GroupID, q.GroupID, links) {
+	if !LinkAllowsInit(p.GroupID, q.GroupID, links, groups) {
 		return false
 	}
-	return !allowDirectPeerIP(p, q, links)
+	return !allowDirectPeerIP(p, q, links, groups)
 }
 
 // BuildAccessPolicy configures ACL blocking and hub SNAT for unidirectional group links.
-func BuildAccessPolicy(peers []PeerEndpoint, links []GroupLinkPair) (*filter.AccessPolicy, error) {
+func BuildAccessPolicy(peers []PeerEndpoint, links []GroupLinkPair, groups GroupAccessPolicy) (*filter.AccessPolicy, error) {
 	rules := filter.NewRuleSet()
 	transparent := BuildTransparentTable(peers, links)
 
@@ -118,13 +152,13 @@ func BuildAccessPolicy(peers []PeerEndpoint, links []GroupLinkPair) (*filter.Acc
 			if err != nil {
 				continue
 			}
-			if allowDirectPeerIP(p, q, links) {
+			if allowDirectPeerIP(p, q, links, groups) {
 				continue
 			}
-			if needsTransparentRelay(p, q, links) {
+			if needsTransparentRelay(p, q, links, groups) {
 				continue // transparent relay handles allowed A→B
 			}
-			if LinkAllowsInit(p.GroupID, q.GroupID, links) {
+			if LinkAllowsInit(p.GroupID, q.GroupID, links, groups) {
 				continue
 			}
 			blocked = append(blocked, toIP)
@@ -135,8 +169,8 @@ func BuildAccessPolicy(peers []PeerEndpoint, links []GroupLinkPair) (*filter.Acc
 }
 
 // BuildAccessRules is kept for tests that only need the block list.
-func BuildAccessRules(peers []PeerEndpoint, links []GroupLinkPair) (*filter.RuleSet, error) {
-	p, err := BuildAccessPolicy(peers, links)
+func BuildAccessRules(peers []PeerEndpoint, links []GroupLinkPair, groups GroupAccessPolicy) (*filter.RuleSet, error) {
+	p, err := BuildAccessPolicy(peers, links, groups)
 	if err != nil {
 		return nil, err
 	}

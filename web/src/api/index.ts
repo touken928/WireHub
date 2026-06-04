@@ -81,7 +81,7 @@ export const api = {
   listGroups: () => request<PeerGroup[]>('/groups'),
   createGroup: (body: { name: string; pos_x?: number; pos_y?: number }) =>
     request<PeerGroup>('/groups', { method: 'POST', body: JSON.stringify(body) }),
-  updateGroup: (id: number, body: { name?: string; pos_x?: number; pos_y?: number }) =>
+  updateGroup: (id: number, body: { name?: string; pos_x?: number; pos_y?: number; allow_intra_group?: boolean }) =>
     request<PeerGroup>(`/groups/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   deleteGroup: (id: number) =>
     request<{ ok: boolean }>(`/groups/${id}`, { method: 'DELETE' }),
