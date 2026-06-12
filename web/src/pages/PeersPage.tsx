@@ -12,7 +12,7 @@ import { AddRegular, DismissRegular, SearchRegular } from '@fluentui/react-icons
 import { useEffect, useMemo, useState } from 'react';
 import { useStatus } from '@/app/StatusProvider';
 import { api } from '@/api';
-import type { PeerGroup, PeerStatus } from '@/api/types';
+import type { PeerGroup } from '@/api/types';
 import { ConfigDialog } from '@/components/peers/ConfigDialog';
 import { CreatePeerDialog } from '@/components/peers/CreatePeerDialog';
 import { PeerMemberCard, type PeerMemberCardGroup } from '@/components/peers/PeerMemberCard';
@@ -26,6 +26,7 @@ import {
   hasActivePeerFilters,
 } from '@/pages/peers/filterPeers';
 import { usePageLayoutStyles } from '@/styles/pageLayout';
+import { statusToMemberCardPeer } from '@/lib/peerAdapter';
 
 const useStyles = makeStyles({
   toolbar: {
@@ -64,22 +65,6 @@ const useStyles = makeStyles({
     border: `1px dashed ${tokens.colorNeutralStroke2}`,
   },
 });
-
-function toMemberCardPeer(peer: PeerStatus) {
-  return {
-    id: peer.id,
-    name: peer.name,
-    fqdn: peer.fqdn,
-    wg_ip: peer.wg_ip,
-    group_id: peer.group_id,
-    group_name: peer.group_name,
-    enabled: peer.enabled,
-    online: peer.online,
-    last_handshake: peer.last_handshake,
-    rx_bytes: peer.rx_bytes,
-    tx_bytes: peer.tx_bytes,
-  };
-}
 
 export default function PeersPage() {
   const styles = useStyles();
@@ -252,7 +237,7 @@ export default function PeersPage() {
                     <PeerMemberCard
                       key={peer.id}
                       layout="row"
-                      peer={toMemberCardPeer(peer)}
+                      peer={statusToMemberCardPeer(peer)}
                       groups={groupOptions}
                       showGroupTag
                       onRename={async (id, name) => { await api.updatePeer(id, { name }); }}

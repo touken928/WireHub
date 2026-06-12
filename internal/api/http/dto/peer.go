@@ -28,9 +28,12 @@ func EnrichPeerResponse(app *service.App, p repo.Peer) PeerResponse {
 }
 
 func ToPeerResponses(app *service.App, peers []repo.Peer) []PeerResponse {
+	groupNames := app.GetGroupNameMap()
 	out := make([]PeerResponse, 0, len(peers))
 	for _, p := range peers {
-		out = append(out, EnrichPeerResponse(app, p))
+		resp := ToPeerResponse(p)
+		resp.GroupName = groupNames[p.GroupID]
+		out = append(out, resp)
 	}
 	return out
 }

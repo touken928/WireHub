@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -117,35 +118,32 @@ func (s *Store) UpsertGroupLink(fromID, toID uint, bidirectional bool) error {
 	})
 }
 
-// linkConnectsGroups is true when l is any link (directed or bidirectional) between a and b.
-func linkConnectsGroups(l *GroupLink, a, b uint) bool {
-	if a == b {
-		return false
-	}
-	return (l.FromGroupID == a && l.ToGroupID == b) || (l.FromGroupID == b && l.ToGroupID == a)
-}
-
 // FindGroupLink returns the single link between two groups, if any.
 func (s *Store) FindGroupLink(a, b uint) (*GroupLink, error) {
-	var links []GroupLink
-	if err := s.db.Find(&links).Error; err != nil {
+	var link GroupLink
+	err := s.db.Where(
+		"(from_group_id = ? AND to_group_id = ?) OR (from_group_id = ? AND to_group_id = ?)",
+		a, b, b, a,
+	).First(&link).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
 		return nil, err
 	}
-	for i := range links {
-		l := &links[i]
-		if linkConnectsGroups(l, a, b) {
-			return l, nil
-		}
-	}
-	return nil, nil
+	return &link, nil
 }
 
 func (s *Store) HasGroupLink(fromID, toID uint) (bool, error) {
-	l, err := s.FindGroupLink(fromID, toID)
+	var count int64
+	err := s.db.Model(&GroupLink{}).Where(
+		"(from_group_id = ? AND to_group_id = ?) OR (from_group_id = ? AND to_group_id = ?)",
+		fromID, toID, toID, fromID,
+	).Count(&count).Error
 	if err != nil {
 		return false, err
 	}
-	return l != nil, nil
+	return count > 0, nil
 }
 
 func (s *Store) DeleteGroupLink(fromID, toID uint) error {
@@ -155,10 +153,20 @@ func (s *Store) DeleteGroupLink(fromID, toID uint) error {
 	).Delete(&GroupLink{}).Error
 }
 
-func (s *Store) CountPeersInGroup(groupID uint) (int64, error) {
-	var count int64
-	err := s.db.Model(&Peer{}).Where("group_id = ?", groupID).Count(&count).Error
-	return count, err
+func (s *Store) CountPeersByGroup() (map[uint]int64, error) {
+	type row struct {
+		GroupID uint
+		Count   int64
+	}
+	var rows []row
+	if err := s.db.Model(&Peer{}).Select("group_id, count(*) as count").Group("group_id").Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[uint]int64, len(rows))
+	for _, r := range rows {
+		out[r.GroupID] = r.Count
+	}
+	return out, nil
 }
 
 func (s *Store) MigrateGroups() error {

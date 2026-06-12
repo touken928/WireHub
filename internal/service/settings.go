@@ -4,7 +4,6 @@ import (
 	"io"
 
 	"github.com/touken928/wirehub/internal/repo"
-	"github.com/touken928/wirehub/internal/vpn/runtime"
 )
 
 // SettingsView is the settings page payload.
@@ -83,8 +82,8 @@ func (a *App) UpdateMutableSettings(mtu, statusInterval int, upstream []string) 
 // SetDNSUpstream updates upstream resolvers on the live DNS server when the stack is running.
 func (h *Hub) SetDNSUpstream(upstream []string) {
 	nc := h.NetworkRuntime()
-	if s, ok := nc.(*runtime.Stack); ok && s != nil {
-		s.SetDNSUpstream(upstream)
+	if nc != nil {
+		nc.SetDNSUpstream(upstream)
 	}
 }
 

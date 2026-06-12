@@ -6,7 +6,7 @@ import (
 	"github.com/touken928/wirehub/internal/repo"
 )
 
-var errAllowedGroupNotFound = errors.New("allowed group not found")
+var ErrAllowedGroupNotFound = errors.New("allowed group not found")
 
 // ListMapDetails returns all service maps with allowed groups.
 func (a *App) ListMapDetails() ([]repo.MapDetail, error) {
@@ -17,7 +17,7 @@ func (a *App) ListMapDetails() ([]repo.MapDetail, error) {
 func (a *App) CreateServiceMap(in repo.MapInput) (*repo.MapDetail, error) {
 	for _, gid := range in.AllowedGroups {
 		if _, err := a.Store.GetGroup(gid); err != nil {
-			return nil, errAllowedGroupNotFound
+			return nil, ErrAllowedGroupNotFound
 		}
 	}
 	detail, err := a.Store.CreateServiceMap(in)
@@ -34,7 +34,7 @@ func (a *App) CreateServiceMap(in repo.MapInput) (*repo.MapDetail, error) {
 func (a *App) UpdateServiceMap(id uint, in repo.MapInput) (*repo.MapDetail, error) {
 	for _, gid := range in.AllowedGroups {
 		if _, err := a.Store.GetGroup(gid); err != nil {
-			return nil, errAllowedGroupNotFound
+			return nil, ErrAllowedGroupNotFound
 		}
 	}
 	detail, err := a.Store.UpdateServiceMap(id, in)

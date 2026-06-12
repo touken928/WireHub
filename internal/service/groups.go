@@ -12,29 +12,34 @@ type GroupView struct {
 	MemberCount int64
 }
 
-func (a *App) groupView(g repo.PeerGroup) (GroupView, error) {
-	count, err := a.Store.CountPeersInGroup(g.ID)
-	if err != nil {
-		return GroupView{}, err
-	}
-	return GroupView{PeerGroup: g, MemberCount: count}, nil
-}
-
 // ListGroups returns all groups with member counts.
 func (a *App) ListGroups() ([]GroupView, error) {
 	groups, err := a.Store.ListGroups()
 	if err != nil {
 		return nil, err
 	}
+	counts, err := a.Store.CountPeersByGroup()
+	if err != nil {
+		return nil, err
+	}
 	out := make([]GroupView, 0, len(groups))
 	for _, g := range groups {
-		v, err := a.groupView(g)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, v)
+		out = append(out, GroupView{PeerGroup: g, MemberCount: counts[g.ID]})
 	}
 	return out, nil
+}
+
+// GetGroupNameMap returns all group IDs to their display name.
+func (a *App) GetGroupNameMap() map[uint]string {
+	groups, err := a.Store.ListGroups()
+	if err != nil {
+		return nil
+	}
+	out := make(map[uint]string, len(groups))
+	for _, g := range groups {
+		out[g.ID] = g.Name
+	}
+	return out
 }
 
 // CreateGroup adds a new peer group.
@@ -63,11 +68,6 @@ func (a *App) DeleteGroup(id uint) error {
 		return err
 	}
 	return a.SyncAccessFilter()
-}
-
-// CountPeersInGroup returns how many peers belong to a group.
-func (a *App) CountPeersInGroup(id uint) (int64, error) {
-	return a.Store.CountPeersInGroup(id)
 }
 
 // GroupGraphData holds groups, links, and peers for the topology UI.

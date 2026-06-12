@@ -44,7 +44,7 @@ func CreatePeer(s *Server, c *gin.Context) {
 		status := http.StatusInternalServerError
 		if errors.Is(err, service.ErrNetworkUnavailable) {
 			status = http.StatusServiceUnavailable
-		} else if err.Error() == "group not found" || err.Error() == "hostname already exists" {
+		} else if errors.Is(err, service.ErrGroupNotFound) || errors.Is(err, service.ErrHostnameExists) {
 			status = http.StatusBadRequest
 		}
 		c.JSON(status, gin.H{"error": err.Error()})
@@ -69,27 +69,10 @@ func UpdatePeer(s *Server, c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name or group_id is required"})
 		return
 	}
-	var peer *repo.Peer
-	if req.Name != nil {
-		peer, err = s.App.RenamePeer(id, *req.Name)
-		if err != nil {
-			writePeerErr(c, err)
-			return
-		}
-	}
-	if req.GroupID != nil {
-		peer, err = s.App.UpdatePeerGroup(id, *req.GroupID)
-		if err != nil {
-			writePeerErr(c, err)
-			return
-		}
-	}
-	if peer == nil {
-		peer, err = s.App.GetPeer(id)
-		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "peer not found"})
-			return
-		}
+	peer, err := s.App.UpdatePeerFields(id, req.Name, req.GroupID)
+	if err != nil {
+		writePeerErr(c, err)
+		return
 	}
 	s.App.NotifyStatus()
 	c.JSON(http.StatusOK, dto.EnrichPeerResponse(s.App, *peer))
@@ -103,7 +86,7 @@ func DeletePeer(s *Server, c *gin.Context) {
 	}
 	if err := s.App.DeletePeer(id); err != nil {
 		status := http.StatusInternalServerError
-		if err.Error() == "peer not found" {
+		if errors.Is(err, service.ErrPeerNotFound) {
 			status = http.StatusNotFound
 		}
 		c.JSON(status, gin.H{"error": err.Error()})
@@ -137,7 +120,7 @@ func PeerConfig(s *Server, c *gin.Context) {
 	conf, err := s.App.ClientConfig(id)
 	if err != nil {
 		status := http.StatusInternalServerError
-		if err.Error() == "peer not found" {
+		if errors.Is(err, service.ErrPeerNotFound) {
 			status = http.StatusNotFound
 		} else if err.Error() == "server endpoint is not configured" {
 			status = http.StatusBadRequest
@@ -151,7 +134,7 @@ func PeerConfig(s *Server, c *gin.Context) {
 
 func writePeerErr(c *gin.Context, err error) {
 	status := http.StatusBadRequest
-	if err.Error() == "peer not found" {
+	if errors.Is(err, service.ErrPeerNotFound) {
 		status = http.StatusNotFound
 	} else if errors.Is(err, service.ErrNetworkUnavailable) {
 		status = http.StatusServiceUnavailable

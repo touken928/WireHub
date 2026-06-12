@@ -128,7 +128,7 @@ func GroupGraph(s *Server, c *gin.Context) {
 	}
 	groupOut := make([]gin.H, 0, len(data.Groups))
 	for _, g := range data.Groups {
-		count, _ := s.App.CountPeersInGroup(g.ID)
+		count := len(groupPeers[g.ID])
 		groupOut = append(groupOut, gin.H{
 			"id":                g.ID,
 			"name":              g.Name,

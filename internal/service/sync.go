@@ -24,24 +24,16 @@ func (a *App) loadSyncBundle() (runtime.SyncBundle, error) {
 	if err != nil {
 		return runtime.SyncBundle{}, err
 	}
-	mapPolicy, err := a.buildMapAccessPolicy()
-	if err != nil {
-		return runtime.SyncBundle{}, err
-	}
-	accessSpec, err := policy.BuildAccessPolicySpec(
-		peerEndpoints(peers),
-		groupLinkPairs(links),
-		policy.NewGroupAccessPolicy(groupAccessList(groups)),
-		mapPolicy,
-	)
-	if err != nil {
-		return runtime.SyncBundle{}, err
-	}
 	forwards, err := a.Store.ListPortForwards()
 	if err != nil {
 		return runtime.SyncBundle{}, err
 	}
 	mapDetails, err := a.Store.ListMapDetails()
+	if err != nil {
+		return runtime.SyncBundle{}, err
+	}
+
+	accessSpec, err := a.buildAccessPolicySpecFrom(peers, groupLinkPairs(links), groupAccessList(groups))
 	if err != nil {
 		return runtime.SyncBundle{}, err
 	}

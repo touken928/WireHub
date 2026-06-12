@@ -1,11 +1,20 @@
 import { API_BASE } from '@/constants';
 import { clearToken, getToken } from '@/api/auth';
 
+async function fetchSetupConfigured(): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE}/setup/status`);
+    if (!res.ok) return true;
+    const data = (await res.json()) as { configured?: boolean };
+    return data.configured !== false;
+  } catch {
+    return true;
+  }
+}
+
 async function redirectOnUnauthorized() {
-  const setup = await fetch(`${API_BASE}/setup/status`)
-    .then((r) => r.json())
-    .catch(() => ({ configured: true }));
-  window.location.href = setup.configured ? '/login' : '/setup';
+  const configured = await fetchSetupConfigured();
+  window.location.href = configured ? '/login' : '/setup';
 }
 
 export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -54,7 +63,7 @@ export async function requestBlob(path: string): Promise<Blob> {
 
   if (res.status === 401) {
     clearToken();
-    window.location.href = '/login';
+    await redirectOnUnauthorized();
     throw new Error('Unauthorized');
   }
 

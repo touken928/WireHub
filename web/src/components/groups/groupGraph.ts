@@ -7,7 +7,7 @@ import {
 } from '@/components/groups/groupLayout';
 import type { GroupLinkEdgeData, GroupNodeData } from '@/components/groups/types';
 
-const defaultEdgeOptions = {
+export const defaultEdgeOptions = {
   deletable: true,
   selectable: true,
   interactionWidth: 24,
@@ -89,13 +89,6 @@ export function connectionLinkEnds(
     return { from, to };
   }
   return { from: src, to: tgt };
-}
-
-/** True when edge policy direction matches React Flow source → target (uni links). */
-export function edgeMatchesPolicyDirection(edge: Edge): boolean {
-  const data = edge.data as GroupLinkEdgeData | undefined;
-  if (!data || data.bidirectional) return true;
-  return edge.source === String(data.fromGroupId) && edge.target === String(data.toGroupId);
 }
 
 export function graphToFlow(

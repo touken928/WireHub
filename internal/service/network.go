@@ -13,6 +13,7 @@ type NetworkRuntime interface {
 	SyncPortForwards() error
 	SyncMaps() error
 	HubListenPort() int
+	SetDNSUpstream(upstream []string)
 }
 
 // Dataplane is the live VPN data plane (alias of runtime.Dataplane).

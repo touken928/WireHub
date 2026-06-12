@@ -28,6 +28,7 @@ import type { GroupNodeData, LinkDrawMode } from '@/components/groups/types';
 import {
   appendGroupEdge,
   connectionLinkEnds,
+  defaultEdgeOptions,
   hasGroupLink,
   linkEdgeId,
 } from '@/components/groups/groupGraph';
@@ -41,12 +42,6 @@ const nodeTypes: NodeTypes = {
 
 const edgeTypes: EdgeTypes = {
   groupLink: GroupLinkEdge,
-};
-
-const defaultEdgeOptions = {
-  deletable: true,
-  selectable: true,
-  interactionWidth: 24,
 };
 
 type GroupsCanvasProps = {

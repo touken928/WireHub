@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -90,7 +91,7 @@ func writeMapErr(c *gin.Context, err error) {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		return
 	}
-	if err.Error() == "allowed group not found" {
+	if errors.Is(err, service.ErrAllowedGroupNotFound) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

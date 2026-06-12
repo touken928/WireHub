@@ -1,29 +1,29 @@
 package service
 
 import (
-	"fmt"
+	"errors"
 
 	"github.com/touken928/wirehub/internal/domain/client"
-	"github.com/touken928/wirehub/internal/domain/peer"
+	domainpeer "github.com/touken928/wirehub/internal/domain/peer"
 	"github.com/touken928/wirehub/internal/repo"
 	"github.com/touken928/wirehub/internal/vpn/tunnel"
 )
 
 // CreatePeer provisions a peer in the database and on the live network stack when running.
 func (a *App) CreatePeer(name string, groupID uint) (*repo.Peer, error) {
-	slug, err := peer.ValidateHostname(name)
+	slug, err := domainpeer.ValidateHostname(name)
 	if err != nil {
 		return nil, err
 	}
 
 	if _, err := a.Store.GetGroup(groupID); err != nil {
-		return nil, fmt.Errorf("group not found")
+		return nil, ErrGroupNotFound
 	}
 
 	existing, _ := a.Store.ListPeers()
 	for _, p := range existing {
 		if p.Name == slug {
-			return nil, fmt.Errorf("hostname already exists")
+			return nil, ErrHostnameExists
 		}
 	}
 
@@ -76,63 +76,66 @@ func (a *App) CreatePeer(name string, groupID uint) (*repo.Peer, error) {
 	return peer, nil
 }
 
-// RenamePeer changes a peer hostname and refreshes authoritative DNS.
-func (a *App) RenamePeer(peerID uint, name string) (*repo.Peer, error) {
-	slug, err := peer.ValidateHostname(name)
-	if err != nil {
-		return nil, err
-	}
+// sentinel errors for peer operations
+var (
+	ErrPeerNotFound   = errors.New("peer not found")
+	ErrGroupNotFound  = errors.New("group not found")
+	ErrHostnameExists = errors.New("hostname already exists")
+)
 
-	peer, err := a.Store.GetPeer(peerID)
+// UpdatePeerFields atomically renames and/or moves a peer. Nil fields are left unchanged.
+func (a *App) UpdatePeerFields(id uint, name *string, groupID *uint) (*repo.Peer, error) {
+	peer, err := a.Store.GetPeer(id)
 	if err != nil {
-		return nil, fmt.Errorf("peer not found")
+		return nil, ErrPeerNotFound
 	}
-	if peer.Name == slug {
-		return peer, nil
-	}
-
-	existing, _ := a.Store.ListPeers()
-	for _, p := range existing {
-		if p.ID != peerID && p.Name == slug {
-			return nil, fmt.Errorf("hostname already exists")
+	if groupID != nil {
+		if _, err := a.Store.GetGroup(*groupID); err != nil {
+			return nil, ErrGroupNotFound
 		}
 	}
-
-	peer.Name = slug
-	peer.DNSName = slug
+	changed := false
+	if name != nil {
+		slug, err := domainpeer.ValidateHostname(*name)
+		if err != nil {
+			return nil, err
+		}
+		if peer.Name != slug {
+			existing, _ := a.Store.ListPeers()
+			for _, p := range existing {
+				if p.ID != id && p.Name == slug {
+					return nil, ErrHostnameExists
+				}
+			}
+			peer.Name = slug
+			peer.DNSName = slug
+			changed = true
+		}
+	}
+	if groupID != nil && peer.GroupID != *groupID {
+		peer.GroupID = *groupID
+		changed = true
+	}
+	if !changed {
+		return peer, nil
+	}
 	if err := a.Store.UpdatePeer(peer); err != nil {
 		return nil, err
 	}
-	if err := a.ensurePeerDNSRecord(peer); err != nil {
-		return nil, err
-	}
-	if err := a.syncDNSCatalog(); err != nil {
-		return nil, err
-	}
-	if err := a.SyncAccessFilter(); err != nil {
-		return nil, err
-	}
-	return peer, nil
-}
-
-// UpdatePeerGroup moves a peer to another group and refreshes the network stack.
-func (a *App) UpdatePeerGroup(peerID, groupID uint) (*repo.Peer, error) {
-	peer, err := a.Store.GetPeer(peerID)
-	if err != nil {
-		return nil, fmt.Errorf("peer not found")
-	}
-	if _, err := a.Store.GetGroup(groupID); err != nil {
-		return nil, fmt.Errorf("group not found")
-	}
-	peer.GroupID = groupID
-
-	if err := a.Store.UpdatePeer(peer); err != nil {
-		return nil, err
+	if name != nil {
+		if err := a.ensurePeerDNSRecord(peer); err != nil {
+			return nil, err
+		}
 	}
 	dp := a.Hub.dataplane()
 	if dp != nil {
 		if err := dp.SyncPeer(repoPeerToWG(peer)); err != nil {
 			return nil, err
+		}
+		if name != nil {
+			if err := a.syncDNSCatalog(); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err := a.SyncAccessFilter(); err != nil {
@@ -145,7 +148,7 @@ func (a *App) UpdatePeerGroup(peerID, groupID uint) (*repo.Peer, error) {
 func (a *App) DeletePeer(peerID uint) error {
 	peer, err := a.Store.GetPeer(peerID)
 	if err != nil {
-		return fmt.Errorf("peer not found")
+		return ErrPeerNotFound
 	}
 	if dp := a.Hub.dataplane(); dp != nil {
 		_ = dp.RemovePeer(peer.PublicKey)
@@ -164,7 +167,7 @@ func (a *App) DeletePeer(peerID uint) error {
 func (a *App) TogglePeer(peerID uint) (*repo.Peer, error) {
 	peer, err := a.Store.GetPeer(peerID)
 	if err != nil {
-		return nil, fmt.Errorf("peer not found")
+		return nil, ErrPeerNotFound
 	}
 	peer.Enabled = !peer.Enabled
 	if err := a.Store.UpdatePeer(peer); err != nil {
@@ -193,7 +196,7 @@ func (a *App) TogglePeer(peerID uint) (*repo.Peer, error) {
 func (a *App) ClientConfig(peerID uint) (string, error) {
 	peer, err := a.Store.GetPeer(peerID)
 	if err != nil {
-		return "", fmt.Errorf("peer not found")
+		return "", ErrPeerNotFound
 	}
 	settings, err := a.Store.GetSettings()
 	if err != nil {

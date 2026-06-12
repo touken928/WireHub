@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { api } from '@/api';
 import type { SetupStatus } from '@/api/types';
 import { SetupStatusContext } from '@/app/setupStatusContext';
@@ -16,6 +16,10 @@ export function SetupStatusProvider({ children }: { children: ReactNode }) {
       throw err;
     }
   }, []);
+
+  useEffect(() => {
+    void refresh().catch(() => {});
+  }, [refresh]);
 
   const value = useMemo(
     () => ({ configured, refresh }),

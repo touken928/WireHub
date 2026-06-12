@@ -41,46 +41,12 @@ func (s *Store) AllocateIP(subnet, hubIP, dnsIP string) (string, error) {
 	return ip, err
 }
 
-func (s *Store) ListDNSRecords() ([]DNSRecord, error) {
-	var records []DNSRecord
-	err := s.db.Order("hostname asc").Find(&records).Error
-	return records, err
-}
-
-func (s *Store) GetDNSRecord(id uint) (*DNSRecord, error) {
-	var record DNSRecord
-	if err := s.db.First(&record, id).Error; err != nil {
-		return nil, err
-	}
-	return &record, nil
-}
-
 func (s *Store) CreateDNSRecord(record *DNSRecord) error {
 	return s.db.Create(record).Error
 }
 
-func (s *Store) UpdateDNSRecord(record *DNSRecord) error {
-	return s.db.Save(record).Error
-}
-
-func (s *Store) DeleteDNSRecord(id uint) error {
-	return s.db.Delete(&DNSRecord{}, id).Error
-}
-
 func (s *Store) DeleteDNSByPeerID(peerID uint) error {
 	return s.db.Where("peer_id = ? AND manual = ?", peerID, false).Delete(&DNSRecord{}).Error
-}
-
-// ResolveDNS looks up a manual or peer-backed hostname in the local DNS table.
-func (s *Store) ResolveDNS(hostname string) (string, bool) {
-	var records []DNSRecord
-	if err := s.db.Where("hostname = ?", hostname).Limit(1).Find(&records).Error; err != nil {
-		return "", false
-	}
-	if len(records) == 0 {
-		return "", false
-	}
-	return records[0].IP, true
 }
 
 func (s *Store) UpdatePeerStats(id uint, lastHandshake, rx, tx int64) error {

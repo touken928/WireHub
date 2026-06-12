@@ -56,14 +56,18 @@ func (a *App) buildAccessPolicySpec() (policy.AccessPolicySpec, error) {
 	if err != nil {
 		return policy.AccessPolicySpec{}, err
 	}
+	return a.buildAccessPolicySpecFrom(peers, groupLinkPairs(links), groupAccessList(groups))
+}
+
+func (a *App) buildAccessPolicySpecFrom(peers []repo.Peer, linkPairs []policy.GroupLinkPair, groupAccess []policy.GroupAccess) (policy.AccessPolicySpec, error) {
 	mapPolicy, err := a.buildMapAccessPolicy()
 	if err != nil {
 		return policy.AccessPolicySpec{}, err
 	}
 	return policy.BuildAccessPolicySpec(
 		peerEndpoints(peers),
-		groupLinkPairs(links),
-		policy.NewGroupAccessPolicy(groupAccessList(groups)),
+		linkPairs,
+		policy.NewGroupAccessPolicy(groupAccess),
 		mapPolicy,
 	)
 }

@@ -14,6 +14,7 @@ import type { GroupGraphNode } from '@/api/types';
 import { RenameDialog } from '@/components/common/RenameDialog';
 import { PeerMemberCard, type PeerMemberCardGroup } from '@/components/peers/PeerMemberCard';
 import { getErrorMessage } from '@/lib/error';
+import { enrichedPeerToMemberCardPeer } from '@/lib/peerAdapter';
 import type { EnrichedPeer } from '@/pages/groups/utils';
 
 const useStyles = makeStyles({
@@ -112,21 +113,6 @@ type GroupDetailPanelProps = {
   onDeletePeer: (peerId: number, peerName: string) => void;
 };
 
-function toMemberCardPeer(peer: EnrichedPeer) {
-  return {
-    id: peer.id,
-    name: peer.name,
-    fqdn: peer.fqdn,
-    wg_ip: peer.wg_ip,
-    group_id: peer.group_id,
-    enabled: peer.enabled,
-    online: peer.online,
-    last_handshake: peer.last_handshake ?? 0,
-    rx_bytes: peer.rx_bytes ?? 0,
-    tx_bytes: peer.tx_bytes ?? 0,
-  };
-}
-
 export function GroupDetailPanel({
   group,
   groups,
@@ -212,7 +198,7 @@ export function GroupDetailPanel({
           peers.map((peer) => (
             <PeerMemberCard
               key={peer.id}
-              peer={toMemberCardPeer(peer)}
+              peer={enrichedPeerToMemberCardPeer(peer)}
               groups={groups}
               onRename={onRenamePeer}
               onMove={onMovePeer}
