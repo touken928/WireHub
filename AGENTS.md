@@ -33,6 +33,13 @@ WireHub is a single-binary WireGuard hub: userspace `wireguard-go` + gVisor nets
 - `internal/service` is the orchestration layer; avoid duplicating DNS/WireGuard/ACL sync logic in handlers or frontend code.
 - `vpn/runtime.Stack` is the live control point for `SyncPortForwards`, `SyncMaps`, reloads, and start/stop.
 
+## Incremental Boundary Plan
+
+- Keep the current directory layout; prefer boundary cleanup over package moves.
+- First tighten `service <-> vpn` by defining service-owned interfaces in `internal/service/network.go` instead of leaking `internal/vpn/runtime` types through service.
+- Then move password/admin verification details out of HTTP handlers and behind `service.App` methods.
+- Treat `internal/domain/runtime` naming as a later cleanup only after the boundaries above are in place.
+
 ## Network / Product Gotchas
 
 - Fresh unconfigured instances only allow setup/import from localhost by default; remote first-run setup requires `--allow-remote-setup`.

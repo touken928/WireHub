@@ -23,11 +23,11 @@ func HubTunnelWebPort() int {
 
 // ListPortForwards returns all forward rules and hub IP for the UI.
 func (a *App) ListPortForwards() (ForwardList, error) {
-	rules, err := a.Store.ListPortForwards()
+	rules, err := a.store.ListPortForwards()
 	if err != nil {
 		return ForwardList{}, err
 	}
-	settings, _ := a.Store.GetSettings()
+	settings, _ := a.store.GetSettings()
 	hubIP := ""
 	if settings != nil {
 		hubIP = settings.HubIP
@@ -37,7 +37,7 @@ func (a *App) ListPortForwards() (ForwardList, error) {
 
 // CreatePortForward adds a forward rule and syncs the dataplane.
 func (a *App) CreatePortForward(in repo.PortForwardInput) (*repo.PortForward, error) {
-	rule, err := a.Store.CreatePortForward(HubTunnelWebPort(), in)
+	rule, err := a.store.CreatePortForward(HubTunnelWebPort(), in)
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +49,7 @@ func (a *App) CreatePortForward(in repo.PortForwardInput) (*repo.PortForward, er
 
 // UpdatePortForward updates a forward rule and syncs the dataplane.
 func (a *App) UpdatePortForward(id uint, in repo.PortForwardInput) (*repo.PortForward, error) {
-	rule, err := a.Store.UpdatePortForward(id, HubTunnelWebPort(), in)
+	rule, err := a.store.UpdatePortForward(id, HubTunnelWebPort(), in)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +61,7 @@ func (a *App) UpdatePortForward(id uint, in repo.PortForwardInput) (*repo.PortFo
 
 // DeletePortForward removes a forward rule and syncs the dataplane.
 func (a *App) DeletePortForward(id uint) error {
-	if err := a.Store.DeletePortForward(id); err != nil {
+	if err := a.store.DeletePortForward(id); err != nil {
 		return err
 	}
 	return a.Hub.SyncPortForwards()

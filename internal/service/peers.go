@@ -16,18 +16,18 @@ func (a *App) CreatePeer(name string, groupID uint) (*repo.Peer, error) {
 		return nil, err
 	}
 
-	if _, err := a.Store.GetGroup(groupID); err != nil {
+	if _, err := a.store.GetGroup(groupID); err != nil {
 		return nil, ErrGroupNotFound
 	}
 
-	existing, _ := a.Store.ListPeers()
+	existing, _ := a.store.ListPeers()
 	for _, p := range existing {
 		if p.Name == slug {
 			return nil, ErrHostnameExists
 		}
 	}
 
-	settings, err := a.Store.GetSettings()
+	settings, err := a.store.GetSettings()
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +37,7 @@ func (a *App) CreatePeer(name string, groupID uint) (*repo.Peer, error) {
 		return nil, err
 	}
 
-	ip, err := a.Store.AllocateIP(settings.WGSubnet, settings.HubIP, settings.DNSIP)
+	ip, err := a.store.AllocateIP(settings.WGSubnet, settings.HubIP, settings.DNSIP)
 	if err != nil {
 		return nil, err
 	}
@@ -52,14 +52,14 @@ func (a *App) CreatePeer(name string, groupID uint) (*repo.Peer, error) {
 		DNSName:    slug,
 	}
 
-	if err := a.Store.CreatePeer(peer); err != nil {
+	if err := a.store.CreatePeer(peer); err != nil {
 		return nil, err
 	}
 
 	if err := a.ensurePeerDNSRecord(peer); err != nil {
 		return nil, err
 	}
-	_ = a.Store.UpdatePeer(peer)
+	_ = a.store.UpdatePeer(peer)
 
 	dp := a.Hub.dataplane()
 	if dp != nil {
@@ -85,12 +85,12 @@ var (
 
 // UpdatePeerFields atomically renames and/or moves a peer. Nil fields are left unchanged.
 func (a *App) UpdatePeerFields(id uint, name *string, groupID *uint) (*repo.Peer, error) {
-	peer, err := a.Store.GetPeer(id)
+	peer, err := a.store.GetPeer(id)
 	if err != nil {
 		return nil, ErrPeerNotFound
 	}
 	if groupID != nil {
-		if _, err := a.Store.GetGroup(*groupID); err != nil {
+		if _, err := a.store.GetGroup(*groupID); err != nil {
 			return nil, ErrGroupNotFound
 		}
 	}
@@ -101,7 +101,7 @@ func (a *App) UpdatePeerFields(id uint, name *string, groupID *uint) (*repo.Peer
 			return nil, err
 		}
 		if peer.Name != slug {
-			existing, _ := a.Store.ListPeers()
+			existing, _ := a.store.ListPeers()
 			for _, p := range existing {
 				if p.ID != id && p.Name == slug {
 					return nil, ErrHostnameExists
@@ -119,7 +119,7 @@ func (a *App) UpdatePeerFields(id uint, name *string, groupID *uint) (*repo.Peer
 	if !changed {
 		return peer, nil
 	}
-	if err := a.Store.UpdatePeer(peer); err != nil {
+	if err := a.store.UpdatePeer(peer); err != nil {
 		return nil, err
 	}
 	if name != nil {
@@ -146,15 +146,15 @@ func (a *App) UpdatePeerFields(id uint, name *string, groupID *uint) (*repo.Peer
 
 // DeletePeer removes a peer from the database and live network.
 func (a *App) DeletePeer(peerID uint) error {
-	peer, err := a.Store.GetPeer(peerID)
+	peer, err := a.store.GetPeer(peerID)
 	if err != nil {
 		return ErrPeerNotFound
 	}
 	if dp := a.Hub.dataplane(); dp != nil {
 		_ = dp.RemovePeer(peer.PublicKey)
 	}
-	_ = a.Store.DeleteDNSByPeerID(peerID)
-	if err := a.Store.DeletePeer(peerID); err != nil {
+	_ = a.store.DeleteDNSByPeerID(peerID)
+	if err := a.store.DeletePeer(peerID); err != nil {
 		return err
 	}
 	if err := a.syncDNSCatalog(); err != nil {
@@ -165,12 +165,12 @@ func (a *App) DeletePeer(peerID uint) error {
 
 // TogglePeer enables or disables a peer on the live network.
 func (a *App) TogglePeer(peerID uint) (*repo.Peer, error) {
-	peer, err := a.Store.GetPeer(peerID)
+	peer, err := a.store.GetPeer(peerID)
 	if err != nil {
 		return nil, ErrPeerNotFound
 	}
 	peer.Enabled = !peer.Enabled
-	if err := a.Store.UpdatePeer(peer); err != nil {
+	if err := a.store.UpdatePeer(peer); err != nil {
 		return nil, err
 	}
 	dp := a.Hub.dataplane()
@@ -194,11 +194,11 @@ func (a *App) TogglePeer(peerID uint) (*repo.Peer, error) {
 
 // ClientConfig renders the WireGuard client config for a peer.
 func (a *App) ClientConfig(peerID uint) (string, error) {
-	peer, err := a.Store.GetPeer(peerID)
+	peer, err := a.store.GetPeer(peerID)
 	if err != nil {
 		return "", ErrPeerNotFound
 	}
-	settings, err := a.Store.GetSettings()
+	settings, err := a.store.GetSettings()
 	if err != nil {
 		return "", err
 	}

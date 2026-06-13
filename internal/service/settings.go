@@ -1,10 +1,13 @@
 package service
 
 import (
+	"errors"
 	"io"
 
 	"github.com/touken928/wirehub/internal/repo"
 )
+
+var ErrInvalidAdminPassword = errors.New("invalid admin password")
 
 // SettingsView is the settings page payload.
 type SettingsView struct {
@@ -23,12 +26,12 @@ type SettingsView struct {
 
 // GetSettingsView loads settings and primary admin username for the UI.
 func (a *App) GetSettingsView() (SettingsView, error) {
-	settings, err := a.Store.GetSettings()
+	settings, err := a.store.GetSettings()
 	if err != nil {
 		return SettingsView{}, err
 	}
 	adminUsername := ""
-	if admin, err := a.Store.GetPrimaryAdmin(); err == nil {
+	if admin, err := a.store.GetPrimaryAdmin(); err == nil {
 		adminUsername = admin.Username
 	}
 	return SettingsView{
@@ -53,15 +56,15 @@ type UpdateSettingsResult struct {
 
 // UpdateMutableSettings persists MTU, status interval, and upstream DNS; refreshes runtime when needed.
 func (a *App) UpdateMutableSettings(mtu, statusInterval int, upstream []string) (UpdateSettingsResult, error) {
-	settings, err := a.Store.GetSettings()
+	settings, err := a.store.GetSettings()
 	if err != nil {
 		return UpdateSettingsResult{}, err
 	}
 	oldMTU := settings.MTU
-	if err := a.Store.UpdateMutableSettings(mtu, statusInterval, upstream); err != nil {
+	if err := a.store.UpdateMutableSettings(mtu, statusInterval, upstream); err != nil {
 		return UpdateSettingsResult{}, err
 	}
-	settings, err = a.Store.GetSettings()
+	settings, err = a.store.GetSettings()
 	if err != nil {
 		return UpdateSettingsResult{}, err
 	}
@@ -91,20 +94,44 @@ func (h *Hub) SetDNSUpstream(upstream []string) {
 
 // UpdateAdminPassword changes the logged-in admin password.
 func (a *App) UpdateAdminPassword(adminID uint, newPassword string) error {
-	return a.Store.UpdateAdminPassword(adminID, newPassword)
+	return a.store.UpdateAdminPassword(adminID, newPassword)
+}
+
+// ChangeAdminPassword verifies the current password and updates it.
+func (a *App) ChangeAdminPassword(username, currentPassword, newPassword string) error {
+	admin, err := a.store.GetAdminByUsername(username)
+	if err != nil {
+		return err
+	}
+	if err := repo.VerifyPassword(admin.PasswordHash, currentPassword); err != nil {
+		return ErrInvalidAdminPassword
+	}
+	return a.store.UpdateAdminPassword(admin.ID, newPassword)
+}
+
+// VerifyAdminPassword checks the current admin password and returns the admin record.
+func (a *App) VerifyAdminPassword(username, password string) (*repo.Admin, error) {
+	admin, err := a.store.GetAdminByUsername(username)
+	if err != nil {
+		return nil, err
+	}
+	if err := repo.VerifyPassword(admin.PasswordHash, password); err != nil {
+		return nil, ErrInvalidAdminPassword
+	}
+	return admin, nil
 }
 
 // GetAdminByUsername loads an admin account.
 func (a *App) GetAdminByUsername(username string) (*repo.Admin, error) {
-	return a.Store.GetAdminByUsername(username)
+	return a.store.GetAdminByUsername(username)
 }
 
 // ExportDatabase streams the SQLite file to w.
 func (a *App) ExportDatabase(w io.Writer) error {
-	return a.Store.ExportDatabase(w)
+	return a.store.ExportDatabase(w)
 }
 
 // DatabasePath returns the on-disk SQLite path.
 func (a *App) DatabasePath() string {
-	return a.Store.DatabasePath()
+	return a.store.DatabasePath()
 }

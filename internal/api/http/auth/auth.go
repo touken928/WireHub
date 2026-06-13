@@ -8,6 +8,11 @@ import (
 	"github.com/touken928/wirehub/internal/repo"
 )
 
+type adminStore interface {
+	GetAdminByUsername(username string) (*repo.Admin, error)
+	GetAdminByID(id uint) (*repo.Admin, error)
+}
+
 // Claims is the JWT payload for an admin session.
 type Claims struct {
 	AdminID      uint   `json:"admin_id"`
@@ -19,11 +24,11 @@ type Claims struct {
 // Service issues and validates admin JWTs.
 type Service struct {
 	secret string
-	store  *repo.Store
+	store  adminStore
 }
 
 // NewService wires JWT signing to the persistence store.
-func NewService(secret string, st *repo.Store) *Service {
+func NewService(secret string, st adminStore) *Service {
 	return &Service{secret: secret, store: st}
 }
 

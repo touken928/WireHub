@@ -10,7 +10,6 @@ import (
 	"github.com/touken928/wirehub/internal/api/http/dto"
 	"github.com/touken928/wirehub/internal/api/http/httputil"
 	"github.com/touken928/wirehub/internal/config"
-	"github.com/touken928/wirehub/internal/repo"
 	"github.com/touken928/wirehub/internal/service"
 )
 
@@ -110,13 +109,11 @@ func Reset(s *Server, c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	admin, err := s.App.GetAdminByUsername(username.(string))
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "admin not found"})
-		return
-	}
-	if err := repo.VerifyPassword(admin.PasswordHash, req.Password); err != nil {
+	if _, err := s.App.VerifyAdminPassword(username.(string), req.Password); errors.Is(err, service.ErrInvalidAdminPassword) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "password is incorrect"})
+		return
+	} else if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "admin not found"})
 		return
 	}
 	if err := s.App.Reset(); err != nil {

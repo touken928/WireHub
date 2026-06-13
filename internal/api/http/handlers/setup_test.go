@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/touken928/wirehub/internal/api/http/auth"
 	"github.com/touken928/wirehub/internal/config"
 	"github.com/touken928/wirehub/internal/repo"
 	"github.com/touken928/wirehub/internal/service"
@@ -190,5 +191,61 @@ func TestImportDatabase_UploadSizeCheckExists(t *testing.T) {
 	ImportDatabase(srv, c)
 	if rw.Code == http.StatusInternalServerError {
 		t.Fatalf("unexpected 500 for minimal request: %s", rw.Body.String())
+	}
+}
+
+func TestChangePasswordWrongCurrentPassword(t *testing.T) {
+	srv, st := newTestServer(t)
+	authSvc := auth.NewService("test-secret", st)
+	if err := st.Setup(repo.SetupInput{
+		Endpoint:         "example.com",
+		Subnet:           "100.127.0.0/24",
+		AdminUsername:    "admin",
+		AdminPassword:    "password123",
+		ListenPort:       8443,
+		MTU:              1420,
+		StatusInterval:   1,
+		ServerPrivateKey: "priv",
+		ServerPublicKey:  "pub",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	body := bytes.NewBufferString(`{"current_password":"wrong","new_password":"newpassword123"}`)
+	c, w := testContext(t, "PUT", "/api/settings/password", body, "127.0.0.1:12345")
+	c.Set("username", "admin")
+	c.Set("auth", authSvc)
+
+	ChangePassword(srv, c)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestResetWrongPassword(t *testing.T) {
+	srv, st := newTestServer(t)
+	authSvc := auth.NewService("test-secret", st)
+	if err := st.Setup(repo.SetupInput{
+		Endpoint:         "example.com",
+		Subnet:           "100.127.0.0/24",
+		AdminUsername:    "admin",
+		AdminPassword:    "password123",
+		ListenPort:       8443,
+		MTU:              1420,
+		StatusInterval:   1,
+		ServerPrivateKey: "priv",
+		ServerPublicKey:  "pub",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	body := bytes.NewBufferString(`{"password":"wrong"}`)
+	c, w := testContext(t, "POST", "/api/admin/reset", body, "127.0.0.1:12345")
+	c.Set("username", "admin")
+	c.Set("auth", authSvc)
+
+	Reset(srv, c)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", w.Code, w.Body.String())
 	}
 }

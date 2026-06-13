@@ -60,15 +60,15 @@ func (s *StatusService) Publish() {
 
 // BuildMessage assembles the current status snapshot.
 func (s *StatusService) BuildMessage() (StatusMessage, error) {
-	peers, err := s.app.Store.ListPeers()
+	peers, err := s.app.store.ListPeers()
 	if err != nil {
 		return StatusMessage{}, err
 	}
-	settings, err := s.app.Store.GetSettings()
+	settings, err := s.app.store.GetSettings()
 	if err != nil {
 		return StatusMessage{}, err
 	}
-	groups, _ := s.app.Store.ListGroups()
+	groups, _ := s.app.store.ListGroups()
 	groupNames := map[uint]string{}
 	for _, g := range groups {
 		groupNames[g.ID] = g.Name

@@ -10,17 +10,17 @@ var ErrAllowedGroupNotFound = errors.New("allowed group not found")
 
 // ListMapDetails returns all service maps with allowed groups.
 func (a *App) ListMapDetails() ([]repo.MapDetail, error) {
-	return a.Store.ListMapDetails()
+	return a.store.ListMapDetails()
 }
 
 // CreateServiceMap adds a map after validating allowed groups exist.
 func (a *App) CreateServiceMap(in repo.MapInput) (*repo.MapDetail, error) {
 	for _, gid := range in.AllowedGroups {
-		if _, err := a.Store.GetGroup(gid); err != nil {
+		if _, err := a.store.GetGroup(gid); err != nil {
 			return nil, ErrAllowedGroupNotFound
 		}
 	}
-	detail, err := a.Store.CreateServiceMap(in)
+	detail, err := a.store.CreateServiceMap(in)
 	if err != nil {
 		return nil, err
 	}
@@ -33,11 +33,11 @@ func (a *App) CreateServiceMap(in repo.MapInput) (*repo.MapDetail, error) {
 // UpdateServiceMap updates a map and syncs runtime state.
 func (a *App) UpdateServiceMap(id uint, in repo.MapInput) (*repo.MapDetail, error) {
 	for _, gid := range in.AllowedGroups {
-		if _, err := a.Store.GetGroup(gid); err != nil {
+		if _, err := a.store.GetGroup(gid); err != nil {
 			return nil, ErrAllowedGroupNotFound
 		}
 	}
-	detail, err := a.Store.UpdateServiceMap(id, in)
+	detail, err := a.store.UpdateServiceMap(id, in)
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +49,7 @@ func (a *App) UpdateServiceMap(id uint, in repo.MapInput) (*repo.MapDetail, erro
 
 // DeleteServiceMap removes a map and syncs runtime state.
 func (a *App) DeleteServiceMap(id uint) error {
-	if err := a.Store.DeleteServiceMap(id); err != nil {
+	if err := a.store.DeleteServiceMap(id); err != nil {
 		return err
 	}
 	return a.Hub.SyncMaps()

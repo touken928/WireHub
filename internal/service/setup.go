@@ -22,7 +22,7 @@ type SetupDefaults struct {
 
 // SetupStatus reports whether the hub database is initialized.
 func (a *App) SetupStatus() (configured bool, defaults SetupDefaults, err error) {
-	configured, err = a.Store.IsConfigured()
+	configured, err = a.store.IsConfigured()
 	if err != nil {
 		return false, SetupDefaults{}, err
 	}
@@ -50,7 +50,7 @@ type SetupInput struct {
 
 // Setup initializes the hub database and starts the network stack when available.
 func (a *App) Setup(in SetupInput) error {
-	configured, err := a.Store.IsConfigured()
+	configured, err := a.store.IsConfigured()
 	if err != nil {
 		return err
 	}
@@ -65,7 +65,7 @@ func (a *App) Setup(in SetupInput) error {
 	if err != nil {
 		return err
 	}
-	if err := a.Store.Setup(repo.SetupInput{
+	if err := a.store.Setup(repo.SetupInput{
 		Endpoint:         in.Endpoint,
 		Subnet:           in.Subnet,
 		AdminUsername:    in.AdminUsername,
@@ -89,11 +89,11 @@ func (a *App) startNetworkAfterSetup() error {
 	}
 	bundle, err := a.LoadSyncBundle()
 	if err != nil {
-		_ = a.Store.ResetAll()
+		_ = a.store.ResetAll()
 		return err
 	}
 	if err := net.Start(bundle); err != nil {
-		_ = a.Store.ResetAll()
+		_ = a.store.ResetAll()
 		return err
 	}
 	return nil
@@ -101,14 +101,14 @@ func (a *App) startNetworkAfterSetup() error {
 
 // ImportDatabase replaces the SQLite file before the hub is configured.
 func (a *App) ImportDatabase(tmpPath string) error {
-	configured, err := a.Store.IsConfigured()
+	configured, err := a.store.IsConfigured()
 	if err != nil {
 		return err
 	}
 	if configured {
 		return ErrImportWhenConfigured
 	}
-	if err := a.Store.ImportDatabase(tmpPath); err != nil {
+	if err := a.store.ImportDatabase(tmpPath); err != nil {
 		return err
 	}
 	net := a.Hub.NetworkRuntime()
@@ -124,7 +124,7 @@ func (a *App) ImportDatabase(tmpPath string) error {
 
 // PrepareDBUploadDir ensures the data directory exists for setup import.
 func (a *App) PrepareDBUploadDir() (dataDir string, err error) {
-	dataDir = filepath.Dir(a.Store.DatabasePath())
+	dataDir = filepath.Dir(a.store.DatabasePath())
 	err = os.MkdirAll(dataDir, 0o755)
 	return dataDir, err
 }
@@ -138,12 +138,12 @@ func (a *App) Reset() error {
 	if err := net.Stop(); err != nil {
 		return err
 	}
-	return a.Store.ResetAll()
+	return a.store.ResetAll()
 }
 
 // IsConfigured reports whether setup has completed.
 func (a *App) IsConfigured() (bool, error) {
-	return a.Store.IsConfigured()
+	return a.store.IsConfigured()
 }
 
 var (

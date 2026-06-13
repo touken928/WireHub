@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -9,7 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/touken928/wirehub/internal/api/http/dto"
 	"github.com/touken928/wirehub/internal/config"
-	"github.com/touken928/wirehub/internal/repo"
+	"github.com/touken928/wirehub/internal/service"
 )
 
 type updateSettingsRequest struct {
@@ -60,16 +61,12 @@ func ChangePassword(s *Server, c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	admin, err := s.App.GetAdminByUsername(username.(string))
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "admin not found"})
-		return
-	}
-	if err := repo.VerifyPassword(admin.PasswordHash, req.CurrentPassword); err != nil {
+	err := s.App.ChangeAdminPassword(username.(string), req.CurrentPassword, req.NewPassword)
+	if errors.Is(err, service.ErrInvalidAdminPassword) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "current password is incorrect"})
 		return
 	}
-	if err := s.App.UpdateAdminPassword(admin.ID, req.NewPassword); err != nil {
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

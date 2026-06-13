@@ -43,7 +43,7 @@ func TestCreateGroupLink_ReplacesDirection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	links, err := a.Store.ListGroupLinks()
+	links, err := a.Store().ListGroupLinks()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestCreateGroupLink_ReplacesDirection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	links, err = a.Store.ListGroupLinks()
+	links, err = a.Store().ListGroupLinks()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestCreateGroupLink_ReplacesToBidirectional(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	links, err := a.Store.ListGroupLinks()
+	links, err := a.Store().ListGroupLinks()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestDeleteGroup_ClearsMapAllow(t *testing.T) {
 	}
 
 	// Verify 2 allow rows
-	groups, err := a.Store.ListMapGroupIDs(detail.ID)
+	groups, err := a.Store().ListMapGroupIDs(detail.ID)
 	if err != nil || len(groups) != 2 {
 		t.Fatalf("expected 2 groups, got %v err=%v", groups, err)
 	}
@@ -139,7 +139,7 @@ func TestDeleteGroup_ClearsMapAllow(t *testing.T) {
 	}
 
 	// Verify only g's allow row remains
-	groups, err = a.Store.ListMapGroupIDs(detail.ID)
+	groups, err = a.Store().ListMapGroupIDs(detail.ID)
 	if err != nil || len(groups) != 1 || groups[0] != g.ID {
 		t.Fatalf("expected 1 group (g), got %v err=%v", groups, err)
 	}

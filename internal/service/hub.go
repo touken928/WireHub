@@ -7,7 +7,6 @@ import (
 
 	domainruntime "github.com/touken928/wirehub/internal/domain/runtime"
 	"github.com/touken928/wirehub/internal/repo"
-	vpnruntime "github.com/touken928/wirehub/internal/vpn/runtime"
 	"github.com/touken928/wirehub/internal/vpn/tunnel"
 )
 
@@ -25,7 +24,7 @@ type Hub struct {
 	networkMu       sync.RWMutex
 	network         NetworkRuntime
 	dpMu            sync.RWMutex
-	liveDP          vpnruntime.Dataplane
+	liveDP          Dataplane
 	statusMu        sync.Mutex
 	statusStop      chan struct{}
 	statusRunning   bool
@@ -52,13 +51,13 @@ func (h *Hub) NetworkRuntime() NetworkRuntime {
 	return h.network
 }
 
-func (h *Hub) dataplane() vpnruntime.Dataplane {
+func (h *Hub) dataplane() Dataplane {
 	h.dpMu.RLock()
 	defer h.dpMu.RUnlock()
 	return h.liveDP
 }
 
-func (h *Hub) onStarted(dp vpnruntime.Dataplane) {
+func (h *Hub) onStarted(dp Dataplane) {
 	h.dpMu.Lock()
 	h.liveDP = dp
 	h.dpMu.Unlock()
@@ -162,7 +161,7 @@ func (h *Hub) pollPeerStats() {
 	if stats == nil {
 		return
 	}
-	peers, err := h.app.Store.ListPeers()
+	peers, err := h.app.store.ListPeers()
 	if err != nil {
 		return
 	}
@@ -175,7 +174,7 @@ func (h *Hub) pollPeerStats() {
 		if !st.LastHandshake.IsZero() {
 			hs = st.LastHandshake.Unix()
 		}
-		_ = h.app.Store.UpdatePeerStats(p.ID, hs, st.RxBytes, st.TxBytes)
+		_ = h.app.store.UpdatePeerStats(p.ID, hs, st.RxBytes, st.TxBytes)
 	}
 	if h.statusPublisher != nil {
 		h.statusPublisher.Publish()

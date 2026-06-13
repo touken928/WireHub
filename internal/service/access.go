@@ -44,15 +44,15 @@ func groupAccessList(groups []repo.PeerGroup) []policy.GroupAccess {
 }
 
 func (a *App) buildAccessPolicySpec() (policy.AccessPolicySpec, error) {
-	peers, err := a.Store.ListPeers()
+	peers, err := a.store.ListPeers()
 	if err != nil {
 		return policy.AccessPolicySpec{}, err
 	}
-	links, err := a.Store.ListGroupLinks()
+	links, err := a.store.ListGroupLinks()
 	if err != nil {
 		return policy.AccessPolicySpec{}, err
 	}
-	groups, err := a.Store.ListGroups()
+	groups, err := a.store.ListGroups()
 	if err != nil {
 		return policy.AccessPolicySpec{}, err
 	}
@@ -86,7 +86,7 @@ func (a *App) SyncAccessFilter() error {
 }
 
 func (a *App) buildMapAccessPolicy() (policy.MapAccessPolicy, error) {
-	details, err := a.Store.ListMapDetails()
+	details, err := a.store.ListMapDetails()
 	if err != nil {
 		return policy.MapAccessPolicy{}, err
 	}

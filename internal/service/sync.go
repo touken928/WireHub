@@ -8,27 +8,27 @@ import (
 )
 
 func (a *App) loadSyncBundle() (runtime.SyncBundle, error) {
-	settings, err := a.Store.GetSettings()
+	settings, err := a.store.GetSettings()
 	if err != nil {
 		return runtime.SyncBundle{}, err
 	}
-	peers, err := a.Store.ListPeers()
+	peers, err := a.store.ListPeers()
 	if err != nil {
 		return runtime.SyncBundle{}, err
 	}
-	links, err := a.Store.ListGroupLinks()
+	links, err := a.store.ListGroupLinks()
 	if err != nil {
 		return runtime.SyncBundle{}, err
 	}
-	groups, err := a.Store.ListGroups()
+	groups, err := a.store.ListGroups()
 	if err != nil {
 		return runtime.SyncBundle{}, err
 	}
-	forwards, err := a.Store.ListPortForwards()
+	forwards, err := a.store.ListPortForwards()
 	if err != nil {
 		return runtime.SyncBundle{}, err
 	}
-	mapDetails, err := a.Store.ListMapDetails()
+	mapDetails, err := a.store.ListMapDetails()
 	if err != nil {
 		return runtime.SyncBundle{}, err
 	}
@@ -107,14 +107,14 @@ func (a *App) ensurePeerDNSRecord(peer *repo.Peer) error {
 		slug = peer.Name
 	}
 	peer.DNSName = slug
-	_ = a.Store.DeleteDNSByPeerID(peer.ID)
+	_ = a.store.DeleteDNSByPeerID(peer.ID)
 	record := &repo.DNSRecord{
 		Hostname: slug,
 		IP:       peer.WGIP,
 		PeerID:   &peer.ID,
 		Manual:   false,
 	}
-	return a.Store.CreateDNSRecord(record)
+	return a.store.CreateDNSRecord(record)
 }
 
 func (a *App) syncDNSCatalog() error {

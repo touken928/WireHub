@@ -17,6 +17,6 @@ type Server struct {
 func New(app *service.App, jwtSecret string, cfg *config.RuntimeConfig) *Server {
 	return &Server{
 		Server: handlers.NewServer(app, cfg.AllowRemoteSetup),
-		Auth:   auth.NewService(jwtSecret, app.Store),
+		Auth:   auth.NewService(jwtSecret, app.Store()),
 	}
 }
