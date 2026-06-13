@@ -3,6 +3,7 @@ package repo
 import (
 	"github.com/touken928/wirehub/internal/config"
 	"github.com/touken928/wirehub/internal/domain/hub"
+	"gorm.io/gorm"
 )
 
 func (s *Settings) ToHubConfig(adminUsername string) hub.HubConfig {
@@ -54,5 +55,8 @@ func (s *Store) UpdateAdminPassword(adminID uint, newPassword string) error {
 	if err != nil {
 		return err
 	}
-	return s.db.Model(&Admin{}).Where("id = ?", adminID).Update("password_hash", hash).Error
+	return s.db.Model(&Admin{}).Where("id = ?", adminID).Updates(map[string]interface{}{
+		"password_hash": hash,
+		"token_version": gorm.Expr("token_version + 1"),
+	}).Error
 }

@@ -192,6 +192,101 @@ func TestHasGroupLink_AnyDirectionBetweenPair(t *testing.T) {
 	}
 }
 
+func TestDeleteGroup_ClearsMapGroupAllow(t *testing.T) {
+	dir := t.TempDir()
+	st, err := New(&config.RuntimeConfig{DatabasePath: filepath.Join(dir, "wirehub.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := &Settings{
+		WGSubnet: "100.127.0.0/24",
+		HubIP:    "100.127.0.1",
+		DNSIP:    "100.127.0.1",
+	}
+	if err := st.db.Create(settings).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := st.CreateGroup("users", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g2, err := st.CreateGroup("admins", 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a service map that allows both groups
+	detail, err := st.CreateServiceMap(MapInput{
+		Slug: "shared", TargetHost: "10.0.0.1",
+		AllowedGroups: []uint{g.ID, g2.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify both allow rows
+	groups, err := st.ListMapGroupIDs(detail.ID)
+	if err != nil || len(groups) != 2 {
+		t.Fatalf("expected 2 allow rows, got %d err=%v", len(groups), err)
+	}
+
+	// Delete g2 (no peers, should succeed)
+	if err := st.DeleteGroup(g2.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify g2's allow row is gone
+	groups, err = st.ListMapGroupIDs(detail.ID)
+	if err != nil || len(groups) != 1 || groups[0] != g.ID {
+		t.Fatalf("expected 1 allow row for g only, got %v err=%v", groups, err)
+	}
+
+	// Delete g
+	if err := st.DeleteGroup(g.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify no allow rows remain
+	groups, err = st.ListMapGroupIDs(detail.ID)
+	if err != nil || len(groups) != 0 {
+		t.Fatalf("expected 0 allow rows after all groups deleted, got %v err=%v", groups, err)
+	}
+}
+
+func TestDeleteGroup_WithPeersReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	st, err := New(&config.RuntimeConfig{DatabasePath: filepath.Join(dir, "wirehub.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := &Settings{
+		WGSubnet: "100.127.0.0/24",
+		HubIP:    "100.127.0.1",
+		DNSIP:    "100.127.0.1",
+	}
+	if err := st.db.Create(settings).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := st.CreateGroup("occupied", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	peer := &Peer{
+		Name: "p1", DNSName: "p1", WGIP: "100.127.0.2",
+		PublicKey: "pk1", PrivateKey: "sk1", GroupID: g.ID, Enabled: true,
+	}
+	if err := st.CreatePeer(peer); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.DeleteGroup(g.ID); err == nil {
+		t.Fatal("expected error deleting group with peers")
+	}
+}
+
 func TestGroupLinkAtMostOneBetweenPair(t *testing.T) {
 	dir := t.TempDir()
 	st, err := New(&config.RuntimeConfig{DatabasePath: filepath.Join(dir, "wirehub.db")})

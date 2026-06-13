@@ -3,6 +3,7 @@ package apihttp
 import (
 	"github.com/touken928/wirehub/internal/api/http/auth"
 	"github.com/touken928/wirehub/internal/api/http/handlers"
+	"github.com/touken928/wirehub/internal/config"
 	"github.com/touken928/wirehub/internal/service"
 )
 
@@ -13,9 +14,9 @@ type Server struct {
 }
 
 // New constructs the API server and wires status WebSocket publishing.
-func New(app *service.App, jwtSecret string) *Server {
+func New(app *service.App, jwtSecret string, cfg *config.RuntimeConfig) *Server {
 	return &Server{
-		Server: handlers.NewServer(app),
+		Server: handlers.NewServer(app, cfg.AllowRemoteSetup),
 		Auth:   auth.NewService(jwtSecret, app.Store),
 	}
 }

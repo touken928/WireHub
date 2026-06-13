@@ -72,3 +72,11 @@ func (s *Store) GetAdminByUsername(username string) (*Admin, error) {
 	}
 	return &admin, nil
 }
+
+func (s *Store) GetAdminByID(id uint) (*Admin, error) {
+	var admin Admin
+	if err := s.db.First(&admin, id).Error; err != nil {
+		return nil, err
+	}
+	return &admin, nil
+}

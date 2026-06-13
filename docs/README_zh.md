@@ -90,12 +90,15 @@ go build -o wirehub ./cmd/wirehub
 | `--port` | `8443` | 主机 TCP（Web/API）与 UDP（WireGuard） |
 | `--bind` | `0.0.0.0` | HTTP 绑定地址 |
 | `--data-dir` | `./data` | SQLite（`wirehub.db`）与密钥（`.jwt_secret`） |
+| `--allow-remote-setup` | `false` | 允许非 localhost 客户端执行首次初始化/导入 |
 
 库内 `listen_port` 仅写入 Peer 配置，**不**改变 Hub 绑定端口。MTU、状态间隔、上游 DNS、管理员密码可在 **Settings** 中修改。
 
 ### 首次配置
 
 HTTP 立即启动；WireGuard 与 DNS 在配置完成后启动。
+
+出于安全考虑，Hub 尚未初始化时，`/setup`、`/api/setup/status`、`/api/setup/import` 默认只接受 `localhost` 发起的请求，避免公网新实例被第一个远程访问者抢先初始化。只有在你明确需要远程首次配置时，才应开启 `--allow-remote-setup`。
 
 1. 打开 **http://&lt;主机&gt;:&lt;端口&gt;/setup** — 导入已有 `wirehub.db` 或新建 Hub
 2. 使用管理员账号登录

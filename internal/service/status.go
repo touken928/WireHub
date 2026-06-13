@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"sync"
 	"time"
 
 	"github.com/touken928/wirehub/internal/domain/peer"
@@ -32,6 +33,7 @@ type StatusMessage struct {
 // StatusService builds status snapshots and implements StatusPublisher.
 type StatusService struct {
 	app      *App
+	notifyMu sync.RWMutex
 	onNotify func()
 }
 
@@ -41,13 +43,18 @@ func newStatusService(app *App) *StatusService {
 
 // SetNotifier wires WebSocket broadcast (called from HTTP layer).
 func (s *StatusService) SetNotifier(fn func()) {
+	s.notifyMu.Lock()
 	s.onNotify = fn
+	s.notifyMu.Unlock()
 }
 
 // Publish implements StatusPublisher.
 func (s *StatusService) Publish() {
-	if s.onNotify != nil {
-		s.onNotify()
+	s.notifyMu.RLock()
+	fn := s.onNotify
+	s.notifyMu.RUnlock()
+	if fn != nil {
+		fn()
 	}
 }
 

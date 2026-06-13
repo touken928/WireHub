@@ -7,14 +7,20 @@ import (
 )
 
 const (
-	loginRateCapacity     = 5
-	loginRateRefillPeriod = 10 * time.Minute
+	loginRateCapacity          = 5
+	loginRateRefillPeriod      = 10 * time.Minute
+	loginRateMaxEntries        = 10000
+	loginRateCleanupInterval   = 5 * time.Minute
+	loginRateStaleTTL          = 20 * time.Minute // 2× refill period
 )
 
 // LoginRateLimitConfig controls the login token bucket per client IP.
 type LoginRateLimitConfig struct {
-	Capacity     float64
-	RefillPeriod time.Duration
+	Capacity        float64
+	RefillPeriod    time.Duration
+	MaxEntries      int           // max tracked IPs before evicting oldest
+	CleanupInterval time.Duration // how often the background cleanup runs
+	StaleTTL        time.Duration // entries idle longer than this are removed by cleanup
 }
 
 func (c LoginRateLimitConfig) normalized() LoginRateLimitConfig {
@@ -25,15 +31,28 @@ func (c LoginRateLimitConfig) normalized() LoginRateLimitConfig {
 	if out.RefillPeriod <= 0 {
 		out.RefillPeriod = loginRateRefillPeriod
 	}
+	if out.MaxEntries <= 0 {
+		out.MaxEntries = loginRateMaxEntries
+	}
+	if out.CleanupInterval <= 0 {
+		out.CleanupInterval = loginRateCleanupInterval
+	}
+	if out.StaleTTL <= 0 {
+		out.StaleTTL = loginRateStaleTTL
+	}
 	return out
 }
 
 // LoginRateLimiter tracks login attempt tokens per IP in memory.
+// The map is bounded by MaxEntries; idle entries are removed by Cleanup
+// or via the optional background cleanup loop.
 type LoginRateLimiter struct {
-	mu      sync.Mutex
-	cfg     LoginRateLimitConfig
-	entries map[string]*loginRateEntry
-	now     func() time.Time
+	mu          sync.Mutex
+	cfg         LoginRateLimitConfig
+	entries     map[string]*loginRateEntry
+	now         func() time.Time
+	stopCleanup chan struct{}
+	cleanupWg   sync.WaitGroup
 }
 
 type loginRateEntry struct {
@@ -92,9 +111,72 @@ func (l *LoginRateLimiter) RecordLoginSuccess(ip string) {
 	delete(l.entries, ip)
 }
 
+// Cleanup removes entries that have been idle longer than StaleTTL.
+func (l *LoginRateLimiter) Cleanup() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	cutoff := l.now().Add(-l.cfg.StaleTTL)
+	for k, v := range l.entries {
+		if v.lastRefill.Before(cutoff) {
+			delete(l.entries, k)
+		}
+	}
+}
+
+// StartCleanupLoop begins a background goroutine that runs Cleanup periodically.
+func (l *LoginRateLimiter) StartCleanupLoop() {
+	l.mu.Lock()
+	if l.stopCleanup != nil {
+		l.mu.Unlock()
+		return // already running
+	}
+	l.stopCleanup = make(chan struct{})
+	l.cleanupWg.Add(1)
+	stopCh := l.stopCleanup // capture so the goroutine is not affected by future field mutation
+	l.mu.Unlock()
+
+	go func() {
+		defer l.cleanupWg.Done()
+		ticker := time.NewTicker(l.cfg.CleanupInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				l.Cleanup()
+			case <-stopCh:
+				return
+			}
+		}
+	}()
+}
+
+// StopCleanupLoop stops the background cleanup goroutine and waits for it to exit.
+func (l *LoginRateLimiter) StopCleanupLoop() {
+	l.mu.Lock()
+	ch := l.stopCleanup
+	l.stopCleanup = nil
+	l.mu.Unlock()
+	if ch != nil {
+		close(ch)
+		l.cleanupWg.Wait()
+	}
+}
+
 func (l *LoginRateLimiter) entryLocked(ip string, now time.Time) *loginRateEntry {
 	e, ok := l.entries[ip]
 	if !ok {
+		// Evict oldest entry when at capacity to bound memory growth.
+		if len(l.entries) >= l.cfg.MaxEntries {
+			var oldestKey string
+			var oldestTime time.Time
+			for k, v := range l.entries {
+				if oldestKey == "" || v.lastRefill.Before(oldestTime) {
+					oldestKey = k
+					oldestTime = v.lastRefill
+				}
+			}
+			delete(l.entries, oldestKey)
+		}
 		e = &loginRateEntry{
 			tokens:     l.cfg.Capacity,
 			lastRefill: now,

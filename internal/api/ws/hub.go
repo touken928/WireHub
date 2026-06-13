@@ -2,6 +2,7 @@ package ws
 
 import (
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -18,8 +19,24 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		return true
+		origin := r.Header.Get("Origin")
+		// Allow non-browser clients (no Origin header)
+		if origin == "" {
+			return true
+		}
+		// Allow same-origin requests from the browser UI
+		return originMatchesHost(origin, r.Host)
 	},
+}
+
+// originMatchesHost reports whether the Origin header value corresponds to the
+// given request host (same-origin check for browser WebSocket connections).
+func originMatchesHost(origin, host string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return u.Host == host
 }
 
 // Hub broadcasts status snapshots to connected WebSocket clients.

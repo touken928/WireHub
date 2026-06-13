@@ -54,13 +54,25 @@ func nextFreeHostInSubnet(subnet string, used map[string]bool) (string, error) {
 		return "", fmt.Errorf("only IPv4 subnets supported")
 	}
 	mask, _ := ipNet.Mask.Size()
-	for i := 2; i < (1 << (32 - mask)); i++ {
-		ip := make(net.IP, 4)
-		copy(ip, base)
-		ip[3] = base[3] + byte(i)
-		candidate := ip.String()
-		if !used[candidate] {
-			return candidate, nil
+	ones := uint(32 - mask)
+	if ones < 2 { // /31 and /32 have no usable host addresses
+		return "", errSubnetIPUnavailable
+	}
+	maxHosts := 1 << ones
+	for i := 2; i < maxHosts; i++ {
+		candidate := make(net.IP, 4)
+		copy(candidate, base)
+		carry := i
+		for j := 3; j >= 0 && carry > 0; j-- {
+			sum := int(candidate[j]) + carry
+			candidate[j] = byte(sum & 0xFF)
+			carry = sum >> 8
+		}
+		if !ipNet.Contains(candidate) {
+			break // past subnet boundary
+		}
+		if !used[candidate.String()] {
+			return candidate.String(), nil
 		}
 	}
 	return "", errSubnetIPUnavailable

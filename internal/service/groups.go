@@ -94,7 +94,7 @@ func (a *App) GroupGraph() (GroupGraphData, error) {
 	return GroupGraphData{Groups: groups, Links: links, Peers: peers}, nil
 }
 
-// CreateGroupLink adds or confirms a directed group link.
+// CreateGroupLink adds or replaces a directed group link.
 func (a *App) CreateGroupLink(fromID, toID uint, bidirectional bool) error {
 	if _, err := a.Store.GetGroup(fromID); err != nil {
 		return err
@@ -104,13 +104,6 @@ func (a *App) CreateGroupLink(fromID, toID uint, bidirectional bool) error {
 	}
 	if fromID == toID {
 		return ErrSelfLink
-	}
-	exists, err := a.Store.HasGroupLink(fromID, toID)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return nil
 	}
 	if err := a.Store.UpsertGroupLink(fromID, toID, bidirectional); err != nil {
 		return err

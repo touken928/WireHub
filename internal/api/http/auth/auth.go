@@ -10,8 +10,9 @@ import (
 
 // Claims is the JWT payload for an admin session.
 type Claims struct {
-	AdminID  uint   `json:"admin_id"`
-	Username string `json:"username"`
+	AdminID      uint   `json:"admin_id"`
+	Username     string `json:"username"`
+	TokenVersion int    `json:"token_version"`
 	jwt.RegisteredClaims
 }
 
@@ -40,8 +41,9 @@ func (s *Service) Login(username, password string) (string, error) {
 
 func (s *Service) issueToken(admin *repo.Admin) (string, error) {
 	claims := Claims{
-		AdminID:  admin.ID,
-		Username: admin.Username,
+		AdminID:      admin.ID,
+		Username:     admin.Username,
+		TokenVersion: admin.TokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -52,6 +54,8 @@ func (s *Service) issueToken(admin *repo.Admin) (string, error) {
 }
 
 // ParseToken validates a bearer token and returns its claims.
+// It checks the embedded TokenVersion against the stored admin to revoke tokens
+// issued before a password change.
 func (s *Service) ParseToken(tokenStr string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (interface{}, error) {
 		return []byte(s.secret), nil
@@ -62,6 +66,13 @@ func (s *Service) ParseToken(tokenStr string) (*Claims, error) {
 	claims, ok := token.Claims.(*Claims)
 	if !ok || !token.Valid {
 		return nil, errors.New("invalid token")
+	}
+	admin, err := s.store.GetAdminByID(claims.AdminID)
+	if err != nil {
+		return nil, errors.New("admin not found")
+	}
+	if claims.TokenVersion != admin.TokenVersion {
+		return nil, errors.New("token revoked")
 	}
 	return claims, nil
 }

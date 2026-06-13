@@ -102,4 +102,140 @@ func TestDefaultLoginRateLimiterConfig(t *testing.T) {
 	if l.cfg.RefillPeriod != loginRateRefillPeriod {
 		t.Fatalf("refill = %v, want %v", l.cfg.RefillPeriod, loginRateRefillPeriod)
 	}
+	if l.cfg.MaxEntries != loginRateMaxEntries {
+		t.Fatalf("MaxEntries = %v, want %v", l.cfg.MaxEntries, loginRateMaxEntries)
+	}
+	if l.cfg.CleanupInterval != loginRateCleanupInterval {
+		t.Fatalf("CleanupInterval = %v, want %v", l.cfg.CleanupInterval, loginRateCleanupInterval)
+	}
+	if l.cfg.StaleTTL != loginRateStaleTTL {
+		t.Fatalf("StaleTTL = %v, want %v", l.cfg.StaleTTL, loginRateStaleTTL)
+	}
+}
+
+func TestLoginRateLimiter_MaxEntriesEviction(t *testing.T) {
+	now := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
+	l := NewLoginRateLimiter(LoginRateLimitConfig{
+		Capacity:     5,
+		RefillPeriod: 10 * time.Minute,
+		MaxEntries:   2,
+	})
+	l.now = func() time.Time { return now }
+
+	// Fill with IP1 and IP2.
+	if _, ok := l.Take("10.0.0.1"); !ok {
+		t.Fatal("IP1 should be allowed")
+	}
+	now2 := now.Add(1 * time.Minute)
+	l.now = func() time.Time { return now2 }
+	if _, ok := l.Take("10.0.0.2"); !ok {
+		t.Fatal("IP2 should be allowed")
+	}
+
+	// Adding IP3 at a later time should evict IP1 (oldest lastRefill).
+	now3 := now.Add(2 * time.Minute)
+	l.now = func() time.Time { return now3 }
+	if _, ok := l.Take("10.0.0.3"); !ok {
+		t.Fatal("IP3 should be allowed (evicted oldest entry)")
+	}
+
+	// IP1 was evicted; re-access creates a fresh bucket with full tokens.
+	// Take consumes one, so it should succeed.
+	l.now = func() time.Time { return now3 }
+	if _, ok := l.Take("10.0.0.1"); !ok {
+		t.Fatal("IP1 should have been evicted and get a fresh bucket")
+	}
+
+	// Verify we cannot have more than MaxEntries entries.
+	l.mu.Lock()
+	entryCount := len(l.entries)
+	l.mu.Unlock()
+	if entryCount > 2 {
+		t.Fatalf("entry count = %d, want <= 2", entryCount)
+	}
+}
+
+func TestLoginRateLimiter_CleanupRemovesStaleEntries(t *testing.T) {
+	now := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
+	l := NewLoginRateLimiter(LoginRateLimitConfig{
+		Capacity:     5,
+		RefillPeriod: 10 * time.Minute,
+		StaleTTL:     15 * time.Minute,
+		MaxEntries:   10,
+	})
+	l.now = func() time.Time { return now }
+
+	// Add two entries.
+	l.Take("10.0.0.1")
+	l.Take("10.0.0.2")
+
+	// Advance past StaleTTL.
+	later := now.Add(20 * time.Minute)
+	l.now = func() time.Time { return later }
+
+	l.Cleanup()
+
+	// Both should have been removed; fresh Take succeeds.
+	if _, ok := l.Take("10.0.0.1"); !ok {
+		t.Fatal("IP1 should have been cleaned up and get fresh tokens")
+	}
+	if _, ok := l.Take("10.0.0.2"); !ok {
+		t.Fatal("IP2 should have been cleaned up and get fresh tokens")
+	}
+
+	// Non-stale entries should survive cleanup.
+	now3 := later.Add(1 * time.Minute)
+	l.now = func() time.Time { return now3 }
+	l.Take("10.0.0.3")
+
+	now4 := now3.Add(5 * time.Minute) // still within StaleTTL from the Take
+	l.now = func() time.Time { return now4 }
+	l.Cleanup()
+
+	// IP3 was accessed at now3, still fresh.
+	l.mu.Lock()
+	_, exists := l.entries["10.0.0.3"]
+	l.mu.Unlock()
+	if !exists {
+		t.Fatal("IP3 should still exist after cleanup (lastRefill is recent)")
+	}
+}
+
+func TestLoginRateLimiter_CleanupLoop(t *testing.T) {
+	l := NewLoginRateLimiter(LoginRateLimitConfig{
+		Capacity:        5,
+		RefillPeriod:    10 * time.Minute,
+		StaleTTL:        1 * time.Millisecond,
+		CleanupInterval: 10 * time.Millisecond,
+		MaxEntries:      100,
+	})
+	l.now = time.Now
+
+	// Add an entry.
+	l.Take("10.0.0.1")
+
+	// Start cleanup loop.
+	l.StartCleanupLoop()
+
+	// Wait long enough for at least one cleanup tick.
+	time.Sleep(30 * time.Millisecond)
+
+	// The entry should have been cleaned up (StaleTTL = 1ms).
+	l.mu.Lock()
+	_, exists := l.entries["10.0.0.1"]
+	l.mu.Unlock()
+	if exists {
+		t.Fatal("entry should have been cleaned up by background loop")
+	}
+
+	l.StopCleanupLoop()
+}
+
+func TestLoginRateLimiter_CleanupLoopIdempotent(t *testing.T) {
+	l := NewLoginRateLimiter(LoginRateLimitConfig{MaxEntries: 10})
+
+	l.StartCleanupLoop()
+	l.StartCleanupLoop() // second start should be a no-op
+	l.StopCleanupLoop()
+	l.StopCleanupLoop() // second stop should be safe (no panic)
 }

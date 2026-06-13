@@ -81,7 +81,9 @@ func (a *App) UpdateMutableSettings(mtu, statusInterval int, upstream []string) 
 
 // SetDNSUpstream updates upstream resolvers on the live DNS server when the stack is running.
 func (h *Hub) SetDNSUpstream(upstream []string) {
-	nc := h.NetworkRuntime()
+	h.networkMu.RLock()
+	nc := h.network
+	h.networkMu.RUnlock()
 	if nc != nil {
 		nc.SetDNSUpstream(upstream)
 	}

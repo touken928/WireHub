@@ -32,6 +32,22 @@ type ForwardProxy struct {
 	wg     sync.WaitGroup
 }
 
+// boundListener holds a pre-bound listener for a forward rule.
+type boundListener struct {
+	rule  ForwardRule
+	tcpLn net.Listener     // set for TCP rules
+	udpPc net.PacketConn   // set for UDP rules
+}
+
+func (bl *boundListener) close() {
+	if bl.tcpLn != nil {
+		bl.tcpLn.Close()
+	}
+	if bl.udpPc != nil {
+		bl.udpPc.Close()
+	}
+}
+
 func NewForwardProxy(tnet *netstack.Net, hubIP, vpnSubnet string, resolver HostResolver) (*ForwardProxy, error) {
 	addr, err := netip.ParseAddr(hubIP)
 	if err != nil {
@@ -49,26 +65,68 @@ func NewForwardProxy(tnet *netstack.Net, hubIP, vpnSubnet string, resolver HostR
 	}, nil
 }
 
+// validateForwardRules checks all rules for basic validity.
+func validateForwardRules(rules []ForwardRule) error {
+	seen := make(map[int]int) // port → first rule index
+	for i, rule := range rules {
+		switch rule.Protocol {
+		case "tcp", "udp":
+		default:
+			return fmt.Errorf("rule %d: unsupported protocol %q", i, rule.Protocol)
+		}
+		if rule.ListenPort <= 0 || rule.ListenPort > 65535 {
+			return fmt.Errorf("rule %d: invalid listen port %d", i, rule.ListenPort)
+		}
+		if prev, ok := seen[rule.ListenPort]; ok {
+			return fmt.Errorf("rules %d and %d: duplicate listen port %d", prev, i, rule.ListenPort)
+		}
+		seen[rule.ListenPort] = i
+	}
+	return nil
+}
+
+// Apply replaces all forward listeners with the given rules.
+// It validates rules synchronously, eagerly binds all listeners,
+// and returns an error if any rule is invalid or any bind fails.
+// On failure, any successfully pre-bound listeners are closed (rollback).
 func (m *ForwardProxy) Apply(rules []ForwardRule) error {
+	// 1. Validate all rules synchronously.
+	if err := validateForwardRules(rules); err != nil {
+		return err
+	}
+
+	// 2. Stop old listeners (frees ports for re-bind).
 	m.Stop()
 	if len(rules) == 0 {
 		return nil
 	}
 
+	// 3. Eagerly bind all new listeners synchronously.
+	var listeners []boundListener
+	for _, rule := range rules {
+		bl, err := m.bindRule(rule)
+		if err != nil {
+			// Rollback: close all successfully bound listeners.
+			for _, l := range listeners {
+				l.close()
+			}
+			return fmt.Errorf("bind %s/%d: %w", rule.Protocol, rule.ListenPort, err)
+		}
+		listeners = append(listeners, bl)
+	}
+
+	// 4. All binds succeeded — start serving goroutines.
 	ctx, cancel := context.WithCancel(context.Background())
 	m.mu.Lock()
 	m.cancel = cancel
 	m.mu.Unlock()
 
-	for _, rule := range rules {
-		rule := rule
+	for _, bl := range listeners {
+		bl := bl
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
-			if err := m.runRule(ctx, rule); err != nil && !errors.Is(err, context.Canceled) {
-				log.Printf("forward %s/%d -> %s:%d: %v",
-					rule.Protocol, rule.ListenPort, rule.TargetHost, rule.TargetPort, err)
-			}
+			m.serveBound(ctx, bl)
 		}()
 	}
 	return nil
@@ -85,24 +143,41 @@ func (m *ForwardProxy) Stop() {
 	m.wg.Wait()
 }
 
-func (m *ForwardProxy) runRule(ctx context.Context, rule ForwardRule) error {
+// bindRule synchronously binds a single forward rule and returns the listener.
+func (m *ForwardProxy) bindRule(rule ForwardRule) (boundListener, error) {
 	switch rule.Protocol {
 	case "tcp":
-		return m.runTCP(ctx, rule)
+		listen := netip.AddrPortFrom(m.hubIP, uint16(rule.ListenPort))
+		ln, err := m.tnet.ListenTCPAddrPort(listen)
+		if err != nil {
+			return boundListener{}, err
+		}
+		return boundListener{rule: rule, tcpLn: ln}, nil
 	case "udp":
-		return m.runUDP(ctx, rule)
+		listen := netip.AddrPortFrom(m.hubIP, uint16(rule.ListenPort))
+		pc, err := m.tnet.ListenUDPAddrPort(listen)
+		if err != nil {
+			return boundListener{}, err
+		}
+		return boundListener{rule: rule, udpPc: pc}, nil
 	default:
-		return fmt.Errorf("unsupported protocol %q", rule.Protocol)
+		return boundListener{}, fmt.Errorf("unsupported protocol %q", rule.Protocol)
 	}
 }
 
-func (m *ForwardProxy) runTCP(ctx context.Context, rule ForwardRule) error {
-	listen := netip.AddrPortFrom(m.hubIP, uint16(rule.ListenPort))
-	ln, err := m.tnet.ListenTCPAddrPort(listen)
-	if err != nil {
-		return fmt.Errorf("listen tcp %s: %w", listen, err)
+// serveBound runs the accept loop for a pre-bound listener (long-lived goroutine).
+func (m *ForwardProxy) serveBound(ctx context.Context, bl boundListener) {
+	switch bl.rule.Protocol {
+	case "tcp":
+		m.serveTCP(ctx, bl.tcpLn, bl.rule)
+	case "udp":
+		m.serveUDP(ctx, bl.udpPc, bl.rule)
 	}
+}
+
+func (m *ForwardProxy) serveTCP(ctx context.Context, ln net.Listener, rule ForwardRule) {
 	defer ln.Close()
+	listen := netip.AddrPortFrom(m.hubIP, uint16(rule.ListenPort))
 	log.Printf("forward tcp %s -> %s:%d", listen, rule.TargetHost, rule.TargetPort)
 
 	go func() {
@@ -114,9 +189,10 @@ func (m *ForwardProxy) runTCP(ctx context.Context, rule ForwardRule) error {
 		client, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
-				return ctx.Err()
+				return
 			}
-			return err
+			log.Printf("forward tcp %s accept: %v", listen, err)
+			return
 		}
 		go m.proxyTCP(ctx, client, rule.TargetHost, rule.TargetPort)
 	}
@@ -162,13 +238,9 @@ func (m *ForwardProxy) proxyTCP(ctx context.Context, client net.Conn, targetHost
 	}
 }
 
-func (m *ForwardProxy) runUDP(ctx context.Context, rule ForwardRule) error {
-	listen := netip.AddrPortFrom(m.hubIP, uint16(rule.ListenPort))
-	pc, err := m.tnet.ListenUDPAddrPort(listen)
-	if err != nil {
-		return fmt.Errorf("listen udp %s: %w", listen, err)
-	}
+func (m *ForwardProxy) serveUDP(ctx context.Context, pc net.PacketConn, rule ForwardRule) {
 	defer pc.Close()
+	listen := netip.AddrPortFrom(m.hubIP, uint16(rule.ListenPort))
 	log.Printf("forward udp %s -> %s:%d", listen, rule.TargetHost, rule.TargetPort)
 
 	type session struct {
@@ -188,13 +260,13 @@ func (m *ForwardProxy) runUDP(ctx context.Context, rule ForwardRule) error {
 				_ = s.backend.Close()
 			}
 			mu.Unlock()
-			return ctx.Err()
+			return
 		}
 		_ = pc.SetReadDeadline(time.Now().Add(readWait))
 		n, clientAddr, err := pc.ReadFrom(buf)
 		if err != nil {
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return
 			}
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				mu.Lock()
@@ -208,7 +280,8 @@ func (m *ForwardProxy) runUDP(ctx context.Context, rule ForwardRule) error {
 				mu.Unlock()
 				continue
 			}
-			return err
+			log.Printf("forward udp %s accept: %v", listen, err)
+			return
 		}
 
 		key := clientAddr.String()

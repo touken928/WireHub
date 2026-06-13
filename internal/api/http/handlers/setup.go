@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"net"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -34,6 +35,9 @@ type loginRequest struct {
 }
 
 func SetupStatus(s *Server, c *gin.Context) {
+	if !requireLocalSetupOrigin(s, c) {
+		return
+	}
 	configured, defaults, err := s.App.SetupStatus()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -43,6 +47,9 @@ func SetupStatus(s *Server, c *gin.Context) {
 }
 
 func Setup(s *Server, c *gin.Context) {
+	if !requireLocalSetupOrigin(s, c) {
+		return
+	}
 	configured, err := s.App.IsConfigured()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -117,6 +124,34 @@ func Reset(s *Server, c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// requireLocalSetupOrigin rejects non-loopback requests when the hub is unconfigured,
+// unless AllowRemoteSetup is explicitly enabled. This prevents remote claim of fresh
+// public deployments without relying on spoofable Origin/Host headers.
+func requireLocalSetupOrigin(s *Server, c *gin.Context) bool {
+	if s.AllowRemoteSetup {
+		return true
+	}
+	configured, err := s.App.IsConfigured()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return false
+	}
+	if configured {
+		return true // already set up; auth protects the rest
+	}
+	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "setup must be performed from localhost"})
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		c.JSON(http.StatusForbidden, gin.H{"error": "setup must be performed from localhost"})
+		return false
+	}
+	return true
 }
 
 func Login(s *Server, c *gin.Context) {

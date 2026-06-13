@@ -115,6 +115,12 @@ func (s *Store) ResetAll() error {
 		if err := tx.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&GroupLink{}).Error; err != nil {
 			return err
 		}
+		if err := tx.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&MapGroupAllow{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&ServiceMap{}).Error; err != nil {
+			return err
+		}
 		if err := tx.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&PeerGroup{}).Error; err != nil {
 			return err
 		}

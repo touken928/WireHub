@@ -76,6 +76,9 @@ func (s *Store) DeleteGroup(id uint) error {
 		if err := tx.Where("from_group_id = ? OR to_group_id = ?", id, id).Delete(&GroupLink{}).Error; err != nil {
 			return err
 		}
+		if err := tx.Where("group_id = ?", id).Delete(&MapGroupAllow{}).Error; err != nil {
+			return err
+		}
 		return tx.Delete(&PeerGroup{}, id).Error
 	})
 }

@@ -1,12 +1,14 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 
 	"github.com/gin-gonic/gin"
 	"github.com/touken928/wirehub/internal/api/http/dto"
+	"github.com/touken928/wirehub/internal/config"
 	"github.com/touken928/wirehub/internal/repo"
 )
 
@@ -84,6 +86,9 @@ func ExportDatabase(s *Server, c *gin.Context) {
 }
 
 func ImportDatabase(s *Server, c *gin.Context) {
+	if !requireLocalSetupOrigin(s, c) {
+		return
+	}
 	configured, err := s.App.IsConfigured()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -100,6 +105,12 @@ func ImportDatabase(s *Server, c *gin.Context) {
 	}
 	if filepath.Ext(file.Filename) != ".db" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "file must be a .db SQLite database"})
+		return
+	}
+	if file.Size > int64(config.MaxUploadBytes) {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{
+			"error": fmt.Sprintf("database file exceeds %d bytes limit", config.MaxUploadBytes),
+		})
 		return
 	}
 	dataDir, err := s.App.PrepareDBUploadDir()

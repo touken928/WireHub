@@ -15,7 +15,7 @@ func TestFirstHostIP(t *testing.T) {
 	}
 }
 
-func TestParseFlagsDefaults(t *testing.T) {
+func TestParseFlags(t *testing.T) {
 	dir := t.TempDir()
 	oldArgs := os.Args
 	defer func() { os.Args = oldArgs }()

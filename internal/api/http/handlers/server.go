@@ -8,9 +8,10 @@ import (
 
 // Server holds HTTP handler dependencies (no Gin types).
 type Server struct {
-	App          *service.App
-	StatusWS     *ws.Hub
-	loginLimiter *httputil.LoginRateLimiter
+	App              *service.App
+	StatusWS         *ws.Hub
+	loginLimiter     *httputil.LoginRateLimiter
+	AllowRemoteSetup bool // permit unauthenticated setup from non-loopback addresses
 }
 
 // LoginLimiter returns the login rate limiter.
@@ -19,10 +20,11 @@ func (s *Server) LoginLimiter() *httputil.LoginRateLimiter {
 }
 
 // NewServer constructs handler dependencies and wires status WebSocket publishing.
-func NewServer(app *service.App) *Server {
+func NewServer(app *service.App, allowRemoteSetup bool) *Server {
 	s := &Server{
-		App:          app,
-		loginLimiter: httputil.DefaultLoginRateLimiter(),
+		App:              app,
+		loginLimiter:     httputil.DefaultLoginRateLimiter(),
+		AllowRemoteSetup: allowRemoteSetup,
 	}
 	s.StatusWS = ws.NewHub(app.Status.BuildJSON)
 	app.Status.SetNotifier(s.StatusWS.Publish)

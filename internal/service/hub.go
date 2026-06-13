@@ -26,7 +26,9 @@ type Hub struct {
 	network         NetworkRuntime
 	dpMu            sync.RWMutex
 	liveDP          vpnruntime.Dataplane
+	statusMu        sync.Mutex
 	statusStop      chan struct{}
+	statusRunning   bool
 	statusPublisher StatusPublisher
 }
 
@@ -73,8 +75,22 @@ func (h *Hub) onStopped() {
 	h.dpMu.Unlock()
 }
 
+// StartStatusPoller begins periodic peer-stats polling. It is idempotent:
+// if a poller is already running, subsequent calls are no-ops.
+// Non-positive intervals default to 1 second to avoid NewTicker panics.
 func (h *Hub) StartStatusPoller(intervalSec int) {
-	h.statusStop = make(chan struct{})
+	h.statusMu.Lock()
+	defer h.statusMu.Unlock()
+	if h.statusRunning {
+		return
+	}
+	if intervalSec <= 0 {
+		intervalSec = 1
+	}
+	h.statusRunning = true
+	ch := make(chan struct{})
+	h.statusStop = ch
+
 	go func() {
 		ticker := time.NewTicker(time.Duration(intervalSec) * time.Second)
 		defer ticker.Stop()
@@ -82,46 +98,68 @@ func (h *Hub) StartStatusPoller(intervalSec int) {
 			select {
 			case <-ticker.C:
 				h.pollPeerStats()
-			case <-h.statusStop:
+			case <-ch:
 				return
 			}
 		}
 	}()
 }
 
+// StopStatusPoller stops a running poller. It is safe to call multiple times
+// and when no poller is running.
 func (h *Hub) StopStatusPoller() {
-	if h.statusStop != nil {
-		close(h.statusStop)
-		h.statusStop = nil
+	h.statusMu.Lock()
+	defer h.statusMu.Unlock()
+	if !h.statusRunning {
+		return
 	}
+	close(h.statusStop)
+	h.statusStop = nil
+	h.statusRunning = false
 }
 
+// SyncPortForwards pushes port-forward rules to the live network stack.
+// The network runtime is captured under the read lock to reduce pointer-after-unlock hazards.
 func (h *Hub) SyncPortForwards() error {
-	nc := h.NetworkRuntime()
+	h.networkMu.RLock()
+	nc := h.network
 	if nc == nil {
+		h.networkMu.RUnlock()
 		return nil
 	}
-	return nc.SyncPortForwards()
+	err := nc.SyncPortForwards()
+	h.networkMu.RUnlock()
+	return err
 }
 
+// SyncMaps pushes service-map state to the live network stack and refreshes ACL.
 func (h *Hub) SyncMaps() error {
-	nc := h.NetworkRuntime()
-	if nc == nil {
-		return nil
+	var err error
+	h.networkMu.RLock()
+	nc := h.network
+	if nc != nil {
+		err = nc.SyncMaps()
 	}
-	if err := nc.SyncMaps(); err != nil {
+	h.networkMu.RUnlock()
+	if err != nil {
 		return err
 	}
 	return h.app.SyncAccessFilter()
 }
 
 func (h *Hub) pollPeerStats() {
-	dp := h.dataplane()
-	if dp == nil {
+	stats, err := func() (map[string]tunnel.PeerStats, error) {
+		h.dpMu.RLock()
+		defer h.dpMu.RUnlock()
+		if h.liveDP == nil {
+			return nil, nil
+		}
+		return h.liveDP.GetStats()
+	}()
+	if err != nil {
 		return
 	}
-	stats, err := dp.GetStats()
-	if err != nil {
+	if stats == nil {
 		return
 	}
 	peers, err := h.app.Store.ListPeers()
