@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { api } from '@/api';
+import { ApiError } from '@/api/http';
 import type { SetupStatus } from '@/api/types';
 import { SetupStatusContext } from '@/app/setupStatusContext';
 
@@ -12,7 +13,7 @@ export function SetupStatusProvider({ children }: { children: ReactNode }) {
       setConfigured(status.configured);
       return status;
     } catch (err) {
-      setConfigured(true);
+      setConfigured(err instanceof ApiError && err.status === 403 ? false : true);
       throw err;
     }
   }, []);

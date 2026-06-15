@@ -190,9 +190,15 @@ export default function SettingsPage() {
     setResetError('');
     setError('');
     try {
-      await api.reset(resetPassword);
+      const result = await api.reset(resetPassword);
       clearToken();
-      window.location.href = '/setup';
+      const token = result.setup_token;
+      if (token) {
+        // Preserve the new setup token so the setup page picks it up from the URL
+        window.location.href = `/setup?setup_token=${encodeURIComponent(token)}`;
+      } else {
+        window.location.href = '/setup';
+      }
     } catch (err) {
       setResetError(getErrorMessage(err, 'Reset failed'));
       setResetting(false);

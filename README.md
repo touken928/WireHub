@@ -90,7 +90,6 @@ go build -o wirehub ./cmd/wirehub
 | `--port` | `8443` | Host TCP (Web/API) and UDP (WireGuard) |
 | `--bind` | `0.0.0.0` | HTTP bind address |
 | `--data-dir` | `./data` | SQLite (`wirehub.db`) and secrets (`.jwt_secret`) |
-| `--allow-remote-setup` | `false` | Allow first-run setup/import from non-localhost clients |
 
 `settings.listen_port` in the database is written into peer configs only; it does **not** change the hub bind port. MTU, status interval, upstream DNS, and the admin password are editable later under **Settings**.
 
@@ -98,10 +97,15 @@ go build -o wirehub ./cmd/wirehub
 
 HTTP starts immediately; WireGuard and DNS start after setup completes.
 
-For security, when the hub is still unconfigured, `/setup`, `/api/setup/status`, and `/api/setup/import` accept requests from `localhost` only by default. This prevents a public fresh deployment from being claimed by the first remote client. Use `--allow-remote-setup` only when you intentionally need remote first-run setup.
+When the hub is unconfigured, it generates a **first-run setup token** on startup, printed in the server logs. All setup endpoints (`/api/setup/status`, `/api/setup`, `/api/setup/import`) require this token to prevent unauthenticated remote claim of a fresh deployment.
 
-1. Open **http://&lt;host&gt;:&lt;port&gt;/setup** — import an existing `wirehub.db` or create a new hub
-2. Sign in with the admin account
+1. Find the setup token in the server logs (e.g. `docker logs <container>`)  
+   Log line example: `First-run setup token: abc123...`
+2. Open **http://&lt;host&gt;:&lt;port&gt;/setup?setup_token=abc123...**
+3. Import an existing `wirehub.db` or create a new hub
+4. Sign in with the admin account
+
+The token is ephemeral (in-memory only) and becomes irrelevant after successful setup. Keep it in the setup URL as `?setup_token=...` until setup or import finishes.
 
 | Field | Default | Notes |
 |-------|---------|-------|

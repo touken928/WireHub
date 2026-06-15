@@ -42,7 +42,7 @@ WireHub is a single-binary WireGuard hub: userspace `wireguard-go` + gVisor nets
 
 ## Network / Product Gotchas
 
-- Fresh unconfigured instances only allow setup/import from localhost by default; remote first-run setup requires `--allow-remote-setup`.
+- Fresh unconfigured instances require a per-process setup token (logged on startup) for all setup endpoints. Pass it via `?setup_token=` on the setup URL.
 - Peer configs always use the DB `settings.listen_port`; that does not change the actual host bind port from CLI `--port`.
 - WebSocket auth still uses `?token=` because browsers cannot send `Authorization` on upgrade.
 - Built-in DNS serves `hub.wirehub`, `{peer}.wirehub`, and `www.*`; bare `wirehub` is not served.

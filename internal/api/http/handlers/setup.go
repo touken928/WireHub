@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"errors"
-	"net"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -34,7 +33,7 @@ type loginRequest struct {
 }
 
 func SetupStatus(s *Server, c *gin.Context) {
-	if !requireLocalSetupOrigin(s, c) {
+	if !requireSetupToken(s, c) {
 		return
 	}
 	configured, defaults, err := s.App.SetupStatus()
@@ -46,7 +45,7 @@ func SetupStatus(s *Server, c *gin.Context) {
 }
 
 func Setup(s *Server, c *gin.Context) {
-	if !requireLocalSetupOrigin(s, c) {
+	if !requireSetupToken(s, c) {
 		return
 	}
 	configured, err := s.App.IsConfigured()
@@ -120,32 +119,27 @@ func Reset(s *Server, c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	// After a successful reset, the hub is unconfigured again.
+	// Generate a fresh setup token so the operator can re-run setup.
+	token := s.RegenerateSetupToken()
+	c.JSON(http.StatusOK, gin.H{"ok": true, "setup_token": token})
 }
 
-// requireLocalSetupOrigin rejects non-loopback requests when the hub is unconfigured,
-// unless AllowRemoteSetup is explicitly enabled. This prevents remote claim of fresh
-// public deployments without relying on spoofable Origin/Host headers.
-func requireLocalSetupOrigin(s *Server, c *gin.Context) bool {
-	if s.AllowRemoteSetup {
-		return true
-	}
+// requireSetupToken protects setup endpoints while the hub is unconfigured.
+// Once configuration exists, setup routes fall through to their normal
+// configured-state behavior. Otherwise the caller must provide the first-run
+// setup token via the ?setup_token= query parameter.
+func requireSetupToken(s *Server, c *gin.Context) bool {
 	configured, err := s.App.IsConfigured()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return false
 	}
 	if configured {
-		return true // already set up; auth protects the rest
+		return true
 	}
-	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": "setup must be performed from localhost"})
-		return false
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		c.JSON(http.StatusForbidden, gin.H{"error": "setup must be performed from localhost"})
+	if c.Query("setup_token") != s.GetSetupToken() {
+		c.JSON(http.StatusForbidden, gin.H{"error": "setup token required; check server logs for the first-run setup token"})
 		return false
 	}
 	return true

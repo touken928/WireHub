@@ -90,7 +90,6 @@ go build -o wirehub ./cmd/wirehub
 | `--port` | `8443` | 主机 TCP（Web/API）与 UDP（WireGuard） |
 | `--bind` | `0.0.0.0` | HTTP 绑定地址 |
 | `--data-dir` | `./data` | SQLite（`wirehub.db`）与密钥（`.jwt_secret`） |
-| `--allow-remote-setup` | `false` | 允许非 localhost 客户端执行首次初始化/导入 |
 
 库内 `listen_port` 仅写入 Peer 配置，**不**改变 Hub 绑定端口。MTU、状态间隔、上游 DNS、管理员密码可在 **Settings** 中修改。
 
@@ -98,10 +97,15 @@ go build -o wirehub ./cmd/wirehub
 
 HTTP 立即启动；WireGuard 与 DNS 在配置完成后启动。
 
-出于安全考虑，Hub 尚未初始化时，`/setup`、`/api/setup/status`、`/api/setup/import` 默认只接受 `localhost` 发起的请求，避免公网新实例被第一个远程访问者抢先初始化。只有在你明确需要远程首次配置时，才应开启 `--allow-remote-setup`。
+Hub 未配置时，启动时会生成一个**首次配置令牌（first-run setup token）**并打印在服务器日志中。所有配置端点（`/api/setup/status`、`/api/setup`、`/api/setup/import`）都需要此令牌，以防止未经验证的远程客户端抢先占用新部署的实例。
 
-1. 打开 **http://&lt;主机&gt;:&lt;端口&gt;/setup** — 导入已有 `wirehub.db` 或新建 Hub
-2. 使用管理员账号登录
+1. 查看服务器日志中的配置令牌（例如 `docker logs <容器名>`）  
+   日志示例：`First-run setup token: abc123...`
+2. 打开 **http://&lt;主机&gt;:&lt;端口&gt;/setup?setup_token=abc123...**
+3. 导入已有 `wirehub.db` 或新建 Hub
+4. 使用管理员账号登录
+
+该令牌是临时的（仅存在于内存中），配置完成后即失效。在完成配置或导入前，请始终通过 URL 中的 `?setup_token=...` 携带它。
 
 | 字段 | 默认 | 说明 |
 |------|------|------|

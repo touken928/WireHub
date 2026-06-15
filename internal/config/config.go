@@ -32,13 +32,12 @@ var DefaultUpstreamDNS = []string{"114.114.114.114", "1.1.1.1"}
 // RuntimeConfig holds process-level settings from CLI flags.
 // Persistent hub settings (endpoint, subnet, admin, MTU, etc.) live in the database after setup.
 type RuntimeConfig struct {
-	Bind              string
-	Port              int
-	DataDir           string
-	ListenAddr        string
-	DatabasePath      string
-	JWTSecret         string
-	AllowRemoteSetup  bool     // permit unauthenticated setup from non-loopback addresses
+	Bind         string
+	Port         int
+	DataDir      string
+	ListenAddr   string
+	DatabasePath string
+	JWTSecret    string
 }
 
 // ParseFlags parses CLI flags and returns runtime configuration.
@@ -46,7 +45,6 @@ func ParseFlags() (*RuntimeConfig, error) {
 	port := flag.Int("port", DefaultPort, "TCP port for web UI/API and UDP port for WireGuard (same number)")
 	bind := flag.String("bind", DefaultBind, "IP address to bind the web UI")
 	dataDir := flag.String("data-dir", DefaultDataDir, "data directory (SQLite DB, JWT secret)")
-	allowRemote := flag.Bool("allow-remote-setup", false, "allow unauthenticated setup from any IP (testing only)")
 	flag.Parse()
 
 	if *port <= 0 || *port > 65535 {
@@ -73,12 +71,11 @@ func ParseFlags() (*RuntimeConfig, error) {
 	}
 
 	return &RuntimeConfig{
-		Bind:              bindAddr,
-		Port:              *port,
-		DataDir:           dataDirPath,
-		ListenAddr:        fmt.Sprintf("%s:%d", bindAddr, *port),
-		DatabasePath:      filepath.Join(dataDirPath, "wirehub.db"),
-		JWTSecret:         jwtSecret,
-		AllowRemoteSetup:  *allowRemote,
+		Bind:         bindAddr,
+		Port:         *port,
+		DataDir:      dataDirPath,
+		ListenAddr:   fmt.Sprintf("%s:%d", bindAddr, *port),
+		DatabasePath: filepath.Join(dataDirPath, "wirehub.db"),
+		JWTSecret:    jwtSecret,
 	}, nil
 }

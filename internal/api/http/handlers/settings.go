@@ -83,7 +83,7 @@ func ExportDatabase(s *Server, c *gin.Context) {
 }
 
 func ImportDatabase(s *Server, c *gin.Context) {
-	if !requireLocalSetupOrigin(s, c) {
+	if !requireSetupToken(s, c) {
 		return
 	}
 	configured, err := s.App.IsConfigured()

@@ -1,15 +1,19 @@
-import { Button, Spinner } from '@fluentui/react-components';
+import { Button, Spinner, Input, Field } from '@fluentui/react-components';
 import { ArrowUploadRegular } from '@fluentui/react-icons';
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, getToken, setToken } from '@/api';
+import { getSetupToken, clearSetupToken } from '@/api/http';
 import type { SetupDefaults } from '@/api/types';
 import { useSetupStatus } from '@/app/setupStatusContext';
 import { AuthField } from '@/components/auth/AuthField';
 import { LoginLayout } from '@/components/layout/LoginLayout';
 import { getErrorMessage } from '@/lib/error';
 import { textToUpstreamDns } from '@/lib/hubConfig';
+import { isSetupTokenRejectedError } from '@/lib/setupToken';
 import { useLoginPageStyles } from '@/styles/loginPage';
+
+const SETUP_TOKEN_KEY = 'wirehub_setup_token';
 
 export default function SetupPage() {
   const styles = useLoginPageStyles();
@@ -18,6 +22,8 @@ export default function SetupPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [defaults, setDefaults] = useState<SetupDefaults | null>(null);
   const [loadError, setLoadError] = useState('');
+  const [tokenInput, setTokenInput] = useState('');
+  const [tokenError, setTokenError] = useState('');
   const [endpoint, setEndpoint] = useState('');
   const [subnet, setSubnet] = useState('');
   const [adminUsername, setAdminUsername] = useState('');
@@ -30,8 +36,10 @@ export default function SetupPage() {
   const [importOk, setImportOk] = useState('');
   const [loading, setLoading] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [hasToken, setHasToken] = useState(!!getSetupToken());
 
   useEffect(() => {
+    if (!hasToken) return;
     let cancelled = false;
     refresh()
       .then((status) => {
@@ -50,13 +58,33 @@ export default function SetupPage() {
       })
       .catch((err) => {
         if (!cancelled) {
+          if (isSetupTokenRejectedError(err)) {
+            clearSetupToken();
+            navigate('/setup', { replace: true });
+            setHasToken(false);
+            setTokenInput('');
+            setTokenError('That token did not work. Check the server logs and try again.');
+            return;
+          }
           setLoadError(getErrorMessage(err, 'Failed to load setup defaults'));
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [navigate, refresh]);
+  }, [navigate, refresh, hasToken]);
+
+  const handleTokenSubmit = () => {
+    const trimmed = tokenInput.trim();
+    if (!trimmed) {
+      setTokenError('Please enter the setup token from the server logs.');
+      return;
+    }
+    sessionStorage.setItem(SETUP_TOKEN_KEY, trimmed);
+    setTokenError('');
+    setLoadError('');
+    setHasToken(true);
+  };
 
   const handleImport = async (file: File) => {
     setImporting(true);
@@ -64,6 +92,7 @@ export default function SetupPage() {
     setImportOk('');
     try {
       await api.importDatabase(file);
+      clearSetupToken(); // token no longer needed after import
       await refresh();
       setImportOk('Database imported. Sign in with your existing admin account.');
       setTimeout(() => navigate('/login', { replace: true }), 800);
@@ -91,6 +120,7 @@ export default function SetupPage() {
         upstream_dns: textToUpstreamDns(upstreamDns),
       });
       setToken(token);
+      clearSetupToken(); // token no longer needed after hub is configured
       await refresh();
       navigate('/', { replace: true });
     } catch (err) {
@@ -113,6 +143,50 @@ export default function SetupPage() {
         <Button appearance="primary" className={styles.submitButton} onClick={() => window.location.reload()}>
           Retry
         </Button>
+      </LoginLayout>
+    );
+  }
+
+  if (!hasToken) {
+    return (
+      <LoginLayout
+        wide
+        scroll
+        heroTitle="Set up your hub."
+        heroSubtitle="Enter the first-run setup token printed in the server logs to continue."
+      >
+        <div>
+          <h2 className={styles.formTitle}>Setup token required</h2>
+          <p className={styles.formSubtitle}>
+            WireHub prints a one-time setup token in the server logs on startup. Use that token
+            for first-time setup or after a reset, then paste it here.
+          </p>
+        </div>
+        <Field
+          label="Setup token"
+          validationMessage={tokenError}
+          validationState={tokenError ? 'error' : undefined}
+        >
+          <Input
+            value={tokenInput}
+            onChange={(_, data) => {
+              setTokenInput(data.value);
+              setTokenError('');
+            }}
+            placeholder="Paste the setup token here"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleTokenSubmit();
+            }}
+          />
+        </Field>
+        <div className={styles.importBlock}>
+          <Button appearance="primary" className={styles.submitButton} onClick={handleTokenSubmit}>
+            Continue
+          </Button>
+          <p className={styles.formSubtitle}>
+            If you just reset the hub, this screen should open automatically from /setup?setup_token=...
+          </p>
+        </div>
       </LoginLayout>
     );
   }

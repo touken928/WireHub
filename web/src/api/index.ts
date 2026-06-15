@@ -1,5 +1,5 @@
 import { API_BASE } from '@/constants';
-import { request, requestBlob } from '@/api/http';
+import { request, requestBlob, getSetupToken } from '@/api/http';
 import type {
   GroupGraph,
   HubSettings,
@@ -22,7 +22,11 @@ export const api = {
   importDatabase: async (file: File) => {
     const form = new FormData();
     form.append('database', file);
-    const res = await fetch(`${API_BASE}/setup/import`, {
+    const setupToken = getSetupToken();
+    const path = setupToken
+      ? `${API_BASE}/setup/import?setup_token=${encodeURIComponent(setupToken)}`
+      : `${API_BASE}/setup/import`;
+    const res = await fetch(path, {
       method: 'POST',
       body: form,
     });
@@ -49,7 +53,7 @@ export const api = {
     }),
 
   reset: (password: string) =>
-    request<{ ok: boolean }>('/admin/reset', {
+    request<{ ok: boolean; setup_token?: string }>('/admin/reset', {
       method: 'POST',
       body: JSON.stringify({ password }),
     }),

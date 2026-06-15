@@ -9,13 +9,15 @@ vi.mock('@/api/auth', () => ({
 
 const mockLocation: { href: string } = { href: '' };
 let fetchMock: ReturnType<typeof vi.fn>;
+const replaceStateMock = vi.fn();
 
 beforeEach(() => {
   mockLocation.href = '';
   fetchMock = vi.fn();
-  vi.stubGlobal('window', { location: mockLocation });
+  vi.stubGlobal('window', { location: mockLocation, history: { replaceState: replaceStateMock } });
   vi.stubGlobal('location', mockLocation);
   vi.stubGlobal('fetch', fetchMock);
+  replaceStateMock.mockReset();
 });
 
 afterEach(() => {
@@ -103,5 +105,19 @@ describe('fetch error fallback', () => {
     const { request } = await import('@/api/http');
     await expect(request('/groups', { method: 'GET' })).rejects.toThrow('Unauthorized');
     expect(mockLocation.href).toBe('/login');
+  });
+});
+
+describe('getSetupToken', () => {
+  it('stores a query token and removes it from the URL', async () => {
+    mockLocation.href = '';
+    Object.defineProperty(window, 'location', {
+      value: { ...mockLocation, pathname: '/setup', search: '?setup_token=test-token&foo=bar', hash: '' },
+      writable: true,
+    });
+
+    const { getSetupToken } = await import('@/api/http');
+    expect(getSetupToken()).toBe('test-token');
+    expect(replaceStateMock).toHaveBeenCalledWith(null, '', '/setup?foo=bar');
   });
 });
