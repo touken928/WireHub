@@ -1,4 +1,5 @@
 # Local work notes and runtime data
+.ignore
 /.slim/
 /data/
 /wirehub
