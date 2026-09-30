@@ -1,7 +1,7 @@
 <h1 align="center">WireHub</h1>
 
 <p align="center">
-  连接你的设备，在浏览器中管理 WireGuard 网络、分组权限和服务转发。
+  Connect your devices and manage your WireGuard network, group access, and service forwarding in your browser.
 </p>
 
 <p align="center">
@@ -11,19 +11,19 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/overview.png" alt="WireHub 管理界面" width="960">
+  <img src="docs/assets/overview.png" alt="WireHub dashboard" width="960">
 </p>
 
-## 功能
+## Features
 
-- 查看设备连接状态与流量。
-- 创建设备并下载 WireGuard 配置。
-- 拖拽连接分组，设置单向、双向和组内访问权限。
-- 将设备服务通过统一地址转发给指定分组。
+- View peer activity and traffic.
+- Add peers and download their WireGuard configurations.
+- Connect groups by dragging to set one-way, two-way, and same-group access.
+- Share peer services with selected groups through a single hub address.
 
-## 快速开始
+## Quick start
 
-将管理口令替换为自己的随机口令，然后启动：
+Replace the admin token with your own long random secret, then start WireHub:
 
 ```sh
 export WIREHUB_ADMIN_TOKEN='replace-with-a-long-random-secret'
@@ -38,52 +38,52 @@ docker run -d --name wirehub \
   ghcr.io/touken928/wirehub:latest
 ```
 
-打开 **[http://localhost:51820](http://localhost:51820)**，输入同一管理口令并点击 **Connect**。
+Open **[http://localhost:51820](http://localhost:51820)**, enter the same admin token, and click **Connect**.
 
-远程服务器可先运行 `ssh -L 51820:127.0.0.1:51820 user@server`，再在本地浏览器打开上述地址。管理端口默认仅在服务器本机开放；需要公网管理时，请配置 HTTPS 反向代理。
+For a remote server, run `ssh -L 51820:127.0.0.1:51820 user@server`, then open the address above in your local browser. The command publishes the admin port only on the server's loopback interface. Use an HTTPS reverse proxy for public access.
 
-### 首次设置
+### Initial setup
 
-| 字段 | 填写方式 |
+| Field | Value |
 | --- | --- |
-| **Subnet** | 默认 `10.10.10.0/24`，选择与现有网络不冲突的网段。 |
-| **Endpoint** | 服务器公网 IP 或域名加端口，例如 `vpn.example.com:51820`。 |
-| **Keepalive** | 默认 `25` 秒。 |
+| **Subnet** | Defaults to `10.10.10.0/24`. Choose a range that does not overlap your existing networks. |
+| **Endpoint** | Your server's public IP or domain with a port, such as `vpn.example.com:51820`. |
+| **Keepalive** | Defaults to `25` seconds. |
 
-点击 **Create network** 完成设置。网段创建后不可更改；默认 Hub 地址为 `10.10.10.1`，设备从 `10.10.10.2` 开始分配。服务器需允许 UDP `51820`。
+Click **Create network** to finish setup. The subnet cannot be changed afterward. With the default subnet, the hub uses `10.10.10.1` and peers start at `10.10.10.2`. Allow UDP port `51820` on your server.
 
-## 使用
+## Usage
 
-### 添加设备
+### Add a peer
 
-1. 在 **Groups** 中点击 **New group** 创建分组。
-2. 在 **Peers** 中点击 **New peer**，填写名称并选择分组。
-3. 下载生成的 `.conf`，导入 [WireGuard 客户端](https://www.wireguard.com/install/)并连接。
+1. Open **Groups** and click **New group**.
+2. Open **Peers**, click **New peer**, enter a name, and select a group.
+3. Download the generated `.conf`, import it into a [WireGuard client](https://www.wireguard.com/install/), and connect.
 
-配置仅在创建设备时提供，请保存好。需要重新配置时，删除设备并重新创建。
+Save the configuration when you create the peer; it is only provided once. If you lose it, delete and recreate the peer.
 
-### 设置访问权限
+### Set access permissions
 
-在 **Groups** 中，从一个分组的连接点拖到另一个分组：
+In **Groups**, drag from a connection handle on one group to another:
 
-- **One way**：只允许起点分组访问终点分组。
-- **Both ways**：允许两个分组相互访问。
-- **Intra-group access**：在分组详情中启用，允许同组设备互访。
+- **One way**: allow the source group to access the target group.
+- **Both ways**: allow both groups to access each other.
+- **Intra-group access**: enable this in the group details to allow peers in the same group to access each other.
 
-点击 **Save** 应用更改；选中连接后按 **Delete** 可移除权限。未授权的设备间访问默认禁止。
+Click **Save** to apply changes. Select a connection and press **Delete** to remove access. Access between peers is denied until explicitly allowed.
 
-### 转发服务
+### Forward a service
 
-在 **Forwards** 中点击 **New forward**，选择目标设备、TCP/UDP、服务端口和允许使用的分组。来源分组还需在 **Groups** 中拥有到目标分组的访问权限。
+In **Forwards**, click **New forward** and choose the target peer, TCP/UDP, service port, and allowed groups. Each source group also needs access to the target group in **Groups**.
 
-例如将某台设备的 TCP `8080` 服务转发后，授权设备通过 **`10.10.10.1:8080`** 访问。
+For example, forward a peer's TCP `8080` service so authorized peers can reach it at **`10.10.10.1:8080`**.
 
-### 调整设置与更新
+### Settings and updates
 
-在 **Settings** 中修改 Endpoint 和 Keepalive。修改只影响之后生成的设备配置。
+Change Endpoint and Keepalive in **Settings**. Changes apply to configurations generated afterward.
 
-更新时拉取镜像，停止并删除旧容器，再使用同一个 `wirehub-data` 数据卷运行上述启动命令。数据卷保存网络配置，请保留并备份。
+To update, pull the image, stop and remove the old container, then repeat the startup command with the same `wirehub-data` volume. Keep and back up this volume to preserve your network configuration.
 
 ---
 
-镜像支持 **amd64 / arm64**，每次推送版本 tag 自动发布。历史版本见 [`v0`](https://github.com/touken928/WireHub/tree/v0)。
+Images support **amd64 / arm64** and are published automatically when a version tag is pushed. See [`v0`](https://github.com/touken928/WireHub/tree/v0) for the previous version.
