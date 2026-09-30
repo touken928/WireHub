@@ -1,4 +1,4 @@
-name: Publish Docker image
+name: Release
 
 on:
   push:
@@ -14,6 +14,109 @@ env:
   IMAGE_NAME: ghcr.io/touken928/wirehub
 
 jobs:
+  binaries:
+    name: Build ${{ matrix.name }} binary
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            ext: ''
+            rustflags: ''
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            ext: ''
+            rustflags: ''
+          - name: windows-amd64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: .exe
+            rustflags: '-C target-feature=+crt-static'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build frontend
+        run: pnpm --dir frontend install --frozen-lockfile && pnpm --dir frontend build
+      - name: Build release binary
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          VERSION: ${{ github.ref_name }}
+        run: |
+          cargo build --release --locked --target '${{ matrix.target }}'
+          mkdir -p dist
+          cp 'target/${{ matrix.target }}/release/wirehub${{ matrix.ext }}' \
+            "dist/wirehub-${VERSION}-${{ matrix.name }}${{ matrix.ext }}"
+      - name: Verify binary startup and embedded UI
+        env:
+          BINARY_PATH: dist/wirehub-${{ github.ref_name }}-${{ matrix.name }}${{ matrix.ext }}
+        run: |
+          python - <<'PY'
+          import json, os, socket, subprocess, tempfile, time, urllib.request
+          from pathlib import Path
+          binary = str(Path(os.environ['BINARY_PATH']).resolve())
+          with tempfile.TemporaryDirectory() as directory:
+              with socket.socket() as tcp, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+                  tcp.bind(('127.0.0.1', 0))
+                  port = tcp.getsockname()[1]
+                  udp.bind(('0.0.0.0', port))
+              env = {key: value for key, value in os.environ.items() if not key.startswith('WIREHUB_')}
+              env.update(WIREHUB_ADMIN_TOKEN='binary-smoke-test', WIREHUB_PORT=str(port),
+                         WIREHUB_DB=str(Path(directory) / 'hub.sqlite3'),
+                         WIREHUB_HUB_KEY=str(Path(directory) / 'hub.key'))
+              with open(Path(directory) / 'hub.log', 'wb') as log:
+                  process = subprocess.Popen([binary], cwd=directory, env=env, stdout=log, stderr=log)
+                  try:
+                      url = f'http://127.0.0.1:{port}'
+                      for attempt in range(60):
+                          if process.poll() is not None:
+                              raise SystemExit(f'Binary exited during startup: {process.returncode}')
+                          try:
+                              with urllib.request.urlopen(url + '/api/health', timeout=1) as response:
+                                  assert json.load(response)['ok']
+                              break
+                          except OSError:
+                              time.sleep(0.5)
+                      else:
+                          raise SystemExit('Binary health check timed out')
+                      with urllib.request.urlopen(url, timeout=5) as response:
+                          assert 'WireHub' in response.read().decode()
+                      print('PASS: binary startup and embedded UI')
+                  finally:
+                      process.terminate()
+                      try:
+                          process.wait(timeout=5)
+                      except subprocess.TimeoutExpired:
+                          process.kill()
+                          process.wait()
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.name }}
+          path: dist/wirehub-*
+          if-no-files-found: error
+          retention-days: 7
+
   build:
     name: Build ${{ matrix.arch }} image
     runs-on: ${{ matrix.runner }}
@@ -142,3 +245,49 @@ jobs:
           for digest in *; do images+=("$IMAGE_NAME@sha256:$digest"); done
           docker buildx imagetools create "${tags[@]}" "${images[@]}"
           docker buildx imagetools inspect "$IMAGE_NAME:$VERSION"
+
+  release:
+    name: Publish GitHub Release
+    if: github.event_name == 'push'
+    needs: [binaries, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: binary-*
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum wirehub-* > SHA256SUMS
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/wirehub-*
+            dist/SHA256SUMS
+          body: |
+            ## Downloads
+
+            | Platform | Binary |
+            | --- | --- |
+            | Linux amd64 | `wirehub-${{ github.ref_name }}-linux-amd64` |
+            | Linux arm64 | `wirehub-${{ github.ref_name }}-linux-arm64` |
+            | Windows amd64 | `wirehub-${{ github.ref_name }}-windows-amd64.exe` |
+
+            Download the binary for your platform. The web UI is included.
+            Set `WIREHUB_ADMIN_TOKEN`, start WireHub, and open http://localhost:51820.
+            See the [README](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md) for startup commands.
+
+            ## Docker
+
+            ```sh
+            docker pull ghcr.io/touken928/wirehub:${{ github.ref_name }}
+            ```
+
+            Supports Linux amd64 and arm64. `SHA256SUMS` contains checksums for the binaries.

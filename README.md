@@ -23,6 +23,8 @@
 
 ## Quick start
 
+### Docker
+
 Replace the admin token with your own long random secret, then start WireHub:
 
 ```sh
@@ -38,9 +40,38 @@ docker run -d --name wirehub \
   ghcr.io/touken928/wirehub:latest
 ```
 
+### Linux / Windows binary
+
+Download the file for your platform from [GitHub Releases](https://github.com/touken928/WireHub/releases):
+
+| Platform | File |
+| --- | --- |
+| Linux amd64 | `wirehub-vX.Y.Z-linux-amd64` |
+| Linux arm64 | `wirehub-vX.Y.Z-linux-arm64` |
+| Windows amd64 | `wirehub-vX.Y.Z-windows-amd64.exe` |
+
+**Linux**
+
+```sh
+chmod +x wirehub-vX.Y.Z-linux-amd64
+export WIREHUB_ADMIN_TOKEN='replace-with-a-long-random-secret'
+./wirehub-vX.Y.Z-linux-amd64
+```
+
+Use the `linux-arm64` file on ARM servers.
+
+**Windows (PowerShell)**
+
+```powershell
+$env:WIREHUB_ADMIN_TOKEN = 'replace-with-a-long-random-secret'
+.\wirehub-vX.Y.Z-windows-amd64.exe
+```
+
+The web UI is included. Run the binary from a dedicated folder and keep that folder's data when updating.
+
 Open **[http://localhost:51820](http://localhost:51820)**, enter the same admin token, and click **Connect**.
 
-For a remote server, run `ssh -L 51820:127.0.0.1:51820 user@server`, then open the address above in your local browser. The command publishes the admin port only on the server's loopback interface. Use an HTTPS reverse proxy for public access.
+For a remote server, run `ssh -L 51820:127.0.0.1:51820 user@server`, then open the address above in your local browser. The admin interface is available only on the server's loopback interface by default. Use an HTTPS reverse proxy for public access.
 
 ### Initial setup
 
@@ -86,4 +117,4 @@ To update, pull the image, stop and remove the old container, then repeat the st
 
 ---
 
-Images support **amd64 / arm64** and are published automatically when a version tag is pushed. See [`v0`](https://github.com/touken928/WireHub/tree/v0) for the previous version.
+Each version tag publishes **Linux amd64 / arm64** and **Windows amd64** binaries to GitHub Releases, along with **amd64 / arm64** Docker images. See [`v0`](https://github.com/touken928/WireHub/tree/v0) for the previous version.
