@@ -1,0 +1,22 @@
+[package]
+name = "wirehub"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.7", features = ["macros"] }
+boringtun = "=0.7.1"
+hex = "0.4"
+rand = "0.8"
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tokio = { version = "1", features = ["full"] }
+utoipa = { version = "4", features = ["axum_extras"] }
+base64 = "0.22"
+mime_guess = "2"
+rust-embed = { version = "8", features = ["debug-embed"] }
+
+[dev-dependencies]
+tempfile = "3"

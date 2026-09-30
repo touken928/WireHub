@@ -1,0 +1,32 @@
+name: Userspace integration
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  userspace-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: tests/client/go.sum
+      - name: Set up pnpm
+        run: corepack enable && corepack prepare pnpm@9.15.9 --activate
+      - name: Run userspace integration and client tests
+        run: python3 tests/integration.py
+      - name: Run Rust tests
+        run: cargo test --locked
+      - name: Verify checked-in OpenAPI contract
+        run: cargo run --locked -- export-openapi > "$RUNNER_TEMP/openapi.json" && cmp openapi.json "$RUNNER_TEMP/openapi.json"

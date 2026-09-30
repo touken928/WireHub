@@ -1,0 +1,778 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "wirehub",
+    "description": "",
+    "license": {
+      "name": ""
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/forwards": {
+      "get": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "list_forwards",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Forward"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "create_forward",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewForward"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Forward"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/forwards/{id}": {
+      "delete": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "delete_forward",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/groups": {
+      "get": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "list_groups",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Group"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "create_group",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewGroup"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Group"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/groups/{id}": {
+      "delete": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "delete_group",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/groups/{id}/acl": {
+      "put": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "set_acl",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetAcl"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Group"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/peers": {
+      "get": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "list_peers",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PeerStatus"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "create_peer",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewPeer"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PeerProvision"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/peers/{id}": {
+      "delete": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "delete_peer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/peers/{id}/group": {
+      "put": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "move_peer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MovePeer"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Peer"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/settings": {
+      "put": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "put_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "401": {
+            "description": ""
+          },
+          "409": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/setup": {
+      "get": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "get_setup",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": ""
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "post_setup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "401": {
+            "description": ""
+          },
+          "409": {
+            "description": ""
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Forward": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "protocol",
+          "target_peer_id",
+          "target_port",
+          "allowed_group_ids"
+        ],
+        "properties": {
+          "allowed_group_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "protocol": {
+            "type": "string"
+          },
+          "target_peer_id": {
+            "type": "string"
+          },
+          "target_port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "Group": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "allowed_groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "MovePeer": {
+        "type": "object",
+        "required": [
+          "group_id"
+        ],
+        "properties": {
+          "group_id": {
+            "type": "string"
+          }
+        }
+      },
+      "NetworkSettings": {
+        "type": "object",
+        "required": [
+          "subnet",
+          "endpoint",
+          "persistent_keepalive"
+        ],
+        "properties": {
+          "endpoint": {
+            "type": "string"
+          },
+          "persistent_keepalive": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "subnet": {
+            "type": "string"
+          }
+        }
+      },
+      "NewForward": {
+        "type": "object",
+        "required": [
+          "name",
+          "protocol",
+          "target_peer_id",
+          "target_port",
+          "allowed_group_ids"
+        ],
+        "properties": {
+          "allowed_group_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "protocol": {
+            "type": "string"
+          },
+          "target_peer_id": {
+            "type": "string"
+          },
+          "target_port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "NewGroup": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "NewPeer": {
+        "type": "object",
+        "required": [
+          "name",
+          "group_id"
+        ],
+        "properties": {
+          "group_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "Peer": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "public_key",
+          "ipv4",
+          "group_id",
+          "received_bytes",
+          "sent_bytes"
+        ],
+        "properties": {
+          "group_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "ipv4": {
+            "type": "string"
+          },
+          "last_handshake_unix": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "name": {
+            "type": "string"
+          },
+          "public_key": {
+            "type": "string"
+          },
+          "received_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "sent_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "PeerProvision": {
+        "type": "object",
+        "required": [
+          "peer",
+          "config"
+        ],
+        "properties": {
+          "config": {
+            "type": "string"
+          },
+          "peer": {
+            "$ref": "#/components/schemas/Peer"
+          }
+        }
+      },
+      "PeerStatus": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "public_key",
+          "ipv4",
+          "group_id",
+          "received_bytes",
+          "sent_bytes"
+        ],
+        "properties": {
+          "group_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "ipv4": {
+            "type": "string"
+          },
+          "last_data_unix": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "last_handshake_unix": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "name": {
+            "type": "string"
+          },
+          "public_key": {
+            "type": "string"
+          },
+          "received_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "sent_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "SetAcl": {
+        "type": "object",
+        "required": [
+          "allowed_groups"
+        ],
+        "properties": {
+          "allowed_groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "SettingsRequest": {
+        "type": "object",
+        "required": [
+          "endpoint",
+          "persistent_keepalive"
+        ],
+        "properties": {
+          "endpoint": {
+            "type": "string"
+          },
+          "persistent_keepalive": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "SetupRequest": {
+        "type": "object",
+        "required": [
+          "subnet",
+          "endpoint",
+          "persistent_keepalive"
+        ],
+        "properties": {
+          "endpoint": {
+            "type": "string"
+          },
+          "persistent_keepalive": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "subnet": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SetupStatus": {
+        "type": "object",
+        "required": [
+          "configured"
+        ],
+        "properties": {
+          "configured": {
+            "type": "boolean"
+          },
+          "settings": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/NetworkSettings"
+              }
+            ],
+            "nullable": true
+          }
+        }
+      },
+      "Status": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}

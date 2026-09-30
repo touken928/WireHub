@@ -1,0 +1,45 @@
+# Local work notes and runtime data
+/.slim/
+/data/
+/wirehub
+*.sqlite*
+*.db*
+
+# Secrets and downloaded WireGuard configurations
+*.key
+*.key.*
+*.pem
+*.p12
+*.pfx
+*.conf
+!*.conf.example
+!*.example.conf
+.env
+.env.*
+!.env.example
+
+# Dependencies, builds, and package caches
+node_modules/
+dist/
+target/
+.pnpm-store/
+.cache/
+go-build/
+*.tsbuildinfo
+*.test
+/tests/client/client
+
+# Test reports, Python bytecode, and logs
+coverage/
+playwright-report/
+test-results/
+__pycache__/
+*.py[cod]
+*.log
+
+# OS and editor temporary files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
