@@ -24,6 +24,24 @@ mv openapi.json.tmp openapi.json
 
 `export-openapi` 仅打印 OpenAPI JSON 后退出，不启动监听器，也不要求设置运行时管理令牌。修改 API 路由/模型后应重新生成并提交 `openapi.json`。
 
+## Docker 镜像发布
+
+向仓库推送 `v*.*.*` 版本 tag 时，[发布工作流](.github/workflows/release.yml) 自动构建并验证 `linux/amd64`、`linux/arm64` 镜像，随后推送到 `ghcr.io/touken928/wirehub`。例如 `v1.0.0` 会生成 `:v1.0.0`、`:1.0.0` 和 `:latest`；预发布版本只生成对应版本标签，不更新 `latest`。Actions 的手动运行只执行两种架构的构建和启动检查。
+
+镜像包含已编译的 Web 界面，以 UID/GID `65532` 运行，数据库与 Hub 密钥保存到 `/data`。在本机访问或受可信反向代理保护的环境中运行：
+
+```sh
+docker run --detach --name wirehub \
+  --env WIREHUB_ADMIN_TOKEN \
+  --env WIREHUB_TRUSTED_PROXY_MODE=1 \
+  --publish 127.0.0.1:51820:51820/tcp \
+  --publish 51820:51820/udp \
+  --volume wirehub-data:/data \
+  ghcr.io/touken928/wirehub:latest
+```
+
+先按下节设置 `WIREHUB_ADMIN_TOKEN`。镜像内 HTTP 监听 `0.0.0.0`，示例仅将管理端口发布到主机 loopback；如需远程管理，应通过可信的 TLS/认证反向代理访问。使用宿主机目录挂载 `/data` 时，目录应允许 UID/GID `65532` 写入。可用 `docker build -f docker/Dockerfile -t wirehub:local .` 构建本地镜像；用户态集成测试继续直接运行本地进程。
+
 ## 启动与配置
 
 `WIREHUB_ADMIN_TOKEN` 必须设置为非空的管理密钥：

@@ -1,0 +1,144 @@
+name: Publish Docker image
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/touken928/wirehub
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }} image
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern=v{{version}}
+      - name: Build image for smoke test
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: wirehub:smoke
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=release-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}
+      - name: Verify container startup and embedded UI
+        run: |
+          trap 'docker rm --force wirehub-smoke >/dev/null 2>&1 || true' EXIT
+          docker run --detach --name wirehub-smoke \
+            --env WIREHUB_ADMIN_TOKEN=smoke-test-token \
+            --env WIREHUB_TRUSTED_PROXY_MODE=1 \
+            --publish 127.0.0.1::51820/tcp wirehub:smoke
+          export SMOKE_ADDRESS=$(docker port wirehub-smoke 51820/tcp)
+          python3 - <<'PY'
+          import json, os, time, urllib.request
+          url = 'http://' + os.environ['SMOKE_ADDRESS']
+          for attempt in range(60):
+              try:
+                  with urllib.request.urlopen(url + '/api/health', timeout=1) as response:
+                      assert json.load(response)['ok']
+                  break
+              except OSError:
+                  time.sleep(1)
+          else:
+              raise SystemExit('Container health check timed out')
+          with urllib.request.urlopen(url, timeout=5) as response:
+              assert 'WireHub' in response.read().decode()
+          print('PASS: container health and embedded UI')
+          PY
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push image by digest
+        if: github.event_name == 'push'
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+      - name: Export digest
+        if: github.event_name == 'push'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish multi-platform tags
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern=v{{version}}
+      - name: Publish and inspect manifest
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          METADATA: ${{ steps.meta.outputs.json }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          mapfile -t tags < <(jq -r '.tags[] | "--tag", .' <<< "$METADATA")
+          images=()
+          for digest in *; do images+=("$IMAGE_NAME@sha256:$digest"); done
+          docker buildx imagetools create "${tags[@]}" "${images[@]}"
+          docker buildx imagetools inspect "$IMAGE_NAME:$VERSION"
