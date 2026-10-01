@@ -117,6 +117,7 @@ fn parse(packet: &[u8]) -> Option<ValidatedPacket> {
             if total < ihl + 20 { return None; }
             let tcp_len = (packet[ihl + 12] >> 4) as usize * 4;
             if tcp_len < 20 || tcp_len > total - ihl { return None; }
+            if !transport_valid(src, dst, protocol, &packet[ihl..]) { return None; }
             (Some(read_u16(packet, ihl)), Some(read_u16(packet, ihl + 2)), Some(packet[ihl + 13]))
         }
         _ => (None, None, None),
@@ -152,6 +153,29 @@ pub(super) fn test_packet(src: [u8; 4], dst: [u8; 4], malformed: bool, fragment:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tcp_packet(payload: &[u8]) -> Vec<u8> {
+        let src = Ipv4Addr::new(10, 77, 0, 2);
+        let dst = Ipv4Addr::new(10, 77, 0, 3);
+        let tcp_len = 24 + payload.len();
+        let mut packet = vec![0; 20 + tcp_len];
+        packet[0] = 0x45;
+        let total_len = packet.len() as u16;
+        packet[2..4].copy_from_slice(&total_len.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&src.octets());
+        packet[16..20].copy_from_slice(&dst.octets());
+        packet[20..22].copy_from_slice(&1234u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&80u16.to_be_bytes());
+        packet[32] = 0x60; // 24-byte TCP header, including four option bytes.
+        packet[40..44].copy_from_slice(&[1, 1, 1, 0]);
+        packet[44..].copy_from_slice(payload);
+        let c = transport_checksum(src, dst, 6, &packet[20..]);
+        packet[36..38].copy_from_slice(&c.to_be_bytes());
+        fix_ip(&mut packet);
+        packet
+    }
 
     fn fix_ip(packet: &mut [u8]) {
         packet[10] = 0;
@@ -192,16 +216,28 @@ mod tests {
         short[0] = 0x45;
         short[2..4].copy_from_slice(&35u16.to_be_bytes());
         assert!(parse(&short).is_none());
-        let mut packet = vec![0; 44];
-        packet[0] = 0x45;
-        packet[2..4].copy_from_slice(&44u16.to_be_bytes());
-        packet[8] = 64;
-        packet[9] = 6;
-        packet[20..22].copy_from_slice(&1234u16.to_be_bytes());
-        packet[22..24].copy_from_slice(&80u16.to_be_bytes());
-        packet[32] = 0x60;
-        fix_ip(&mut packet);
+        let packet = tcp_packet(&[]);
         assert_eq!(parse(&packet).unwrap().src_port(), Some(1234));
+    }
+
+    #[test]
+    fn valid_tcp_checksum_with_options_and_odd_payload_is_accepted() {
+        let packet = tcp_packet(&[0x41, 0x42, 0x43]);
+        assert!(parse(&packet).is_some());
+    }
+
+    #[test]
+    fn invalid_tcp_checksum_is_rejected_before_validation() {
+        let mut bad_checksum = tcp_packet(&[0x41, 0x42, 0x43]);
+        bad_checksum[36] ^= 1;
+        assert!(parse(&bad_checksum).is_none());
+    }
+
+    #[test]
+    fn tcp_payload_bitflip_is_rejected_before_validation() {
+        let mut bad_payload = tcp_packet(&[0x41, 0x42, 0x43]);
+        *bad_payload.last_mut().unwrap() ^= 1;
+        assert!(parse(&bad_payload).is_none());
     }
 
     #[test]

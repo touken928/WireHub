@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -49,6 +50,7 @@ type client struct {
 	tun      netip.Addr
 	stack    *netstack.Net
 	servers  []*server
+	tcpConns map[string]net.Conn
 	eventsMu sync.Mutex
 	events   []event
 }
@@ -67,6 +69,18 @@ type probeRequest struct {
 }
 type probeResponse struct {
 	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+type tcpOpenRequest struct {
+	Target string `json:"target"`
+}
+type tcpExchangeRequest struct {
+	ID        string `json:"id"`
+	Payload   string `json:"payload"`
+	TimeoutMS int    `json:"timeout_ms"`
+}
+type tcpOpenResponse struct {
+	ID    string `json:"id,omitempty"`
 	Error string `json:"error,omitempty"`
 }
 
@@ -100,6 +114,9 @@ func httpMux(c *client, token string) http.Handler {
 	m.HandleFunc("POST /configure", c.configureHTTP)
 	m.HandleFunc("POST /serve", c.serveHTTP)
 	m.HandleFunc("POST /probe", c.probeHTTP)
+	m.HandleFunc("POST /tcp/open", c.tcpOpenHTTP)
+	m.HandleFunc("POST /tcp/exchange", c.tcpExchangeHTTP)
+	m.HandleFunc("POST /tcp/close", c.tcpCloseHTTP)
 	m.HandleFunc("GET /status", c.statusHTTP)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" && r.Method == http.MethodGet {
@@ -151,6 +168,10 @@ func (c *client) configureHTTP(w http.ResponseWriter, r *http.Request) {
 		s.close()
 	}
 	c.servers = nil
+	for id, conn := range c.tcpConns {
+		_ = conn.Close()
+		delete(c.tcpConns, id)
+	}
 	if c.dev != nil {
 		c.dev.Close()
 	}
@@ -478,6 +499,91 @@ func (c *client) probeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonReply(w, 200, probeResponse{OK: bytes.Equal(reply, []byte(q.Payload))})
+}
+
+func (c *client) tcpOpenHTTP(w http.ResponseWriter, r *http.Request) {
+	var q tcpOpenRequest
+	if !decodeBody(w, r, &q) {
+		return
+	}
+	target, err := netip.ParseAddrPort(q.Target)
+	if err != nil || !target.Addr().Is4() || target.Port() == 0 {
+		http.Error(w, "invalid target", http.StatusBadRequest)
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stack == nil {
+		jsonReply(w, http.StatusOK, tcpOpenResponse{Error: "not configured"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), maxTimeout)
+	defer cancel()
+	conn, err := c.stack.DialContextTCPAddrPort(ctx, target)
+	if err != nil {
+		jsonReply(w, http.StatusOK, tcpOpenResponse{Error: "connect failed"})
+		return
+	}
+	var random [16]byte
+	// The connection handle is an unguessable, process-local identifier and is
+	// only usable through this client's authenticated control API.
+	if _, err := rand.Read(random[:]); err != nil {
+		_ = conn.Close()
+		jsonReply(w, http.StatusOK, tcpOpenResponse{Error: "connect failed"})
+		return
+	}
+	id := hex.EncodeToString(random[:])
+	if c.tcpConns == nil {
+		c.tcpConns = make(map[string]net.Conn)
+	}
+	c.tcpConns[id] = conn
+	jsonReply(w, http.StatusOK, tcpOpenResponse{ID: id})
+}
+
+func (c *client) tcpExchangeHTTP(w http.ResponseWriter, r *http.Request) {
+	var q tcpExchangeRequest
+	if !decodeBody(w, r, &q) {
+		return
+	}
+	if q.ID == "" || len(q.Payload) > maxPayload || q.TimeoutMS < 1 || time.Duration(q.TimeoutMS)*time.Millisecond > maxTimeout {
+		http.Error(w, "invalid exchange limits", http.StatusBadRequest)
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	conn := c.tcpConns[q.ID]
+	if conn == nil {
+		jsonReply(w, http.StatusOK, probeResponse{Error: "connection unavailable"})
+		return
+	}
+	_ = conn.SetDeadline(time.Now().Add(time.Duration(q.TimeoutMS) * time.Millisecond))
+	_, err := conn.Write([]byte(q.Payload))
+	var reply []byte
+	if err == nil {
+		reply = make([]byte, len(q.Payload))
+		_, err = io.ReadFull(conn, reply)
+	}
+	if err != nil {
+		jsonReply(w, http.StatusOK, probeResponse{Error: "exchange failed"})
+		return
+	}
+	jsonReply(w, http.StatusOK, probeResponse{OK: bytes.Equal(reply, []byte(q.Payload))})
+}
+
+func (c *client) tcpCloseHTTP(w http.ResponseWriter, r *http.Request) {
+	var q struct {
+		ID string `json:"id"`
+	}
+	if !decodeBody(w, r, &q) {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if conn := c.tcpConns[q.ID]; conn != nil {
+		_ = conn.Close()
+		delete(c.tcpConns, q.ID)
+	}
+	jsonReply(w, http.StatusOK, map[string]bool{"ok": true})
 }
 func deadline(ctx context.Context) time.Time { d, _ := ctx.Deadline(); return d }
 func (c *client) statusHTTP(w http.ResponseWriter, r *http.Request) {

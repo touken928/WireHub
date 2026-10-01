@@ -1,7 +1,9 @@
 //! Userspace WireGuard UDP router. Policy mutations are acknowledged by the dataplane.
 use std::{collections::{HashMap, VecDeque}, net::{Ipv4Addr,SocketAddr}, sync::Arc, time::{Duration, Instant}};
 
-use boringtun::{noise::{handshake::parse_handshake_anon, Packet, Tunn, TunnResult}, x25519::{PublicKey, StaticSecret}};
+use boringtun::{noise::{handshake::parse_handshake_anon, rate_limiter::RateLimiter, Packet, Tunn, TunnResult}, x25519::{PublicKey, StaticSecret}};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::{net::UdpSocket, sync::{mpsc, oneshot, RwLock}, time};
 
 #[path = "ipv4.rs"]
@@ -14,15 +16,31 @@ const PENDING_LIMIT: usize = 256;
 const PENDING_BYTES: usize = 1024 * 1024;
 const PENDING_TTL: Duration = Duration::from_secs(3);
 
+#[cfg(test)]
+thread_local! { static ANON_PARSE_COUNT: AtomicUsize = AtomicUsize::new(0); }
+
+#[cfg(test)]
+#[derive(Debug)]
+struct QueueObservation {
+    queued: Vec<(String, String, Option<String>, Ipv4Addr, Ipv4Addr, Ipv4Addr, u16, u8)>,
+    queued_bytes: usize,
+    flow_counts: (usize, usize),
+    source_counters: (u64, u64),
+}
+
+#[cfg(test)]
+tokio::task_local! { static QUEUE_OBSERVER: mpsc::UnboundedSender<QueueObservation>; }
+
 pub type RuntimeStats = Arc<RwLock<HashMap<String, (u64, u64, Option<i64>, Option<i64>)>>>;
 pub struct ReloadCommand { pub ack: oneshot::Sender<Result<(), ()>> }
 
-struct RuntimePeer {
-    peer: Peer,
-    group: Option<Group>,
-    tunnel: Tunn,
-    endpoint: Option<SocketAddr>,
-    last_data_unix: Option<i64>,
+pub(crate) struct RuntimePeer {
+    pub(crate) peer: Peer,
+    pub(crate) group: Option<Group>,
+    pub(crate) tunnel: Tunn,
+    pub(crate) endpoint: Option<SocketAddr>,
+    pub(crate) last_data_unix: Option<i64>,
+    receiver_index: u32,
 }
 
 /// Run the WireGuard router on an already-bound UDP socket. `hub_private` is
@@ -30,6 +48,7 @@ struct RuntimePeer {
 pub async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [u8; 32], mut commands: mpsc::Receiver<ReloadCommand>, stats: RuntimeStats, startup: Option<oneshot::Sender<Result<(), ()>>>) {
     let hub_secret = StaticSecret::from(hub_private);
     let hub_public = PublicKey::from(&hub_secret);
+    let rate_limiter = Arc::new(RateLimiter::new(&hub_public, 100));
     let mut peers: HashMap<String, RuntimePeer> = HashMap::new();
     let mut forwards: Vec<Forward> = Vec::new();
     let mut hub_ip: Option<Ipv4Addr> = None;
@@ -49,7 +68,7 @@ pub async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [u8; 32]
         hub_ip = snapshot.settings.as_ref().map(|settings| Subnet24::parse(&settings.subnet).map_err(|_| ())?.hub_ip().parse::<Ipv4Addr>().map_err(|_| ())).transpose()?;
         forwards = snapshot.forwards;
         if let Some(hub) = hub_ip { nat = Flows::new(hub, &forwards); }
-        load_peers(snapshot.groups, snapshot.peers, hub_private, &mut peers, &mut indexes, &mut next_index, &stats).await
+        load_peers(snapshot.groups, snapshot.peers, hub_private, rate_limiter.clone(), &mut peers, &mut indexes, &mut next_index, &stats).await
     }.await;
     if let Some(ready) = startup { let _ = ready.send(startup_result); }
     if startup_result.is_err() { return; }
@@ -59,25 +78,26 @@ pub async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [u8; 32]
             biased;
             command = commands.recv() => {
                 let Some(command) = command else { break };
-                queued_deliveries.clear(); pending_bytes = 0;
-                // Clear first: any database/validation failure leaves no stale policy active.
+                // Snapshot and validate before touching the installed runtime. A failed
+                // reload is fail-closed; a valid reload reconciles authenticated state.
                 let old = std::mem::take(&mut peers);
-                indexes.clear();
                 let result = store.runtime_snapshot().map_err(|_| ()).and_then(|snapshot| {
                     validate_persisted_addresses(&snapshot)?;
                     let updated_hub_ip = snapshot.settings.as_ref().map(|settings| Subnet24::parse(&settings.subnet).map_err(|_| ())?.hub_ip().parse::<Ipv4Addr>().map_err(|_| ())).transpose()?;
-                    install_peers(&snapshot.groups, snapshot.peers, hub_private, &mut peers, &mut indexes, &mut next_index, old)?;
-                    forwards = snapshot.forwards;
+                    let updated_forwards = snapshot.forwards;
+                    install_peers(&snapshot.groups, snapshot.peers, hub_private, rate_limiter.clone(), &mut peers, &mut indexes, &mut next_index, old)?;
+                    nat.reconcile(hub_ip, updated_hub_ip, &forwards, &updated_forwards, &peers);
+                    retain_pending(&mut queued_deliveries, &mut pending_bytes, &peers, &updated_forwards, updated_hub_ip, &nat);
+                    forwards = updated_forwards;
                     hub_ip = updated_hub_ip;
                     Ok(())
                 });
-                nat.clear();
-                if result.is_ok() { if let Some(hub) = hub_ip { nat = Flows::new(hub, &forwards); } }
-                if result.is_err() { peers.clear(); indexes.clear(); }
+                if result.is_err() { peers.clear(); indexes.clear(); nat.clear(); queued_deliveries.clear(); pending_bytes=0; }
                 publish_stats(&peers, &stats).await;
                 let _ = command.ack.send(result);
             }
             _ = timers.tick() => {
+                rate_limiter.reset_count();
                 nat.expire(Instant::now());
                 for runtime in peers.values_mut() {
                     let result = runtime.tunnel.update_timers(&mut out);
@@ -89,12 +109,19 @@ pub async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [u8; 32]
             received = socket.recv_from(&mut datagram) => {
                 let Ok((len, endpoint)) = received else { continue };
                 let bytes = &datagram[..len];
-                let parsed = Tunn::parse_incoming_packet(bytes);
+                let verified = rate_limiter.verify_packet(Some(endpoint.ip()), bytes, &mut out);
+                let parsed: Result<Packet<'_>, ()> = match verified {
+                    Ok(packet) => Ok(packet),
+                    Err(TunnResult::WriteToNetwork(cookie)) => { let _=socket.send_to(cookie,endpoint).await; continue; }
+                    Err(_) => continue,
+                };
                 let packet_kind = parsed.as_ref().ok().map(|packet| match packet { Packet::HandshakeInit(_) => 1, Packet::HandshakeResponse(_) => 2, Packet::PacketCookieReply(_) => 3, Packet::PacketData(_) => 4 });
                 let peer_id = match parsed {
                     Ok(Packet::HandshakeInit(init)) => {
                         // This lookup is only a demux hint. Tunn must verify the
                         // full initiation before any peer endpoint is changed.
+                        #[cfg(test)]
+                        ANON_PARSE_COUNT.with(|count| count.fetch_add(1, Ordering::SeqCst));
                         parse_handshake_anon(&hub_secret, &hub_public, &init).ok()
                             .and_then(|h| peers.iter().find(|(_, p)| decode_public_key(&p.peer.public_key).ok().as_ref() == Some(&h.peer_static_public)).map(|(id, _)| id.clone()))
                     }
@@ -170,7 +197,15 @@ pub async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [u8; 32]
                         let outcome = deliver_plan(&socket, &mut peers, &plan, &mut out).await;
                         complete_delivery(&mut nat, &mut peers, &mut plan, outcome);
                         if outcome == EgressOutcome::NotReady {
-                            enqueue_pending(&mut queued_deliveries, &mut pending_bytes, PendingDelivery { source_id: id.clone(), packet: packet.clone(), reply_only: was_reply, deadline: Instant::now() + PENDING_TTL });
+                            let target=peers.get(&plan.target_id);
+                            let forward=plan.forward_id.as_ref().and_then(|id|forwards.iter().find(|f|&f.id==id));
+                            enqueue_pending(&mut queued_deliveries, &mut pending_bytes, PendingDelivery { source_id: id.clone(), source_key:source.public_key.clone(), source_ip:packet.src(), packet: packet.clone(), reply_only: was_reply, deadline: Instant::now() + PENDING_TTL, target_id: plan.target_id.clone(), target_key:target.map(|p|p.peer.public_key.clone()).unwrap_or_default(), target_ip:target.and_then(|p|p.peer.ipv4.parse().ok()).unwrap_or(Ipv4Addr::UNSPECIFIED), forward_id: plan.forward_id.clone(), forward_protocol:forward.map(|f|f.protocol.clone()), forward_target_port:forward.map(|f|f.target_port) });
+                            #[cfg(test)]
+                            QUEUE_OBSERVER.try_with(|observer| {
+                                let queued = queued_deliveries.iter().map(|item| (item.source_id.clone(), item.target_id.clone(), item.forward_id.clone(), item.packet.src(), item.packet.dst(), item.target_ip, item.packet.src_port().unwrap_or_default(), item.packet.protocol())).collect();
+                                let counters = peers.get(&id).map(|peer| (peer.peer.received_bytes, peer.peer.sent_bytes)).unwrap_or_default();
+                                let _ = observer.send(QueueObservation { queued, queued_bytes: pending_bytes, flow_counts: nat.test_state_counts(), source_counters: counters });
+                            }).ok();
                         }
                     }
                 }
@@ -181,9 +216,9 @@ pub async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [u8; 32]
     }
 }
 
-struct DeliveryPlan { source_id: String, target_id: String, bytes: Vec<u8>, reservation: Option<Reservation>, udp: bool }
+struct DeliveryPlan { source_id: String, target_id: String, bytes: Vec<u8>, reservation: Option<Reservation>, forward_id: Option<String> }
 
-struct PendingDelivery { source_id: String, packet: ipv4::ValidatedPacket, reply_only: bool, deadline: Instant }
+struct PendingDelivery { source_id: String, source_key:String, source_ip:Ipv4Addr, packet: ipv4::ValidatedPacket, reply_only: bool, deadline: Instant, target_id: String, target_key:String, target_ip:Ipv4Addr, forward_id: Option<String>, forward_protocol:Option<String>, forward_target_port:Option<u16> }
 impl PendingDelivery { fn expired_at(&self, now: Instant) -> bool { self.deadline <= now } }
 
 fn enqueue_pending(queue: &mut VecDeque<PendingDelivery>, bytes: &mut usize, delivery: PendingDelivery) {
@@ -193,9 +228,20 @@ fn enqueue_pending(queue: &mut VecDeque<PendingDelivery>, bytes: &mut usize, del
     queue.push_back(delivery);
 }
 
+fn retain_pending(queue:&mut VecDeque<PendingDelivery>, bytes:&mut usize, peers:&HashMap<String,RuntimePeer>, forwards:&[Forward], hub:Option<Ipv4Addr>, nat:&Flows) {
+    queue.retain(|item| {
+        let source=peers.get(&item.source_id);let target=peers.get(&item.target_id);
+        let identities=item.packet.src()==item.source_ip && source.is_some_and(|p|p.peer.public_key==item.source_key && p.peer.ipv4.parse::<Ipv4Addr>().ok()==Some(item.source_ip)) && target.is_some_and(|p|p.peer.public_key==item.target_key && p.peer.ipv4.parse::<Ipv4Addr>().ok()==Some(item.target_ip));
+        let route_allowed=if item.reply_only { source.is_some_and(|p|nat.has_reply_mapping(&item.packet,&p.peer,Instant::now())) } else if let Some(id)=&item.forward_id { source.zip(target).is_some_and(|(s,t)|forwards.iter().any(|f|&f.id==id && Some(f.protocol.as_str())==item.forward_protocol.as_deref() && Some(f.target_port)==item.forward_target_port && Some(item.packet.dst())==hub && f.target_peer_id==item.target_id && policy::forward_allowed(f,&s.peer.group_id,s.group.as_ref(),&t.peer.group_id))) } else { source.zip(target).is_some_and(|(s,t)|ipv4::group_route_allowed(s.group.as_ref(),t.group.as_ref())) };
+        let valid=identities && route_allowed;
+        if !valid { *bytes=bytes.saturating_sub(item.packet.bytes().len()); }
+        valid
+    });
+}
+
 fn resolve_packet(packet: &ipv4::ValidatedPacket, source: &Peer, source_group: &Group, source_id: &str, peers: &HashMap<String, RuntimePeer>, forwards: &[Forward], hub_ip: Option<Ipv4Addr>, nat: &mut Flows, now: Instant) -> (Option<DeliveryPlan>, bool) {
     if let Some((target_id, bytes, reservation)) = nat.lookup_reply(packet, source, now) {
-        return (Some(DeliveryPlan { source_id: source_id.into(), target_id, bytes, reservation: Some(reservation), udp: packet.protocol() == 17 }), true);
+        return (Some(DeliveryPlan { source_id: source_id.into(), target_id, bytes, reservation: Some(reservation), forward_id:None }), true);
     }
     let mut terminal = false;
     let mut plan = None;
@@ -205,7 +251,7 @@ fn resolve_packet(packet: &ipv4::ValidatedPacket, source: &Peer, source_group: &
             if !policy::forward_allowed(forward, &source.group_id, Some(source_group), &target.peer.group_id) { continue; }
             if let Some((bytes, reservation)) = nat.prepare_forward_packet(packet, source, forward, &target.peer, now) {
                 terminal = true;
-                plan = Some(DeliveryPlan { source_id: source_id.into(), target_id: target.peer.id.clone(), bytes, reservation: Some(reservation), udp: packet.protocol() == 17 });
+                plan = Some(DeliveryPlan { source_id: source_id.into(), target_id: target.peer.id.clone(), bytes, reservation: Some(reservation), forward_id:Some(forward.id.clone()) });
                 break;
             }
         }
@@ -213,12 +259,10 @@ fn resolve_packet(packet: &ipv4::ValidatedPacket, source: &Peer, source_group: &
     if !terminal {
         if let Some(target) = peers.values().find(|p| p.peer.ipv4.parse().ok() == Some(packet.dst())) {
             if ipv4::group_route_allowed(Some(source_group), target.group.as_ref()) {
-                if packet.protocol() == 17 {
-                    if let Some((bytes, reservation)) = nat.prepare_direct(packet, source, &target.peer, now) {
-                        plan = Some(DeliveryPlan { source_id: source_id.into(), target_id: target.peer.id.clone(), bytes, reservation: Some(reservation), udp: true });
-                    }
-                } else {
-                    plan = Some(DeliveryPlan { source_id: source_id.into(), target_id: target.peer.id.clone(), bytes: packet.bytes().to_vec(), reservation: None, udp: false });
+                if !matches!(packet.protocol(), 6 | 17) {
+                    plan = Some(DeliveryPlan { source_id: source_id.into(), target_id: target.peer.id.clone(), bytes: packet.bytes().to_vec(), reservation: None, forward_id:None });
+                } else if let Some((bytes, reservation)) = nat.prepare_direct(packet, source, &target.peer, now) {
+                    plan = Some(DeliveryPlan { source_id: source_id.into(), target_id: target.peer.id.clone(), bytes, reservation: Some(reservation), forward_id:None });
                 }
             }
         }
@@ -239,11 +283,13 @@ async fn drain_pending(socket: &UdpSocket, queue: &mut VecDeque<PendingDelivery>
         let source_peer = source.peer.clone();
         let source_group = group.clone();
         let result = if item.reply_only {
-            nat.lookup_reply(&item.packet, &source_peer, now).map(|(target_id, bytes, reservation)| DeliveryPlan { source_id: item.source_id.clone(), target_id, bytes, reservation: Some(reservation), udp: item.packet.protocol() == 17 })
+            nat.lookup_reply(&item.packet, &source_peer, now).map(|(target_id, bytes, reservation)| DeliveryPlan { source_id: item.source_id.clone(), target_id, bytes, reservation: Some(reservation), forward_id:None })
         } else {
             resolve_packet(&item.packet, &source_peer, &source_group, &item.source_id, peers, forwards, hub_ip, nat, now).0
         };
-        let Some(mut plan) = result else { continue };
+        let Some(mut plan) = result else { nat.cancel_pending_packet(&item.packet,&source_peer); continue };
+        let provenance_ok=plan.target_id==item.target_id && plan.forward_id==item.forward_id && peers.get(&item.source_id).is_some_and(|p|p.peer.ipv4.parse::<Ipv4Addr>().ok()==Some(item.source_ip)) && peers.get(&item.target_id).is_some_and(|p|p.peer.ipv4.parse::<Ipv4Addr>().ok()==Some(item.target_ip)) && item.forward_id.as_ref().map_or(true,|id|forwards.iter().any(|f|&f.id==id && Some(f.protocol.as_str())==item.forward_protocol.as_deref() && Some(f.target_port)==item.forward_target_port));
+        if !provenance_ok { complete_delivery(nat,peers,&mut plan,EgressOutcome::Failed); nat.cancel_pending_packet(&item.packet,&source_peer); continue; }
         let outcome = deliver_plan(socket, peers, &plan, out).await;
         complete_delivery(nat, peers, &mut plan, outcome);
         if outcome == EgressOutcome::NotReady { retry.push_back(item); }
@@ -272,8 +318,8 @@ async fn publish_stats(peers: &HashMap<String, RuntimePeer>, stats: &RuntimeStat
 
 async fn deliver_plan(socket:&UdpSocket, peers:&mut HashMap<String,RuntimePeer>, plan:&DeliveryPlan, out:&mut [u8]) -> EgressOutcome {
     let Some(target) = peers.get_mut(&plan.target_id) else { return EgressOutcome::Failed };
-    if plan.udp && target.tunnel.time_since_last_handshake().is_none() {
-        // Cold UDP delivery is explicitly not accepted: do not pass plaintext
+    if target.tunnel.time_since_last_handshake().is_none() {
+        // Cold delivery is not accepted: do not pass plaintext
         // into BoringTun's internal queue or commit a flow reservation.
         if let Some(endpoint) = target.endpoint {
             if let TunnResult::WriteToNetwork(initiation) = target.tunnel.format_handshake_initiation(out, false) {
@@ -286,7 +332,7 @@ async fn deliver_plan(socket:&UdpSocket, peers:&mut HashMap<String,RuntimePeer>,
         TunnResult::WriteToNetwork(wire) => wire,
         _ => return EgressOutcome::Failed,
     };
-    if plan.udp && !matches!(Tunn::parse_incoming_packet(wire), Ok(Packet::PacketData(_))) {
+    if !matches!(Tunn::parse_incoming_packet(wire), Ok(Packet::PacketData(_))) {
         return EgressOutcome::NotReady;
     }
     let Some(endpoint) = target.endpoint else { return EgressOutcome::Failed };
@@ -295,22 +341,23 @@ async fn deliver_plan(socket:&UdpSocket, peers:&mut HashMap<String,RuntimePeer>,
 
 fn unix_now() -> i64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64 }
 
-async fn load_peers(groups:Vec<Group>, current:Vec<Peer>, key:[u8;32], peers:&mut HashMap<String,RuntimePeer>, indexes:&mut HashMap<u32,String>, next:&mut u32, stats:&RuntimeStats)->Result<(),()> {
-    let result=install_peers(&groups,current,key,peers,indexes,next,HashMap::new());
+async fn load_peers(groups:Vec<Group>, current:Vec<Peer>, key:[u8;32], limiter:Arc<RateLimiter>, peers:&mut HashMap<String,RuntimePeer>, indexes:&mut HashMap<u32,String>, next:&mut u32, stats:&RuntimeStats)->Result<(),()> {
+    let result=install_peers(&groups,current,key,limiter,peers,indexes,next,HashMap::new());
     if result.is_ok(){publish_stats(peers,stats).await;} result
 }
 
-fn install_peers(groups:&[Group],current:Vec<Peer>,key:[u8;32],peers:&mut HashMap<String,RuntimePeer>,indexes:&mut HashMap<u32,String>,next:&mut u32,old:HashMap<String,RuntimePeer>)->Result<(),()> {
+fn install_peers(groups:&[Group],current:Vec<Peer>,key:[u8;32],limiter:Arc<RateLimiter>,peers:&mut HashMap<String,RuntimePeer>,indexes:&mut HashMap<u32,String>,next:&mut u32,mut old:HashMap<String,RuntimePeer>)->Result<(),()> {
     let group_map:HashMap<_,_>=groups.iter().cloned().map(|g|(g.id.clone(),g)).collect();
     let mut replacements=HashMap::new();let mut new_indexes=HashMap::new();
+    for (id, prior) in &old { if current.iter().any(|p|p.id==*id && p.public_key==prior.peer.public_key) { new_indexes.insert(prior.receiver_index,id.clone()); } }
     for peer in current {
         let group=group_map.get(&peer.group_id).cloned().ok_or(())?;let public=decode_public_key(&peer.public_key)?;
-        let prior=old.get(&peer.id).filter(|p|p.peer.public_key==peer.public_key);
-        let index=allocate_index(next,&new_indexes)?;let tunnel=Tunn::new(StaticSecret::from(key),PublicKey::from(public),None,None,index>>8,None);
+        let prior=old.remove(&peer.id).filter(|p|p.peer.public_key==peer.public_key);
+        let index=prior.as_ref().map(|p|p.receiver_index).unwrap_or(allocate_index(next,&new_indexes)?);
         let mut peer=peer;
-        if let Some(prior)=prior { peer.received_bytes=prior.peer.received_bytes;peer.sent_bytes=prior.peer.sent_bytes;peer.last_handshake_unix=prior.peer.last_handshake_unix; }
-        new_indexes.insert(index,peer.id.clone());
-        replacements.insert(peer.id.clone(),RuntimePeer{peer,group:Some(group),tunnel,endpoint:prior.and_then(|p|p.endpoint),last_data_unix:prior.and_then(|p|p.last_data_unix)});
+        let runtime=if let Some(mut prior)=prior { peer.received_bytes=prior.peer.received_bytes;peer.sent_bytes=prior.peer.sent_bytes;peer.last_handshake_unix=prior.peer.last_handshake_unix;prior.peer=peer;prior.group=Some(group);prior } else { RuntimePeer{peer,group:Some(group),tunnel:Tunn::new(StaticSecret::from(key),PublicKey::from(public),None,None,index>>8,Some(limiter.clone())),endpoint:None,last_data_unix:None,receiver_index:index} };
+        new_indexes.insert(index,runtime.peer.id.clone());
+        replacements.insert(runtime.peer.id.clone(),runtime);
     }
     *peers=replacements;*indexes=new_indexes;Ok(())
 }
@@ -363,7 +410,7 @@ mod tests {
         let packet=pending_packet(0);
         let mut queue=VecDeque::new(); let mut bytes=0;
         for _ in 0..=PENDING_LIMIT {
-            enqueue_pending(&mut queue,&mut bytes,PendingDelivery{source_id:"a".into(),packet:packet.clone(),reply_only:false,deadline:now+PENDING_TTL});
+            enqueue_pending(&mut queue,&mut bytes,PendingDelivery{source_id:"a".into(),source_key:String::new(),source_ip:packet.src(),packet:packet.clone(),reply_only:false,deadline:now+PENDING_TTL,target_id:"b".into(),target_key:String::new(),target_ip:Ipv4Addr::UNSPECIFIED,forward_id:None,forward_protocol:None,forward_target_port:None});
         }
         assert_eq!(queue.len(),PENDING_LIMIT);
         assert_eq!(bytes,PENDING_LIMIT*packet.bytes().len());
@@ -371,12 +418,12 @@ mod tests {
         let large=pending_packet(60_000);
         let mut queue=VecDeque::new(); let mut bytes=0;
         for _ in 0..20 {
-            enqueue_pending(&mut queue,&mut bytes,PendingDelivery{source_id:"a".into(),packet:large.clone(),reply_only:false,deadline:now+PENDING_TTL});
+            enqueue_pending(&mut queue,&mut bytes,PendingDelivery{source_id:"a".into(),source_key:String::new(),source_ip:large.src(),packet:large.clone(),reply_only:false,deadline:now+PENDING_TTL,target_id:"b".into(),target_key:String::new(),target_ip:Ipv4Addr::UNSPECIFIED,forward_id:None,forward_protocol:None,forward_target_port:None});
         }
         assert_eq!(queue.len(),PENDING_BYTES/large.bytes().len());
         assert!(bytes<=PENDING_BYTES);
 
-        let delivery=PendingDelivery{source_id:"a".into(),packet,reply_only:false,deadline:now+PENDING_TTL};
+        let delivery=PendingDelivery{source_id:"a".into(),source_key:String::new(),source_ip:packet.src(),packet,reply_only:false,deadline:now+PENDING_TTL,target_id:"b".into(),target_key:String::new(),target_ip:Ipv4Addr::UNSPECIFIED,forward_id:None,forward_protocol:None,forward_target_port:None};
         assert!(!delivery.expired_at(now+PENDING_TTL-Duration::from_millis(1)));
         assert!(delivery.expired_at(now+PENDING_TTL));
     }
@@ -385,7 +432,7 @@ mod tests {
     fn persisted_peer_address_validation_accepts_last_peer_ip_and_rejects_reserved_addresses() {
         for (ip, expected) in [("10.77.0.254", true), ("10.77.0.1", false), ("10.77.0.255", false)] {
             let store=Store::open(":memory:").unwrap();
-            store.setup("10.77.0.0/24","hub.example:51820",25).unwrap();
+            store.bind_test_identity();store.setup("10.77.0.0/24","hub.example:51820",25).unwrap();
             store.add_group(&Group{id:"g".into(),name:"g".into(),allowed_groups:vec![]}).unwrap();
             store.add_peer(&Peer{id:"p".into(),name:"p".into(),public_key:"key".into(),ipv4:ip.into(),group_id:"g".into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None}).unwrap();
             let mut snapshot=store.runtime_snapshot().unwrap();
@@ -417,7 +464,7 @@ mod tests {
     async fn forward_load_errors_fail_closed_and_are_acknowledged() {
         async fn broken_store(path: &std::path::Path) -> Arc<Store> {
             let store=Arc::new(Store::open(path.to_str().unwrap()).unwrap());
-            store.setup("10.77.0.0/24","hub.example:51820",25).unwrap();
+            store.bind_test_identity();store.setup("10.77.0.0/24","hub.example:51820",25).unwrap();
             store.add_group(&Group{id:"g".into(),name:"g".into(),allowed_groups:vec![]}).unwrap();
             let secret=StaticSecret::from([41u8;32]);
             store.add_peer(&Peer{id:"p".into(),name:"p".into(),public_key:base64::engine::general_purpose::STANDARD.encode(PublicKey::from(&secret).as_bytes()),ipv4:"10.77.0.2".into(),group_id:"g".into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None}).unwrap();
@@ -486,6 +533,79 @@ mod tests {
         if proto == 6 || checksum != 0 { assert_eq!(transport_checksum(p[12..16].try_into().unwrap(), p[16..20].try_into().unwrap(), proto, &p[20..]), 0, "TCP/UDP checksum"); }
     }
 
+    #[test]
+    fn shared_rate_limiter_cookie_challenge_accepts_same_source_retry() {
+        let hub_secret=StaticSecret::from([201u8;32]);
+        let hub_public=PublicKey::from(&hub_secret);
+        let limiter=Arc::new(RateLimiter::new(&hub_public,0));
+        let mut hub=Tunn::new(hub_secret,PublicKey::from(&StaticSecret::from([202u8;32])),None,None,1,Some(limiter.clone()));
+        let mut client=Tunn::new(StaticSecret::from([202u8;32]),hub_public,None,None,2,None);
+        let mut tx=vec![0;65535];let mut out=vec![0;65535];
+        let TunnResult::WriteToNetwork(init)=client.encapsulate(&[],&mut tx) else {panic!("expected initiation")};
+        let addr="127.0.0.1:12345".parse::<SocketAddr>().unwrap();
+        let TunnResult::WriteToNetwork(cookie)=limiter.verify_packet(Some(addr.ip()),init,&mut out).unwrap_err() else {panic!("under-load initiation receives cookie challenge")};
+        assert!(matches!(client.decapsulate(Some(addr.ip()),cookie,&mut tx),TunnResult::Done));
+        let TunnResult::WriteToNetwork(retry)=client.format_handshake_initiation(&mut tx,true) else {panic!("cookie retry initiation")};
+        let packet=limiter.verify_packet(Some(addr.ip()),retry,&mut out).expect("same limiter accepts valid MAC2 retry");
+        assert!(matches!(packet,Packet::HandshakeInit(_)));
+        assert!(matches!(hub.decapsulate(Some(addr.ip()),retry,&mut out),TunnResult::WriteToNetwork(_)));
+    }
+
+    #[tokio::test]
+    async fn zero_peer_router_resets_shared_cookie_limiter_on_timer_and_reload() {
+        let store=Arc::new(Store::open(":memory:").unwrap());
+        store.bind_test_identity();
+        let hub_private=[211u8;32];
+        let server=UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address=server.local_addr().unwrap();
+        let (commands,receiver)=mpsc::channel(1);let (ready,started)=oneshot::channel();
+        tokio::spawn(run_udp(server,store,hub_private,receiver,RuntimeStats::default(),Some(ready)));
+        started.await.unwrap().unwrap();
+        let sender=UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let hub_public=PublicKey::from(&StaticSecret::from(hub_private));
+        let mut tx=vec![0;65535];let mut rx=vec![0;65535];
+
+        // Saturate the router-owned limiter with valid MAC1 initiations while
+        // there are no configured peers; the threshold challenge proves these
+        // packets reached the shared cookie domain before any peer lookup.
+        let mut challenged_client=Tunn::new(StaticSecret::from([212u8;32]),hub_public,None,None,1,None);
+        for i in 0..110u8 {
+            let mut client=Tunn::new(StaticSecret::from([i.wrapping_add(1);32]),hub_public,None,None,10+i as u32,None);
+            if let TunnResult::WriteToNetwork(init)=client.encapsulate(&[],&mut tx) { sender.send_to(init,address).await.unwrap(); }
+        }
+        while timeout(Duration::from_millis(30),sender.recv_from(&mut rx)).await.is_ok() {}
+        let TunnResult::WriteToNetwork(first)=challenged_client.encapsulate(&[],&mut tx) else {panic!("expected initiation")};
+        sender.send_to(first,address).await.unwrap();
+        let (n,_)=timeout(Duration::from_secs(1),sender.recv_from(&mut rx)).await.unwrap().unwrap();
+        assert_eq!(u32::from_le_bytes(rx[..4].try_into().unwrap()),3,"shared limiter emits a cookie under load");
+        assert!(matches!(challenged_client.decapsulate(Some(address.ip()),&rx[..n],&mut tx),TunnResult::Done));
+        // Drain load challenges before waiting for the one-second reset tick.
+        while timeout(Duration::from_millis(30),sender.recv_from(&mut rx)).await.is_ok() {}
+        time::sleep(Duration::from_millis(1100)).await;
+
+        // The same router-owned limiter must have reset despite having zero
+        // peers. An unknown peer is silently ignored after verification; a
+        // stale limiter would instead answer with another cookie challenge.
+        let mut after_tick=Tunn::new(StaticSecret::from([213u8;32]),hub_public,None,None,222,None);
+        let TunnResult::WriteToNetwork(init)=after_tick.encapsulate(&[],&mut tx) else {panic!("expected post-tick initiation")};
+        sender.send_to(init,address).await.unwrap();
+        assert!(timeout(Duration::from_millis(150),sender.recv_from(&mut rx)).await.is_err(),"zero-peer timer tick resets the shared limiter");
+
+        // Reload does not replace the cookie domain: a retry carrying the
+        // router-issued cookie remains verified after acknowledged reload.
+        let (ack,wait)=oneshot::channel();commands.send(ReloadCommand{ack}).await.unwrap();wait.await.unwrap().unwrap();
+        // Re-saturate after the timer reset so this retry must authenticate its
+        // MAC2 against the original cookie domain rather than pass under load.
+        for i in 0..110u8 {
+            let mut client=Tunn::new(StaticSecret::from([i.wrapping_add(31);32]),hub_public,None,None,300+i as u32,None);
+            if let TunnResult::WriteToNetwork(init)=client.encapsulate(&[],&mut tx) { sender.send_to(init,address).await.unwrap(); }
+        }
+        while timeout(Duration::from_millis(30),sender.recv_from(&mut rx)).await.is_ok() {}
+        let TunnResult::WriteToNetwork(retry)=challenged_client.format_handshake_initiation(&mut tx,true) else {panic!("cookie retry initiation")};
+        sender.send_to(retry,address).await.unwrap();
+        assert!(timeout(Duration::from_millis(150),sender.recv_from(&mut rx)).await.is_err(),"reload retained the cookie limiter and accepted its same-source retry");
+    }
+
     async fn send_inner(socket: &UdpSocket, address: SocketAddr, client: &mut Tunn, packet: &[u8], tx: &mut [u8]) {
         let TunnResult::WriteToNetwork(wire) = client.encapsulate(packet, tx) else { panic!("expected encrypted packet") };
         socket.send_to(wire, address).await.unwrap();
@@ -520,7 +640,7 @@ mod tests {
     async fn boringtun_nat_tcp_udp_roundtrip_and_live_policy_revocation() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path().join("nat-e2e.sqlite").to_str().unwrap()).unwrap());
-        store.setup("192.168.44.0/24","hub.example:51820",25).unwrap();
+        store.bind_test_identity();store.setup("192.168.44.0/24","hub.example:51820",25).unwrap();
         for g in [
             Group{id:"clients".into(),name:"clients".into(),allowed_groups:vec!["backend".into()]},
             Group{id:"backend".into(),name:"backend".into(),allowed_groups:vec![]},
@@ -615,7 +735,7 @@ mod tests {
         drop(snapshot);
 
         // A newly added TCP service is installed only after acknowledged reload;
-        // mappings are flushed and the next TCP candidate is also excluded.
+        // existing authorized mappings remain live and the next TCP candidate is excluded.
         create_forward_for_test(&store,Forward{id:"reserved-next".into(),name:"next reserved tcp service".into(),protocol:"tcp".into(),target_peer_id:"b".into(),target_port:40001,allowed_group_ids:vec!["clients".into()]});
         let (ack,wait)=oneshot::channel(); commands_tx.send(ReloadCommand{ack}).await.unwrap(); wait.await.unwrap().unwrap();
         clients[0]=Tunn::new(StaticSecret::from([31u8;32]),hub_public,None,None,60,None);
@@ -627,14 +747,15 @@ mod tests {
         establish_client(&sockets[2],address,&mut clients[2],&mut tx,&mut rx).await;
         establish_client(&sockets[3],address,&mut clients[3],&mut tx,&mut rx).await;
         send_inner(&sockets[1],address,&mut clients[1],translated_reply.as_ref().unwrap(),&mut tx).await;
-        assert_no_inner(&sockets[0],address,&mut clients[0],&mut rx,&mut tx).await;
+        let retained_reply=recv_inner(&sockets[0],&mut clients[0],&mut rx,&mut tx).await;
+        assert_eq!(&retained_reply[40..],b"reply","unrelated reload preserves the established authorized mapping");
         for (number,flags) in [(6,0x02),(17,0)] {
             let request=service_packet(number,[192,168,44,2],[192,168,44,1],12346,8080,flags,b"after-reload");
             send_inner(&sockets[0],address,&mut clients[0],&request,&mut tx).await;
             let translated=recv_inner(&sockets[1],&mut clients[1],&mut rx,&mut tx).await;
             let snat = u16::from_be_bytes([translated[20],translated[21]]);
             if number == 6 { assert!(![40000, 40001].contains(&snat), "reserved TCP service ports are excluded"); }
-            else { assert_eq!(snat, 40000, "UDP may use a port reserved only by TCP"); }
+            else { assert_eq!(snat, 40001, "UDP SNAT cursor is retained across reload and remains protocol-specific"); }
         }
 
         // C has a directed backend ACL, but the current forward allowlist excludes it.
@@ -673,7 +794,7 @@ mod tests {
     async fn only_authenticated_keepalive_can_migrate_peer_endpoint() {
         let dir=tempfile::tempdir().unwrap();
         let store=Arc::new(Store::open(dir.path().join("endpoint.sqlite").to_str().unwrap()).unwrap());
-        store.setup("10.1.0.0/24","hub.example:51820",25).unwrap();
+        store.bind_test_identity();store.setup("10.1.0.0/24","hub.example:51820",25).unwrap();
         store.add_group(&Group{id:"a".into(),name:"A".into(),allowed_groups:vec![]}).unwrap();
         store.add_group(&Group{id:"b".into(),name:"B".into(),allowed_groups:vec!["a".into()]}).unwrap();
         store.set_acl("b", &["a".into()]).unwrap();
@@ -729,10 +850,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unrelated_reload_preserves_established_client_tunnels_and_direct_udp_flow() {
+        let dir=tempfile::tempdir().unwrap();
+        let store=Arc::new(Store::open(dir.path().join("retain.sqlite").to_str().unwrap()).unwrap());
+        store.bind_test_identity();store.setup("10.91.0.0/24","hub.example:51820",25).unwrap();
+        store.add_group(&Group{id:"a".into(),name:"A".into(),allowed_groups:vec!["b".into()]}).unwrap();
+        store.add_group(&Group{id:"b".into(),name:"B".into(),allowed_groups:vec![]}).unwrap();
+        store.set_acl("a", &["b".into()]).unwrap();
+        let a_secret=StaticSecret::from([171u8;32]);let b_secret=StaticSecret::from([172u8;32]);
+        for (id,secret,ip,group) in [("a",&a_secret,"10.91.0.2","a"),("b",&b_secret,"10.91.0.3","b")] {
+            store.add_peer(&Peer{id:id.into(),name:id.into(),public_key:base64::engine::general_purpose::STANDARD.encode(PublicKey::from(secret).as_bytes()),ipv4:ip.into(),group_id:group.into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None}).unwrap();
+        }
+        let hub_private=[173u8;32];let hub_public=PublicKey::from(&StaticSecret::from(hub_private));
+        let server=UdpSocket::bind("127.0.0.1:0").await.unwrap();let address=server.local_addr().unwrap();
+        let (commands,receiver)=mpsc::channel(1);let (ready,started)=oneshot::channel();let stats=RuntimeStats::default();
+        tokio::spawn(run_udp(server,store.clone(),hub_private,receiver,stats.clone(),Some(ready)));started.await.unwrap().unwrap();
+        let a_socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();let b_socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut a=Tunn::new(a_secret,hub_public,None,None,71,None);let mut b=Tunn::new(b_secret,hub_public,None,None,72,None);
+        let mut tx=vec![0;65535];let mut rx=vec![0;65535];
+        establish_client(&a_socket,address,&mut a,&mut tx,&mut rx).await;establish_client(&b_socket,address,&mut b,&mut tx,&mut rx).await;
+        let request=service_packet(17,[10,91,0,2],[10,91,0,3],12000,9000,0,b"before-reload");
+        send_inner(&a_socket,address,&mut a,&request,&mut tx).await;
+        assert_eq!(&recv_inner(&b_socket,&mut b,&mut rx,&mut tx).await[28..],b"before-reload");
+        store.add_group(&Group{id:"unrelated".into(),name:"unrelated".into(),allowed_groups:vec![]}).unwrap();
+        let (ack,wait)=oneshot::channel();commands.send(ReloadCommand{ack}).await.unwrap();wait.await.unwrap().unwrap();
+
+        // Keep the exact same client Tunn objects and use the established UDP tuple.
+        let continuation=service_packet(17,[10,91,0,2],[10,91,0,3],12000,9000,0,b"after-reload");
+        send_inner(&a_socket,address,&mut a,&continuation,&mut tx).await;
+        let delivered=timeout(Duration::from_millis(500),recv_inner(&b_socket,&mut b,&mut rx,&mut tx)).await;
+        assert!(delivered.is_ok(),"unrelated reload retains receiver index, tunnel session, and established direct UDP flow");
+        assert_eq!(&delivered.unwrap()[28..],b"after-reload");
+        let snapshot=stats.read().await;
+        assert!(snapshot["a"].0 >= (request.len()+continuation.len()) as u64,"application counters remain cumulative over reload");
+    }
+
+    #[tokio::test]
     async fn boringtun_clients_handshake_and_route_only_authorized_ipv4() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path().join("test.sqlite").to_str().unwrap()).unwrap());
-        store.setup("10.77.0.0/24","hub.example:51820",25).unwrap();
+        store.bind_test_identity();store.setup("10.77.0.0/24","hub.example:51820",25).unwrap();
         store.add_group(&Group { id:"a".into(), name:"A".into(), allowed_groups:vec!["b".into()] }).unwrap();
         store.add_group(&Group { id:"b".into(), name:"B".into(), allowed_groups:vec![] }).unwrap();
         store.set_acl("a", &["b".into()]).unwrap();
@@ -778,35 +935,17 @@ mod tests {
         assert_eq!(u32::from_le_bytes(rx[..4].try_into().unwrap()),2,"server must return client C handshake response");
         if let TunnResult::WriteToNetwork(packet)=client_c.decapsulate(None,&rx[..n],&mut tx) { client_c_socket.send_to(packet,address).await.unwrap(); }
 
-        // An unrelated database mutation resets tunnel sessions, but must not
-        // discard surviving authenticated destinations; initiators can re-key.
+        // An unrelated mutation retains the exact established tunnel sessions.
         store.add_group(&Group{id:"unrelated".into(),name:"unrelated".into(),allowed_groups:vec![]}).unwrap();
         let (ack,wait)=oneshot::channel();commands_tx.send(ReloadCommand{ack}).await.unwrap();wait.await.unwrap().unwrap();
-        client_a=Tunn::new(client_a_secret.clone(),hub_public,None,None,33,None);
-        client_b=Tunn::new(client_b_secret.clone(),hub_public,None,None,34,None);
-        let TunnResult::WriteToNetwork(init)=client_a.encapsulate(&[],&mut tx) else {panic!("expected post-reload source handshake")};
-        client_a_socket.send_to(init,address).await.unwrap();
-        let (n,_) = timeout(Duration::from_secs(3),client_a_socket.recv_from(&mut rx)).await.unwrap().unwrap();
-        assert_eq!(u32::from_le_bytes(rx[..4].try_into().unwrap()),2);
-        if let TunnResult::WriteToNetwork(reply)=client_a.decapsulate(None,&rx[..n],&mut tx) { client_a_socket.send_to(reply,address).await.unwrap(); }
+        // A valid transport packet from a migrated socket still authenticates
+        // endpoint migration independently of the reload.
+        let TunnResult::WriteToNetwork(keepalive)=client_b.encapsulate(&[],&mut tx) else {panic!("expected B keepalive")};
+        client_b_migrated_socket.send_to(keepalive,address).await.unwrap();
 
         let packet=ipv4::test_packet([10,77,0,2],[10,77,0,3],false,false);
         let TunnResult::WriteToNetwork(wire)=client_a.encapsulate(&packet,&mut tx) else {panic!("expected encrypted data")};
         client_a_socket.send_to(wire,address).await.unwrap();
-        // B has sent no application traffic since reload. The hub initiates
-        // B's new tunnel and retains the owned UDP packet outside BoringTun.
-        let (n,_) = timeout(Duration::from_secs(3),client_b_socket.recv_from(&mut rx)).await.unwrap().unwrap();
-        assert_eq!(u32::from_le_bytes(rx[..4].try_into().unwrap()),1,"hub initiates the idle destination handshake");
-        let TunnResult::WriteToNetwork(reply)=client_b.decapsulate(None,&rx[..n],&mut tx) else {panic!("destination rejected hub handshake")};
-        // The authenticated handshake response comes from a new UDP socket,
-        // migrating B away from the endpoint saved before the reload.
-        client_b_migrated_socket.send_to(reply,address).await.unwrap();
-        let during_handshake=stats.read().await;
-        assert_eq!(during_handshake["a"].0,0,"handshake-only traffic is not counted as application delivery");
-        assert_eq!(during_handshake["b"].1,0,"handshake-only traffic is not counted as application delivery");
-        drop(during_handshake);
-        let TunnResult::WriteToNetwork(keepalive)=client_b.encapsulate(&[],&mut tx) else {panic!("expected authenticated transport keepalive")};
-        client_b_migrated_socket.send_to(keepalive,address).await.unwrap();
         let first_inner=recv_inner(&client_b_migrated_socket,&mut client_b,&mut rx,&mut tx).await;
         assert_eq!(&first_inner[12..20],&packet[12..20]);
         assert_eq!(first_inner[8],63,"pending forwarding decrements TTL only once");
@@ -834,19 +973,19 @@ mod tests {
 
         // Reverse direction is denied, as are same-group routing, source spoofing,
         // malformed headers and both first and non-first IPv4 fragments.
-        for (source, destination, same_group, _spoof, malformed, fragment) in [
+        for (source, destination, _same_group, _spoof, malformed, fragment) in [
             ([10,77,0,3],[10,77,0,2],false,false,false,false),
             ([10,77,0,2],[10,77,0,4],true,false,false,false),
             ([10,77,0,99],[10,77,0,3],false,true,false,false),
             ([10,77,0,2],[10,77,0,3],false,false,true,false),
             ([10,77,0,2],[10,77,0,3],false,false,false,true),
         ] {
-            let (socket, client) = if source[3] == 3 { (&client_b_socket,&mut client_b) } else { (&client_a_socket,&mut client_a) };
+            let (socket, client) = if source[3] == 3 { (&client_b_migrated_socket,&mut client_b) } else { (&client_a_socket,&mut client_a) };
             let packet=ipv4::test_packet(source,destination,malformed,fragment);
             let TunnResult::WriteToNetwork(wire)=client.encapsulate(&packet,&mut tx) else {panic!("expected encrypted packet")};
             socket.send_to(wire,address).await.unwrap();
-            let denied_socket=match destination[3] {2=>&client_a_socket,3=>&client_b_socket,4=>&client_c_socket,_=>unreachable!()};
-            assert!(timeout(Duration::from_millis(150),denied_socket.recv_from(&mut rx)).await.is_err(),"denied packet unexpectedly routed (same_group={same_group})");
+            let (denied_socket,denied_client)=match destination[3] {2=>(&client_a_socket,&mut client_a),3=>(&client_b_migrated_socket,&mut client_b),4=>(&client_c_socket,&mut client_c),_=>unreachable!()};
+            assert_no_inner(denied_socket,address,denied_client,&mut rx,&mut tx).await;
         }
 
         // A successful acknowledgement means the old tunnels and policy are gone.
@@ -861,7 +1000,7 @@ mod tests {
         if let TunnResult::WriteToNetwork(packet)=client_a.decapsulate(None,&rx[..n],&mut tx) { client_a_socket.send_to(packet,address).await.unwrap(); }
         let TunnResult::WriteToNetwork(wire)=client_a.encapsulate(&packet,&mut tx) else {panic!("expected encrypted packet")};
         client_a_socket.send_to(wire,address).await.unwrap();
-        assert!(timeout(Duration::from_millis(150),client_b_socket.recv_from(&mut rx)).await.is_err(),"revoked ACL remained active past the refresh window");
+        assert_no_inner(&client_b_migrated_socket,address,&mut client_b,&mut rx,&mut tx).await;
 
         let unknown=UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let unknown_secret=StaticSecret::from([11u8;32]);
@@ -872,10 +1011,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cold_forward_udp_is_delivered_only_after_authenticated_target_handshake() {
+    async fn unrelated_reload_preserves_established_forward_tcp_tunnel_and_nat_tuple() {
         let dir=tempfile::tempdir().unwrap();
         let store=Arc::new(Store::open(dir.path().join("cold-forward.sqlite").to_str().unwrap()).unwrap());
-        store.setup("10.88.0.0/24","hub.example:51820",25).unwrap();
+        store.bind_test_identity();store.setup("10.88.0.0/24","hub.example:51820",25).unwrap();
         store.add_group(&Group{id:"clients".into(),name:"clients".into(),allowed_groups:vec!["backend".into()]}).unwrap();
         store.add_group(&Group{id:"backend".into(),name:"backend".into(),allowed_groups:vec![]}).unwrap();
         store.set_acl("clients", &["backend".into()]).unwrap();
@@ -883,7 +1022,7 @@ mod tests {
         for (id,secret,ip,group) in [("a",&a_secret,"10.88.0.2","clients"),("b",&b_secret,"10.88.0.3","backend")] {
             store.add_peer(&Peer{id:id.into(),name:id.into(),public_key:base64::engine::general_purpose::STANDARD.encode(PublicKey::from(secret).as_bytes()),ipv4:ip.into(),group_id:group.into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None}).unwrap();
         }
-        create_forward_for_test(&store,Forward{id:"udp".into(),name:"udp service".into(),protocol:"udp".into(),target_peer_id:"b".into(),target_port:5353,allowed_group_ids:vec!["clients".into()]});
+        create_forward_for_test(&store,Forward{id:"tcp".into(),name:"tcp service".into(),protocol:"tcp".into(),target_peer_id:"b".into(),target_port:5353,allowed_group_ids:vec!["clients".into()]});
         let hub_private=[83u8;32]; let hub_public=PublicKey::from(&StaticSecret::from(hub_private));
         let server=UdpSocket::bind("127.0.0.1:0").await.unwrap(); let address=server.local_addr().unwrap();
         let (commands_tx,commands_rx)=mpsc::channel(2); let (ready,ready_rx)=oneshot::channel();
@@ -895,33 +1034,438 @@ mod tests {
         establish_client(&a_socket,address,&mut a,&mut tx,&mut rx).await;
         establish_client(&b_socket,address,&mut b,&mut tx,&mut rx).await;
 
-        // Reload resets the tunnel sessions but preserves each authenticated endpoint.
-        let (ack,wait)=oneshot::channel(); commands_tx.send(ReloadCommand{ack}).await.unwrap(); wait.await.unwrap().unwrap();
-        a=Tunn::new(a_secret,hub_public,None,None,81,None); b=Tunn::new(b_secret,hub_public,None,None,82,None);
-        establish_client(&a_socket,address,&mut a,&mut tx,&mut rx).await;
-        let request=service_packet(17,[10,88,0,2],[10,88,0,1],12345,5353,0,b"cold-forward");
+        let request=service_packet(6,[10,88,0,2],[10,88,0,1],12345,5353,0x02,b"syn-data");
         send_inner(&a_socket,address,&mut a,&request,&mut tx).await;
-        let (n,_)=timeout(Duration::from_secs(3),b_socket.recv_from(&mut rx)).await.unwrap().unwrap();
-        assert_eq!(u32::from_le_bytes(rx[..4].try_into().unwrap()),1,"cold forward UDP starts a destination handshake");
-        let TunnResult::WriteToNetwork(response)=b.decapsulate(None,&rx[..n],&mut tx) else {panic!("target rejected forward handshake")};
-        b_socket.send_to(response,address).await.unwrap();
-        let TunnResult::WriteToNetwork(keepalive)=b.encapsulate(&[],&mut tx) else {panic!("expected authenticated keepalive")};
-        b_socket.send_to(keepalive,address).await.unwrap();
         let delivered=recv_inner(&b_socket,&mut b,&mut rx,&mut tx).await;
         assert_eq!(&delivered[12..16],&[10,88,0,1]); assert_eq!(&delivered[16..20],&[10,88,0,3]);
+        let translated_port=u16::from_be_bytes([delivered[20],delivered[21]]);
+        assert_ne!(translated_port,12345);
         assert_eq!(u16::from_be_bytes([delivered[22],delivered[23]]),5353);
-        assert_eq!(&delivered[28..],b"cold-forward");
+        assert_eq!(&delivered[40..],b"syn-data");
         assert_eq!(delivered[8],63,"forward packet TTL is decremented exactly once");
+        assert_packet_checksums(&delivered);
+
+        // Complete the backend side of the established stream before reload.
+        let syn_ack=service_packet(6,[10,88,0,3],[10,88,0,1],5353,translated_port,0x12,b"syn-ack");
+        send_inner(&b_socket,address,&mut b,&syn_ack,&mut tx).await;
+        let restored=recv_inner(&a_socket,&mut a,&mut rx,&mut tx).await;
+        assert_eq!(&restored[12..16],&[10,88,0,1]);
+        assert_eq!(&restored[16..20],&[10,88,0,2]);
+        assert_eq!(u16::from_be_bytes([restored[20],restored[21]]),5353);
+        assert_eq!(u16::from_be_bytes([restored[22],restored[23]]),12345);
+        assert_eq!(&restored[40..],b"syn-ack");
+        assert_packet_checksums(&restored);
+
+        // Insert an unrelated group, then reload with this connection already
+        // established. Keep the exact same client tunnel objects throughout.
+        store.add_group(&Group{id:"unrelated".into(),name:"unrelated".into(),allowed_groups:vec![]}).unwrap();
+        let (ack,wait)=oneshot::channel(); commands_tx.send(ReloadCommand{ack}).await.unwrap(); wait.await.unwrap().unwrap();
+
+        // Same client Tunn objects, established TCP tuple, and no fresh SYN or
+        // handshake across an unrelated policy reload.
+        let ack=service_packet(6,[10,88,0,2],[10,88,0,1],12345,5353,0x10,b"client-data");
+        send_inner(&a_socket,address,&mut a,&ack,&mut tx).await;
+        let after_reload=recv_inner(&b_socket,&mut b,&mut rx,&mut tx).await;
+        assert_eq!(u16::from_be_bytes([after_reload[20],after_reload[21]]),translated_port);
+        assert_eq!(&after_reload[40..],b"client-data");
+        assert_packet_checksums(&after_reload);
+        let backend_data=service_packet(6,[10,88,0,3],[10,88,0,1],5353,translated_port,0x10,b"backend-data");
+        send_inner(&b_socket,address,&mut b,&backend_data,&mut tx).await;
+        let restored=recv_inner(&a_socket,&mut a,&mut rx,&mut tx).await;
+        assert_eq!(&restored[12..16],&[10,88,0,1]);
+        assert_eq!(&restored[16..20],&[10,88,0,2]);
+        assert_eq!(u16::from_be_bytes([restored[20],restored[21]]),5353);
+        assert_eq!(u16::from_be_bytes([restored[22],restored[23]]),12345);
+        assert_eq!(&restored[40..],b"backend-data");
+        assert_packet_checksums(&restored);
         let snapshot=stats.read().await;
-        assert_eq!(snapshot["a"].0,request.len() as u64);
-        assert_eq!(snapshot["b"].1,delivered.len() as u64);
+        assert!(snapshot["a"].0 >= (request.len()+ack.len()) as u64);
+        assert!(snapshot["b"].1 >= (delivered.len()+after_reload.len()) as u64);
     }
 
     #[tokio::test]
-    async fn reload_revokes_queued_cold_direct_udp_before_target_handshake_completes() {
+    async fn cold_forward_two_syns_deliver_after_handshake_with_exact_reverse_mappings() {
+        let dir=tempfile::tempdir().unwrap();
+        let store=Arc::new(Store::open(dir.path().join("cold-two-syns.sqlite").to_str().unwrap()).unwrap());
+        store.bind_test_identity();store.setup("10.88.0.0/24","hub.example:51820",25).unwrap();
+        store.add_group(&Group{id:"clients".into(),name:"clients".into(),allowed_groups:vec!["backend".into()]}).unwrap();
+        store.add_group(&Group{id:"backend".into(),name:"backend".into(),allowed_groups:vec![]}).unwrap();
+        store.set_acl("clients", &["backend".into()]).unwrap();
+        let a_secret=StaticSecret::from([91u8;32]); let b_secret=StaticSecret::from([92u8;32]);
+        for (id,secret,ip,group) in [("a",&a_secret,"10.88.0.2","clients"),("b",&b_secret,"10.88.0.3","backend")] {
+            store.add_peer(&Peer{id:id.into(),name:id.into(),public_key:base64::engine::general_purpose::STANDARD.encode(PublicKey::from(secret).as_bytes()),ipv4:ip.into(),group_id:group.into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None}).unwrap();
+        }
+        create_forward_for_test(&store,Forward{id:"tcp".into(),name:"tcp service".into(),protocol:"tcp".into(),target_peer_id:"b".into(),target_port:5353,allowed_group_ids:vec!["clients".into()]});
+        let hub_private=[93u8;32];let hub_public=PublicKey::from(&StaticSecret::from(hub_private));
+        let server=UdpSocket::bind("127.0.0.1:0").await.unwrap();let address=server.local_addr().unwrap();
+        let (commands_tx,commands_rx)=mpsc::channel(2);let (ready,ready_rx)=oneshot::channel();
+        let stats=RuntimeStats::default();
+        let (queue_observer,mut observations)=mpsc::unbounded_channel();
+        tokio::spawn(QUEUE_OBSERVER.scope(queue_observer,run_udp(server,store.clone(),hub_private,commands_rx,stats.clone(),Some(ready))));ready_rx.await.unwrap().unwrap();
+        let a_socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();let b_socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut a=Tunn::new(a_secret,hub_public,None,None,91,None);let mut b=Tunn::new(b_secret,hub_public,None,None,92,None);
+        let mut tx=vec![0;65535];let mut rx=vec![0;65535];
+        establish_client(&a_socket,address,&mut a,&mut tx,&mut rx).await;
+
+        let requests=[
+            service_packet(6,[10,88,0,2],[10,88,0,1],12345,5353,0x02,b"first-cold-syn"),
+            service_packet(6,[10,88,0,2],[10,88,0,1],12346,5353,0x02,b"second-cold-syn"),
+        ];
+        for request in &requests { send_inner(&a_socket,address,&mut a,request,&mut tx).await; }
+        // Observe the actual application queue after each enqueue, not merely
+        // the sender's UDP write or a later reload acknowledgement. This is the
+        // barrier proving both SYNs are pending before policy is mutated.
+        for expected_count in 1..=2 {
+            let observed=timeout(Duration::from_secs(2),observations.recv()).await.unwrap().unwrap();
+            assert_eq!(observed.queued.len(),expected_count);
+            assert_eq!(observed.queued.iter().map(|(source,target,forward,src,dst,target_ip,port,proto)|(source.as_str(),target.as_str(),forward.as_deref(),*src,*dst,*target_ip,*port,*proto)).collect::<Vec<_>>(),requests[..expected_count].iter().map(|request| ("a","b",Some("tcp"),Ipv4Addr::new(10,88,0,2),Ipv4Addr::new(10,88,0,1),Ipv4Addr::new(10,88,0,3),u16::from_be_bytes([request[20],request[21]]),6)).collect::<Vec<_>>());
+            assert_eq!(observed.queued_bytes,requests[..expected_count].iter().map(|request|request.len()).sum::<usize>());
+            assert_eq!(observed.flow_counts,(0,0));
+            assert_eq!(observed.source_counters,(0,0));
+        }
+        let before_auth=stats.read().await;
+        assert_eq!(before_auth["a"].0,0,"cold forwarded SYNs are not committed before backend authentication");
+        assert_eq!(before_auth["b"].1,0,"no plaintext or byte accounting reaches an unauthenticated backend");
+        drop(before_auth);
+
+        // Change unrelated persisted policy and apply it while both SYNs are
+        // application-owned in the cold-target queue. Keep the tunnels intact.
+        store.add_group(&Group{id:"unrelated".into(),name:"unrelated".into(),allowed_groups:vec![]}).unwrap();
+        let (ack,wait)=oneshot::channel();commands_tx.send(ReloadCommand{ack}).await.unwrap();wait.await.unwrap().unwrap();
+
+        establish_client(&b_socket,address,&mut b,&mut tx,&mut rx).await;
+        // An authenticated encrypted keepalive exercises the real UDP path and
+        // makes the target's post-handshake readiness explicit.
+        let TunnResult::WriteToNetwork(keepalive)=b.encapsulate(&[],&mut tx) else {panic!("expected authenticated keepalive")};
+        b_socket.send_to(keepalive,address).await.unwrap();
+
+        let mut mapped=Vec::new();
+        for request in &requests {
+            // The router may need to initiate its own session to B while
+            // draining the pending packets. Complete that real peer-to-peer
+            // WireGuard handshake response instead of treating it as app data.
+            let delivered=loop {
+                let (n,_)=timeout(Duration::from_secs(3),b_socket.recv_from(&mut rx)).await.unwrap().unwrap();
+                match b.decapsulate(None,&rx[..n],&mut tx) {
+                    TunnResult::WriteToTunnelV4(packet,_)=>break packet.to_vec(),
+                    TunnResult::WriteToNetwork(packet)=>{b_socket.send_to(packet,address).await.unwrap();},
+                    _=>{}
+                }
+            };
+            assert_eq!(&delivered[12..16],&[10,88,0,1]);assert_eq!(&delivered[16..20],&[10,88,0,3]);
+            assert_eq!(u16::from_be_bytes([delivered[22],delivered[23]]),5353);
+            assert_eq!(delivered[8],63,"SNAT/DNAT decrements TTL exactly once");
+            assert_eq!(&delivered[40..],&request[40..],"each queued SYN payload is delivered unchanged");
+            assert_packet_checksums(&delivered);
+            mapped.push((u16::from_be_bytes([delivered[20],delivered[21]]),request));
+        }
+        assert_ne!(mapped[0].0,mapped[1].0,"independent source tuples receive distinct SNAT ports");
+        assert_eq!(stats.read().await["a"].0,(requests[0].len()+requests[1].len()) as u64,"source accounting occurs only on actual delivery");
+
+        let mut replies=Vec::new();
+        for (snat_port,request) in &mapped {
+            let original_port=u16::from_be_bytes([request[20],request[21]]);
+            let reply=service_packet(6,[10,88,0,3],[10,88,0,1],5353,*snat_port,0x12,b"syn-ack");
+            send_inner(&b_socket,address,&mut b,&reply,&mut tx).await;
+            let restored=recv_inner(&a_socket,&mut a,&mut rx,&mut tx).await;
+            assert_eq!(&restored[12..16],&[10,88,0,1]);assert_eq!(&restored[16..20],&[10,88,0,2]);
+            assert_eq!(u16::from_be_bytes([restored[20],restored[21]]),5353);
+            assert_eq!(u16::from_be_bytes([restored[22],restored[23]]),original_port,"reverse mapping restores this SYN's exact original source port");
+            assert_eq!(&restored[40..],b"syn-ack");assert_packet_checksums(&restored);
+            replies.push(reply);
+        }
+        assert_no_inner(&b_socket,address,&mut b,&mut rx,&mut tx).await;
+        let snapshot=stats.read().await;
+        assert_eq!(snapshot["a"].0,(requests[0].len()+requests[1].len()) as u64);
+        assert_eq!(snapshot["b"].1,(requests[0].len()+requests[1].len()) as u64);
+        assert_eq!(snapshot["a"].1,(replies[0].len()+replies[1].len()) as u64);
+        assert_eq!(snapshot["b"].0,(replies[0].len()+replies[1].len()) as u64);
+    }
+
+    #[tokio::test]
+    async fn cold_forward_deletion_ack_prevents_late_handshake_delivery() {
+        let dir=tempfile::tempdir().unwrap();
+        let store=Arc::new(Store::open(dir.path().join("cold-forward-delete.sqlite").to_str().unwrap()).unwrap());
+        store.bind_test_identity();store.setup("10.88.0.0/24","hub.example:51820",25).unwrap();
+        store.add_group(&Group{id:"clients".into(),name:"clients".into(),allowed_groups:vec!["backend".into()]}).unwrap();
+        store.add_group(&Group{id:"backend".into(),name:"backend".into(),allowed_groups:vec![]}).unwrap();
+        store.set_acl("clients", &["backend".into()]).unwrap();
+        let a_secret=StaticSecret::from([101u8;32]); let b_secret=StaticSecret::from([102u8;32]);
+        for (id,secret,ip,group) in [("a",&a_secret,"10.88.0.2","clients"),("b",&b_secret,"10.88.0.3","backend")] {
+            store.add_peer(&Peer{id:id.into(),name:id.into(),public_key:base64::engine::general_purpose::STANDARD.encode(PublicKey::from(secret).as_bytes()),ipv4:ip.into(),group_id:group.into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None}).unwrap();
+        }
+        create_forward_for_test(&store,Forward{id:"tcp".into(),name:"tcp service".into(),protocol:"tcp".into(),target_peer_id:"b".into(),target_port:5353,allowed_group_ids:vec!["clients".into()]});
+        let hub_private=[103u8;32];let hub_public=PublicKey::from(&StaticSecret::from(hub_private));
+        let server=UdpSocket::bind("127.0.0.1:0").await.unwrap();let address=server.local_addr().unwrap();
+        let (commands_tx,commands_rx)=mpsc::channel(2);let (ready,ready_rx)=oneshot::channel();
+        let stats=RuntimeStats::default();
+        let (queue_observer,mut observations)=mpsc::unbounded_channel();
+        tokio::spawn(QUEUE_OBSERVER.scope(queue_observer,run_udp(server,store.clone(),hub_private,commands_rx,stats.clone(),Some(ready))));ready_rx.await.unwrap().unwrap();
+        let a_socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();let b_socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut a=Tunn::new(a_secret,hub_public,None,None,101,None);let mut b=Tunn::new(b_secret,hub_public,None,None,102,None);
+        let mut tx=vec![0;65535];let mut rx=vec![0;65535];
+        establish_client(&a_socket,address,&mut a,&mut tx,&mut rx).await;
+
+        let queued_syn=service_packet(6,[10,88,0,2],[10,88,0,1],12345,5353,0x02,b"must-not-arrive");
+        send_inner(&a_socket,address,&mut a,&queued_syn,&mut tx).await;
+        let observed=timeout(Duration::from_secs(2),observations.recv()).await.unwrap().unwrap();
+        assert_eq!(observed.queued,vec![("a".into(),"b".into(),Some("tcp".into()),Ipv4Addr::new(10,88,0,2),Ipv4Addr::new(10,88,0,1),Ipv4Addr::new(10,88,0,3),12345,6)]);
+        assert_eq!(observed.queued_bytes,queued_syn.len());
+        assert_eq!(observed.flow_counts,(0,0));
+        assert_eq!(observed.source_counters,(0,0));
+        assert_eq!(stats.read().await["a"].0,0,"cold forwarded SYN is not committed before backend authentication");
+
+        // Remove the actual persisted forward and wait for the router to publish
+        // the new snapshot before B completes its first handshake.
+        store.remove_forward("tcp").unwrap();
+        let (ack,wait)=oneshot::channel();commands_tx.send(ReloadCommand{ack}).await.unwrap();wait.await.unwrap().unwrap();
+
+        establish_client(&b_socket,address,&mut b,&mut tx,&mut rx).await;
+        let TunnResult::WriteToNetwork(keepalive)=b.encapsulate(&[],&mut tx) else {panic!("expected authenticated keepalive")};
+        b_socket.send_to(keepalive,address).await.unwrap();
+        assert_no_inner(&b_socket,address,&mut b,&mut rx,&mut tx).await;
+        assert_eq!(stats.read().await["a"].0,0,"acknowledged forward deletion discards the queued SYN without source accounting");
+
+        // The backend remains live and the directed ACL still authorizes direct
+        // peer traffic after the forward-only policy change.
+        let direct_syn=service_packet(6,[10,88,0,2],[10,88,0,3],23456,5353,0x02,b"direct-syn");
+        send_inner(&a_socket,address,&mut a,&direct_syn,&mut tx).await;
+        let delivered=recv_inner(&b_socket,&mut b,&mut rx,&mut tx).await;
+        assert_eq!(&delivered[12..16],&[10,88,0,2]);assert_eq!(&delivered[16..20],&[10,88,0,3]);
+        assert_eq!(u16::from_be_bytes([delivered[20],delivered[21]]),23456);
+        assert_eq!(u16::from_be_bytes([delivered[22],delivered[23]]),5353);
+        assert_eq!(&delivered[40..],b"direct-syn");assert_packet_checksums(&delivered);
+
+        let direct_reply=service_packet(6,[10,88,0,3],[10,88,0,2],5353,23456,0x12,b"direct-syn-ack");
+        send_inner(&b_socket,address,&mut b,&direct_reply,&mut tx).await;
+        let restored=recv_inner(&a_socket,&mut a,&mut rx,&mut tx).await;
+        assert_eq!(&restored[12..16],&[10,88,0,3]);assert_eq!(&restored[16..20],&[10,88,0,2]);
+        assert_eq!(u16::from_be_bytes([restored[20],restored[21]]),5353);
+        assert_eq!(u16::from_be_bytes([restored[22],restored[23]]),23456);
+        assert_eq!(&restored[40..],b"direct-syn-ack");assert_packet_checksums(&restored);
+    }
+
+    #[tokio::test]
+    async fn cold_forward_tcp_waits_for_packet_data_without_committing_or_leaking_plaintext() {
+        let hub_ip = Ipv4Addr::new(10, 88, 0, 1);
+        let source = Peer{id:"a".into(),name:"a".into(),public_key:String::new(),ipv4:"10.88.0.2".into(),group_id:"clients".into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None};
+        let backend = Peer{id:"b".into(),name:"b".into(),public_key:String::new(),ipv4:"10.88.0.3".into(),group_id:"backend".into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None};
+        let forward = Forward{id:"f".into(),name:"tcp".into(),protocol:"tcp".into(),target_peer_id:"b".into(),target_port:443,allowed_group_ids:vec!["clients".into()]};
+        let secret = StaticSecret::from([151u8;32]);
+        let hub_public = PublicKey::from(&StaticSecret::from([152u8;32]));
+        let endpoint_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = endpoint_socket.local_addr().unwrap();
+        let mut peers = HashMap::new();
+        peers.insert("b".into(), RuntimePeer{peer:backend.clone(),group:None,tunnel:Tunn::new(secret,hub_public,None,None,1,None),endpoint:Some(endpoint),last_data_unix:None,receiver_index:256});
+        let mut nat = Flows::new(hub_ip, &[forward.clone()]);
+        let now = Instant::now();
+        let mut out = vec![0;65535];
+
+        for (sport, dport) in [(12001,443),(12002,8443)] {
+            let f = Forward{target_port:dport,..forward.clone()};
+            let raw = service_packet(6,[10,88,0,2],[10,88,0,1],sport,dport,0x02,b"secret-tcp-payload");
+            let validated = ipv4::validate_forwarded(&raw).expect("valid TCP fixture");
+            let (bytes, reservation) = nat.prepare_forward_packet(&validated,&source,&f,&backend,now).expect("TCP SYN reserves a flow");
+            assert_packet_checksums(&bytes);
+            assert_eq!(&bytes[12..16],&[10,88,0,1]);
+            assert_eq!(&bytes[16..20],&[10,88,0,3]);
+            assert_eq!(u16::from_be_bytes([bytes[22],bytes[23]]),dport);
+            assert_ne!(u16::from_be_bytes([bytes[20],bytes[21]]),sport,"each source tuple receives a translated source port");
+            let mut plan = DeliveryPlan{source_id:"a".into(),target_id:"b".into(),bytes,reservation:Some(reservation),forward_id:Some(f.id.clone())};
+            let outcome = deliver_plan(&endpoint_socket,&mut peers,&plan,&mut out).await;
+            assert_eq!(outcome,EgressOutcome::NotReady,"cold TCP must remain application-owned until PacketData");
+            complete_delivery(&mut nat,&mut peers,&mut plan,outcome);
+            assert_eq!(nat.test_state_counts(),(0,0),"cold TCP does not commit or leave a reservation");
+            assert_eq!(peers["b"].peer.sent_bytes,0,"handshake traffic is not application accounting");
+            if sport==12001 {
+                let (n,_) = timeout(Duration::from_secs(1),endpoint_socket.recv_from(&mut out)).await.unwrap().unwrap();
+                assert!(!out[..n].windows(b"secret-tcp-payload".len()).any(|w|w==b"secret-tcp-payload"),"plaintext must never reach the network socket");
+            } else {
+                assert!(timeout(Duration::from_millis(100),endpoint_socket.recv_from(&mut out)).await.is_err(),"one in-progress handshake is shared and no second SYN plaintext is emitted");
+            }
+        }
+    }
+
+    #[test]
+    fn pending_forward_tcp_is_retained_only_while_current_policy_authorizes_it() {
+        let secret_a=StaticSecret::from([181u8;32]);
+        let secret_b=StaticSecret::from([182u8;32]);
+        let public_a=base64::engine::general_purpose::STANDARD.encode(PublicKey::from(&secret_a).as_bytes());
+        let public_b=base64::engine::general_purpose::STANDARD.encode(PublicKey::from(&secret_b).as_bytes());
+        let source=Peer{id:"a".into(),name:"a".into(),public_key:public_a.clone(),ipv4:"10.88.0.2".into(),group_id:"clients".into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None};
+        let target=Peer{id:"b".into(),name:"b".into(),public_key:public_b.clone(),ipv4:"10.88.0.3".into(),group_id:"backend".into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None};
+        let source_group=Group{id:"clients".into(),name:"clients".into(),allowed_groups:vec!["backend".into()]};
+        let target_group=Group{id:"backend".into(),name:"backend".into(),allowed_groups:vec![]};
+        let forward=Forward{id:"f".into(),name:"tcp".into(),protocol:"tcp".into(),target_peer_id:"b".into(),target_port:443,allowed_group_ids:vec!["clients".into()]};
+        let hub_public=PublicKey::from(&StaticSecret::from([183u8;32]));
+        let runtime=|peer:Peer,group:Group| RuntimePeer{peer,group:Some(group),tunnel:Tunn::new(StaticSecret::from([184u8;32]),hub_public,None,None,1,None),endpoint:None,last_data_unix:None,receiver_index:256};
+        let mut peers=HashMap::new();peers.insert("a".into(),runtime(source,source_group.clone()));peers.insert("b".into(),runtime(target,target_group));
+        let packet=ipv4::validate_forwarded(&service_packet(6,[10,88,0,2],[10,88,0,1],13000,443,0x02,b"queued")).unwrap();
+        let mut queue=VecDeque::new();let mut queued_bytes=0;
+        enqueue_pending(&mut queue,&mut queued_bytes,PendingDelivery{source_id:"a".into(),source_key:public_a,source_ip:packet.src(),packet,reply_only:false,deadline:Instant::now()+PENDING_TTL,target_id:"b".into(),target_key:public_b,target_ip:"10.88.0.3".parse().unwrap(),forward_id:Some("f".into()),forward_protocol:Some("tcp".into()),forward_target_port:Some(443)});
+        assert_eq!(queue.len(),1,"cold target handshake leaves the original packet application-owned");
+
+        // An unrelated reload keeps the queued delivery eligible; no handshake
+        // or PacketData is needed to evaluate the authorization decision.
+        let mut nat=Flows::new(Ipv4Addr::new(10,88,0,1),&[forward.clone()]);
+        retain_pending(&mut queue,&mut queued_bytes,&peers,&[forward.clone()],Some(Ipv4Addr::new(10,88,0,1)),&nat);
+        assert_eq!(queue.len(),1,"unrelated reload retains an authorized queued SYN");
+
+        // Model an ACL revocation in the acknowledged snapshot. The cold queue
+        // is discarded before a later target handshake can drain it.
+        peers.get_mut("a").unwrap().group.as_mut().unwrap().allowed_groups.clear();
+        nat.reconcile(Some(Ipv4Addr::new(10,88,0,1)),Some(Ipv4Addr::new(10,88,0,1)),&[forward.clone()],&[forward.clone()],&peers);
+        retain_pending(&mut queue,&mut queued_bytes,&peers,&[forward],Some(Ipv4Addr::new(10,88,0,1)),&nat);
+        assert!(queue.is_empty(),"revoked queued SYN must be purged before target handshake");
+        assert_eq!(queued_bytes,0);
+        assert_eq!(nat.test_state_counts(),(0,0),"revoked cold SYN grants no forward or reverse flow");
+    }
+
+    fn pending_forward_fixture() -> (HashMap<String, RuntimePeer>, Forward, ipv4::ValidatedPacket) {
+        let secret_a=StaticSecret::from([191u8;32]);
+        let secret_b=StaticSecret::from([192u8;32]);
+        let public_a=base64::engine::general_purpose::STANDARD.encode(PublicKey::from(&secret_a).as_bytes());
+        let public_b=base64::engine::general_purpose::STANDARD.encode(PublicKey::from(&secret_b).as_bytes());
+        let source=Peer{id:"a".into(),name:"a".into(),public_key:public_a,ipv4:"10.88.0.2".into(),group_id:"clients".into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None};
+        let target=Peer{id:"b".into(),name:"b".into(),public_key:public_b,ipv4:"10.88.0.3".into(),group_id:"backend".into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None};
+        let source_group=Group{id:"clients".into(),name:"clients".into(),allowed_groups:vec!["backend".into()]};
+        let target_group=Group{id:"backend".into(),name:"backend".into(),allowed_groups:vec![]};
+        let hub_public=PublicKey::from(&StaticSecret::from([193u8;32]));
+        let runtime=|peer:Peer,group:Group| RuntimePeer{peer,group:Some(group),tunnel:Tunn::new(StaticSecret::from([194u8;32]),hub_public,None,None,1,None),endpoint:None,last_data_unix:None,receiver_index:256};
+        let mut peers=HashMap::new();peers.insert("a".into(),runtime(source,source_group));peers.insert("b".into(),runtime(target,target_group));
+        let forward=Forward{id:"f".into(),name:"tcp".into(),protocol:"tcp".into(),target_peer_id:"b".into(),target_port:443,allowed_group_ids:vec!["clients".into()]};
+        let packet=ipv4::validate_forwarded(&service_packet(6,[10,88,0,2],[10,88,0,1],13000,443,0x02,b"queued")).unwrap();
+        (peers,forward,packet)
+    }
+
+    fn queued_forward(packet: ipv4::ValidatedPacket, peers: &HashMap<String,RuntimePeer>, forward: &Forward, deadline: Instant) -> PendingDelivery {
+        PendingDelivery{source_id:"a".into(),source_key:peers["a"].peer.public_key.clone(),source_ip:packet.src(),packet,reply_only:false,deadline,target_id:"b".into(),target_key:peers["b"].peer.public_key.clone(),target_ip:peers["b"].peer.ipv4.parse().unwrap(),forward_id:Some(forward.id.clone()),forward_protocol:Some(forward.protocol.clone()),forward_target_port:Some(forward.target_port)}
+    }
+
+    #[test]
+    fn pending_forward_purges_when_source_ip_changes_without_identity_change() {
+        let (mut peers,forward,packet)=pending_forward_fixture();
+        let deadline=Instant::now()+PENDING_TTL;
+        let mut queue=VecDeque::from([queued_forward(packet,&peers,&forward,deadline)]);let mut bytes=queue[0].packet.bytes().len();
+        peers.get_mut("a").unwrap().peer.ipv4="10.88.0.22".into();
+        let nat=Flows::new(Ipv4Addr::new(10,88,0,1),&[forward.clone()]);
+        retain_pending(&mut queue,&mut bytes,&peers,&[forward],Some(Ipv4Addr::new(10,88,0,1)),&nat);
+        assert!(queue.is_empty(),"pending packet source IP is part of its authenticated identity");
+        assert_eq!(bytes,0);
+    }
+
+    #[test]
+    fn pending_forward_purges_when_target_ip_changes_without_identity_change() {
+        let (mut peers,forward,packet)=pending_forward_fixture();
+        let deadline=Instant::now()+PENDING_TTL;
+        let mut queue=VecDeque::from([queued_forward(packet,&peers,&forward,deadline)]);let mut bytes=queue[0].packet.bytes().len();
+        peers.get_mut("b").unwrap().peer.ipv4="10.88.0.33".into();
+        let nat=Flows::new(Ipv4Addr::new(10,88,0,1),&[forward.clone()]);
+        retain_pending(&mut queue,&mut bytes,&peers,&[forward],Some(Ipv4Addr::new(10,88,0,1)),&nat);
+        assert!(queue.is_empty(),"pending packet target IP is part of its authenticated identity");
+        assert_eq!(bytes,0);
+    }
+
+    #[test]
+    fn pending_forward_purges_when_same_id_forward_protocol_or_port_changes() {
+        for changed in [Forward{protocol:"udp".into(),..forward_for_identity_test()},Forward{target_port:8443,..forward_for_identity_test()}] {
+            let (peers,original,packet)=pending_forward_fixture();
+            let deadline=Instant::now()+PENDING_TTL;
+            let mut queue=VecDeque::from([queued_forward(packet,&peers,&original,deadline)]);let mut bytes=queue[0].packet.bytes().len();
+            let nat=Flows::new(Ipv4Addr::new(10,88,0,1),&[changed.clone()]);
+            retain_pending(&mut queue,&mut bytes,&peers,&[changed],Some(Ipv4Addr::new(10,88,0,1)),&nat);
+            assert!(queue.is_empty(),"forward protocol and target port are part of pending identity");
+            assert_eq!(bytes,0);
+        }
+    }
+
+    fn forward_for_identity_test() -> Forward { Forward{id:"f".into(),name:"tcp".into(),protocol:"tcp".into(),target_peer_id:"b".into(),target_port:443,allowed_group_ids:vec!["clients".into()]} }
+
+    #[test]
+    fn pending_forward_unchanged_identity_preserves_exact_deadline() {
+        let (peers,forward,packet)=pending_forward_fixture();
+        let deadline=Instant::now()+PENDING_TTL;
+        let mut queue=VecDeque::from([queued_forward(packet,&peers,&forward,deadline)]);let mut bytes=queue[0].packet.bytes().len();
+        let nat=Flows::new(Ipv4Addr::new(10,88,0,1),&[forward.clone()]);
+        retain_pending(&mut queue,&mut bytes,&peers,&[forward],Some(Ipv4Addr::new(10,88,0,1)),&nat);
+        assert_eq!(queue.len(),1);
+        assert_eq!(queue[0].deadline,deadline,"unrelated reload must not extend or shorten original deadline");
+    }
+
+    #[tokio::test]
+    async fn drain_pending_releases_reservation_when_original_target_ip_is_reassigned() {
+        let (mut peers,_forward,_)=pending_forward_fixture();
+        let packet=ipv4::validate(&service_packet(17,[10,88,0,2],[10,88,0,3],13000,443,0,b"queued"),&peers["a"].peer,peers["a"].group.as_ref()).unwrap();
+        let mut moved=peers["b"].peer.clone();moved.ipv4="10.88.0.33".into();
+        peers.get_mut("b").unwrap().peer=moved;
+        let secret_c=StaticSecret::from([195u8;32]);
+        let c=Peer{id:"c".into(),name:"c".into(),public_key:base64::engine::general_purpose::STANDARD.encode(PublicKey::from(&secret_c).as_bytes()),ipv4:"10.88.0.3".into(),group_id:"backend".into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None};
+        let hub_public=PublicKey::from(&StaticSecret::from([196u8;32]));
+        peers.insert("c".into(),RuntimePeer{peer:c,group:Some(Group{id:"backend".into(),name:"backend".into(),allowed_groups:vec![]}),tunnel:Tunn::new(secret_c,hub_public,None,None,1,None),endpoint:None,last_data_unix:None,receiver_index:512});
+        let original_b=Peer{ipv4:"10.88.0.3".into(),..peers["b"].peer.clone()};
+        let now=Instant::now();
+        let mut nat=Flows::new(Ipv4Addr::new(10,88,0,1),&[]);
+        let (_,reservation)=nat.prepare_direct(&packet,&peers["a"].peer,&original_b,now).expect("original target reservation");
+        // Keep the reservation pending, as it is while an asynchronous delivery is being drained.
+        std::mem::forget(reservation);
+        let item=PendingDelivery{source_id:"a".into(),source_key:peers["a"].peer.public_key.clone(),source_ip:packet.src(),packet,reply_only:false,deadline:now+PENDING_TTL,target_id:"b".into(),target_key:original_b.public_key.clone(),target_ip:"10.88.0.3".parse().unwrap(),forward_id:None,forward_protocol:None,forward_target_port:None};
+        let mut queue=VecDeque::from([item]);let mut queued_bytes=queue[0].packet.bytes().len();
+        let socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();let mut out=vec![0;65535];
+        drain_pending(&socket,&mut queue,&mut queued_bytes,&mut peers,&[],Some(Ipv4Addr::new(10,88,0,1)),&mut nat,&mut out).await;
+        assert!(queue.is_empty());
+        assert_eq!(queued_bytes,0);
+        assert_eq!(nat.test_state_counts(),(0,0),"rejected retarget plan must release every active or pending flow reservation");
+    }
+
+    #[tokio::test]
+    async fn drain_pending_releases_new_retarget_plan_with_empty_flow_state() {
+        let (mut peers,_,_)=pending_forward_fixture();
+        let packet=ipv4::validate(&service_packet(17,[10,88,0,2],[10,88,0,3],13001,444,0,b"queued"),&peers["a"].peer,peers["a"].group.as_ref()).unwrap();
+        let captured_target=peers["b"].peer.clone();
+        peers.get_mut("b").unwrap().peer.ipv4="10.88.0.33".into();
+        let secret_c=StaticSecret::from([197u8;32]);
+        let c=Peer{id:"c".into(),name:"c".into(),public_key:base64::engine::general_purpose::STANDARD.encode(PublicKey::from(&secret_c).as_bytes()),ipv4:"10.88.0.3".into(),group_id:"backend".into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None};
+        let hub_public=PublicKey::from(&StaticSecret::from([198u8;32]));
+        peers.insert("c".into(),RuntimePeer{peer:c,group:Some(Group{id:"backend".into(),name:"backend".into(),allowed_groups:vec![]}),tunnel:Tunn::new(secret_c,hub_public,None,None,1,None),endpoint:None,last_data_unix:None,receiver_index:512});
+        let item=PendingDelivery{source_id:"a".into(),source_key:peers["a"].peer.public_key.clone(),source_ip:packet.src(),packet,reply_only:false,deadline:Instant::now()+PENDING_TTL,target_id:"b".into(),target_key:captured_target.public_key,target_ip:"10.88.0.3".parse().unwrap(),forward_id:None,forward_protocol:None,forward_target_port:None};
+        let mut queue=VecDeque::from([item]);let mut queued_bytes=queue[0].packet.bytes().len();
+        let mut nat=Flows::new(Ipv4Addr::new(10,88,0,1),&[]);
+        assert_eq!(nat.test_state_counts(),(0,0),"this case starts without an orphaned pending reservation");
+        let counters_before:HashMap<_,_>=peers.iter().map(|(id,p)|(id.clone(),(p.peer.received_bytes,p.peer.sent_bytes))).collect();
+        let socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();let mut out=vec![0;65535];
+        drain_pending(&socket,&mut queue,&mut queued_bytes,&mut peers,&[],Some(Ipv4Addr::new(10,88,0,1)),&mut nat,&mut out).await;
+        assert!(queue.is_empty());
+        assert_eq!(queued_bytes,0);
+        assert_eq!(nat.test_state_counts(),(0,0),"the fresh plan for replacement C is rejected against captured B provenance and released");
+        assert_eq!(peers.iter().map(|(id,p)|(id.clone(),(p.peer.received_bytes,p.peer.sent_bytes))).collect::<HashMap<_,_>>(),counters_before);
+    }
+
+    #[tokio::test]
+    async fn invalid_mac_initiation_shapes_do_not_reach_anonymous_parse() {
+        let store = Arc::new(Store::open(":memory:").unwrap());
+        store.bind_test_identity();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let (commands, receiver) = mpsc::channel(1);
+        let (ready, started) = oneshot::channel();
+        tokio::spawn(run_udp(socket,store,[161u8;32],receiver,RuntimeStats::default(),Some(ready)));
+        started.await.unwrap().unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let before = ANON_PARSE_COUNT.with(|count| count.load(Ordering::SeqCst));
+        let mut malformed = [0u8;148];
+        malformed[..4].copy_from_slice(&1u32.to_le_bytes());
+        sender.send_to(&malformed,address).await.unwrap();
+        time::sleep(Duration::from_millis(100)).await;
+        let parsed = ANON_PARSE_COUNT.with(|count| count.load(Ordering::SeqCst)) - before;
+        assert_eq!(parsed,0,"invalid-MAC initiation must be rejected before anonymous parsing");
+        drop(commands);
+    }
+
+    #[tokio::test]
+    async fn reload_revocation_blocks_established_direct_flow_requests_and_replies() {
         let dir=tempfile::tempdir().unwrap();
         let store=Arc::new(Store::open(dir.path().join("cold-revoke.sqlite").to_str().unwrap()).unwrap());
-        store.setup("10.89.0.0/24","hub.example:51820",25).unwrap();
+        store.bind_test_identity();store.setup("10.89.0.0/24","hub.example:51820",25).unwrap();
         store.add_group(&Group{id:"a".into(),name:"A".into(),allowed_groups:vec!["b".into()]}).unwrap();
         store.add_group(&Group{id:"b".into(),name:"B".into(),allowed_groups:vec![]}).unwrap();
         store.set_acl("a", &["b".into()]).unwrap();
@@ -937,27 +1481,21 @@ mod tests {
         let mut a=Tunn::new(a_secret.clone(),hub_public,None,None,91,None); let mut b=Tunn::new(b_secret.clone(),hub_public,None,None,92,None);
         let mut tx=vec![0;65535]; let mut rx=vec![0;65535];
         establish_client(&a_socket,address,&mut a,&mut tx,&mut rx).await; establish_client(&b_socket,address,&mut b,&mut tx,&mut rx).await;
-        let (ack,wait)=oneshot::channel(); commands_tx.send(ReloadCommand{ack}).await.unwrap(); wait.await.unwrap().unwrap();
-        a=Tunn::new(a_secret.clone(),hub_public,None,None,91,None);
-        establish_client(&a_socket,address,&mut a,&mut tx,&mut rx).await;
-        let request=service_packet(17,[10,89,0,2],[10,89,0,3],2345,9090,0,b"revoke-cold");
+        let request=service_packet(17,[10,89,0,2],[10,89,0,3],2345,9090,0,b"before-revoke");
         send_inner(&a_socket,address,&mut a,&request,&mut tx).await;
-        let (_n,_)=timeout(Duration::from_secs(3),b_socket.recv_from(&mut rx)).await.unwrap().unwrap();
-        assert_eq!(u32::from_le_bytes(rx[..4].try_into().unwrap()),1,"cold direct UDP is pending behind target handshake");
+        assert_eq!(&recv_inner(&b_socket,&mut b,&mut rx,&mut tx).await[28..],b"before-revoke");
 
-        // Revocation acknowledgement clears the pending application datagram.
+        // Revocation removes established state before acknowledging policy.
         store.set_acl("a", &[]).unwrap();
         let (ack,wait)=oneshot::channel(); commands_tx.send(ReloadCommand{ack}).await.unwrap(); wait.await.unwrap().unwrap();
-        b=Tunn::new(b_secret,hub_public,None,None,92,None);
-        // Complete a fresh target handshake after the acknowledged revocation.
-        // Any handshake initiation sent before reload was intentionally discarded.
-        establish_client(&b_socket,address,&mut b,&mut tx,&mut rx).await;
-        let TunnResult::WriteToNetwork(keepalive)=b.encapsulate(&[],&mut tx) else {panic!("expected authenticated keepalive")};
-        b_socket.send_to(keepalive,address).await.unwrap();
-        assert!(timeout(Duration::from_millis(250),b_socket.recv_from(&mut rx)).await.is_err(),"revoked pending direct datagram must not arrive after handshake");
+        let reply=service_packet(17,[10,89,0,3],[10,89,0,2],9090,2345,0,b"revoked-reply");
+        send_inner(&b_socket,address,&mut b,&reply,&mut tx).await;
+        assert_no_inner(&a_socket,address,&mut a,&mut rx,&mut tx).await;
+        send_inner(&a_socket,address,&mut a,&service_packet(17,[10,89,0,2],[10,89,0,3],2345,9090,0,b"after-revoke"),&mut tx).await;
+        assert_no_inner(&b_socket,address,&mut b,&mut rx,&mut tx).await;
         let snapshot=stats.read().await;
-        assert_eq!(snapshot["a"].0,0,"queued packet was not accounted as delivered ingress");
-        assert_eq!(snapshot["b"].1,0,"queued packet was not accounted as delivered egress");
+        assert_eq!(snapshot["a"].0,request.len() as u64,"revoked traffic is not counted as delivered ingress");
+        assert_eq!(snapshot["b"].1,request.len() as u64,"revoked traffic is not counted as delivered egress");
     }
 
     #[test]
@@ -972,7 +1510,7 @@ mod tests {
         let mut peers=HashMap::new();
         for (peer,group,key) in [(a.clone(),ga.clone(),[101u8;32]),(b.clone(),gb.clone(),[102u8;32])] {
             let tunnel=Tunn::new(StaticSecret::from(key),PublicKey::from(&StaticSecret::from([103u8;32])),None,None,1,None);
-            peers.insert(peer.id.clone(),RuntimePeer{peer,group:Some(group),tunnel,endpoint:None,last_data_unix:None});
+            peers.insert(peer.id.clone(),RuntimePeer{peer,group:Some(group),tunnel,endpoint:None,last_data_unix:None,receiver_index:256});
         }
         let mut nat=Flows::new(Ipv4Addr::new(10,90,0,1),&[]);
         let original=ipv4::validate(&service_packet(17,[10,90,0,2],[10,90,0,3],1234,9090,0,b"request"),&a,Some(&ga)).unwrap();
@@ -985,17 +1523,93 @@ mod tests {
 
         // Give this manually constructed queue item a longer deadline so the
         // synthetic timestamp isolates reverse-flow expiry from queue expiry.
-        let queued=PendingDelivery{source_id:"b".into(),packet:reply,reply_only:true,deadline:now+Duration::from_secs(120)};
+        let queued=PendingDelivery{source_id:"b".into(),source_key:b.public_key.clone(),source_ip:reply.src(),packet:reply,reply_only:true,deadline:now+Duration::from_secs(120),target_id:"a".into(),target_key:a.public_key.clone(),target_ip:a.ipv4.parse().unwrap(),forward_id:None,forward_protocol:None,forward_target_port:None};
         let at=now+Duration::from_secs(61);
         assert!(!queued.expired_at(at),"test advances NAT expiry while keeping queue deadline live");
         assert!(nat.lookup_reply(&queued.packet,&b,at).is_none(),"reverse mapping has expired");
         // This is the drain_pending reply_only branch: it must only consult the
         // reverse mapping, never call resolve_packet and re-route by ACL.
         let queued_reply_plan=if queued.reply_only {
-            nat.lookup_reply(&queued.packet,&b,at).map(|(target_id,bytes,reservation)|DeliveryPlan{source_id:queued.source_id.clone(),target_id,bytes,reservation:Some(reservation),udp:true})
+            nat.lookup_reply(&queued.packet,&b,at).map(|(target_id,bytes,reservation)|DeliveryPlan{source_id:queued.source_id.clone(),target_id,bytes,reservation:Some(reservation),forward_id:None})
         } else {
             resolve_packet(&queued.packet,&b,&gb,"b",&peers,&[],Some(Ipv4Addr::new(10,90,0,1)),&mut nat,at).0
         };
         assert!(queued_reply_plan.is_none(),"expired queued reverse reply cannot use an ACL-permitted direct route");
+    }
+
+    #[test]
+    fn icmp_direct_route_uses_runtime_acl_without_nat_reservation() {
+        let a_secret = StaticSecret::from([221u8; 32]);
+        let b_secret = StaticSecret::from([222u8; 32]);
+        let hub_secret = StaticSecret::from([223u8; 32]);
+        let mut peers = HashMap::new();
+        for (id, ip, group_id, secret, allowed_groups, index) in [
+            ("a", "10.77.0.2", "a", &a_secret, vec!["b".to_string()], 1),
+            ("b", "10.77.0.3", "b", &b_secret, Vec::new(), 2),
+        ] {
+            let peer = Peer {
+                id: id.into(), name: id.into(),
+                public_key: base64::engine::general_purpose::STANDARD.encode(PublicKey::from(secret).as_bytes()),
+                ipv4: ip.into(), group_id: group_id.into(), received_bytes: 0, sent_bytes: 0,
+                last_handshake_unix: None,
+            };
+            peers.insert(id.into(), RuntimePeer {
+                peer,
+                group: Some(Group { id: group_id.into(), name: group_id.into(), allowed_groups }),
+                tunnel: Tunn::new(hub_secret.clone(), PublicKey::from(secret), None, None, index, None),
+                endpoint: None, last_data_unix: None, receiver_index: index << 8,
+            });
+        }
+
+        let echo = |src: [u8; 4], dst: [u8; 4], kind: u8| {
+            let mut packet = vec![0; 28];
+            packet[0] = 0x45;
+            packet[2..4].copy_from_slice(&28u16.to_be_bytes());
+            packet[8] = 64;
+            packet[9] = 1;
+            packet[12..16].copy_from_slice(&src);
+            packet[16..20].copy_from_slice(&dst);
+            packet[20] = kind;
+            packet[24..26].copy_from_slice(&0x1234u16.to_be_bytes());
+            packet[26..28].copy_from_slice(&1u16.to_be_bytes());
+            let icmp_checksum = ipv4::checksum(&packet[20..]);
+            packet[22..24].copy_from_slice(&icmp_checksum.to_be_bytes());
+            let ip_checksum = ipv4::checksum(&packet[..20]);
+            packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+            packet
+        };
+
+        let now = Instant::now();
+        let mut nat = Flows::new("10.77.0.1".parse().unwrap(), &[]);
+        let b = peers["b"].peer.clone();
+        let b_group = peers["b"].group.clone().unwrap();
+        let request_raw = echo([10, 77, 0, 3], [10, 77, 0, 2], 8);
+        let request = ipv4::validate(&request_raw, &b, Some(&b_group)).expect("B-owned valid ICMP request");
+        assert_eq!(request.src(), "10.77.0.3".parse::<Ipv4Addr>().unwrap());
+        let (denied, _) = resolve_packet(&request, &b, &b_group, "b", &peers, &[], None, &mut nat, now);
+        assert!(denied.is_none(), "B cannot route to A before its directed ACL grant");
+
+        peers.get_mut("b").unwrap().group.as_mut().unwrap().allowed_groups.push("a".into());
+        let b_group = peers["b"].group.clone().unwrap();
+        let (plan, _) = resolve_packet(&request, &b, &b_group, "b", &peers, &[], None, &mut nat, now);
+        let plan = plan.expect("runtime B-to-A ACL grant permits reservation-free ICMP plan");
+        assert_eq!(plan.target_id, "a");
+        assert!(plan.reservation.is_none(), "ICMP direct routing must not allocate a flow reservation");
+        let mut expected_request = request_raw.clone();
+        expected_request[8] = 63;
+        expected_request[10..12].fill(0);
+        let expected_ip_checksum = ipv4::checksum(&expected_request[..20]);
+        expected_request[10..12].copy_from_slice(&expected_ip_checksum.to_be_bytes());
+        assert_eq!(plan.bytes, expected_request, "only IPv4 TTL/checksum change, exactly once");
+
+        let a = peers["a"].peer.clone();
+        let a_group = peers["a"].group.clone().unwrap();
+        let reply_raw = echo([10, 77, 0, 2], [10, 77, 0, 3], 0);
+        let reply = ipv4::validate(&reply_raw, &a, Some(&a_group)).expect("A-owned valid ICMP echo reply");
+        let (reply_plan, _) = resolve_packet(&reply, &a, &a_group, "a", &peers, &[], None, &mut nat, now);
+        let reply_plan = reply_plan.expect("A-to-B reply remains directly routable");
+        assert_eq!(reply_plan.target_id, "b");
+        assert!(reply_plan.reservation.is_none());
+        assert_eq!(nat.test_state_counts(), (0, 0), "ICMP exchanges leave no active or pending flows");
     }
 }

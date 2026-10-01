@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http/httptest"
 	"net/netip"
 	"strings"
@@ -114,4 +115,71 @@ func TestUserNetstackTCPAndUDPEcho(t *testing.T) {
 		t.Fatalf("udp echo %q, %v", ub[:n], err)
 	}
 	s.close()
+}
+
+func TestPersistentTCPControlConnection(t *testing.T) {
+	_, stack, err := netstack.CreateNetTUN([]netip.Addr{netip.MustParseAddr("10.0.0.2")}, nil, 1420)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tcp, err := stack.ListenTCPAddrPort(netip.MustParseAddrPort("10.0.0.2:19082"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	udp, err := stack.ListenUDPAddrPort(netip.MustParseAddrPort("10.0.0.2:19082"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &client{stack: stack, tun: netip.MustParseAddr("10.0.0.2")}
+	s := &server{tcp: tcp, udp: udp, done: make(chan struct{})}
+	go c.tcpEcho(s, tcp)
+	go c.udpEcho(s, udp)
+	defer s.close()
+	mux := httpMux(c, "secret")
+	call := func(path, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", path, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer secret")
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != 200 {
+			t.Fatalf("%s returned %d: %s", path, w.Code, w.Body.String())
+		}
+		return w
+	}
+	opened := call("/tcp/open", `{"target":"10.0.0.2:19082"}`)
+	var open tcpOpenResponse
+	if err := json.Unmarshal(opened.Body.Bytes(), &open); err != nil || open.ID == "" || open.Error != "" {
+		t.Fatalf("open response %s, err=%v", opened.Body.String(), err)
+	}
+	exchanged := call("/tcp/exchange", fmt.Sprintf(`{"id":%q,"payload":"same-connection","timeout_ms":1000}`, open.ID))
+	var reply probeResponse
+	if err := json.Unmarshal(exchanged.Body.Bytes(), &reply); err != nil || !reply.OK {
+		t.Fatalf("exchange response %s, err=%v", exchanged.Body.String(), err)
+	}
+	call("/tcp/close", fmt.Sprintf(`{"id":%q}`, open.ID))
+	if _, exists := c.tcpConns[open.ID]; exists {
+		t.Fatal("close left persistent connection registered")
+	}
+}
+
+func TestConfigureClosesPersistentTCPConnections(t *testing.T) {
+	clientSide, peerSide := net.Pipe()
+	defer peerSide.Close()
+	c := &client{tcpConns: map[string]net.Conn{"existing": clientSide}}
+	mux := httpMux(c, "secret")
+	r := httptest.NewRequest("POST", "/configure", strings.NewReader(fmt.Sprintf(`{"config":%q}`, validConfig())))
+	r.Header.Set("Authorization", "Bearer secret")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Fatalf("configure returned %d: %s", w.Code, w.Body.String())
+	}
+	defer c.dev.Close()
+	if _, err := peerSide.Write([]byte("after replacement")); err == nil {
+		t.Fatal("device replacement left persistent connection open")
+	}
+	if len(c.tcpConns) != 0 {
+		t.Fatalf("device replacement retained %d persistent connections", len(c.tcpConns))
+	}
 }

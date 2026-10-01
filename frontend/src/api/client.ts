@@ -14,31 +14,31 @@ export type SetupStatus = components['schemas']['SetupStatus']
 export type SetupRequest = components['schemas']['SetupRequest']
 export type SettingsRequest = components['schemas']['SettingsRequest']
 
-async function throwSetupError(response: Response): Promise<never> {
-  let payload: unknown
-  const text = await response.clone().text().catch(() => '')
-  try { payload = JSON.parse(text) } catch { payload = text }
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) { super(message); this.name = 'ApiError' }
+}
 
+function throwSetupError(status: number, payload: unknown): never {
   const detail = payload && typeof payload === 'object' && 'message' in payload
     ? String((payload as { message: unknown }).message)
     : typeof payload === 'string' ? payload.trim() : ''
-  throw new Error(detail || `Request failed (${response.status})`)
+  throw new ApiError(detail || `Request failed (${status})`, status)
 }
 
 export const setupApi = {
   async get(): Promise<SetupStatus> {
-    const { data, response } = await client.GET('/api/setup', { cache: 'no-store' })
-    if (!response.ok) await throwSetupError(response)
+    const { data, error, response } = await client.GET('/api/setup', { cache: 'no-store' })
+    if (error || !response.ok) throwSetupError(response.status, error)
     return data as SetupStatus
   },
   async create(body: SetupRequest): Promise<NetworkSettings> {
-    const { data, response } = await client.POST('/api/setup', { body, cache: 'no-store' })
-    if (!response.ok) await throwSetupError(response)
+    const { data, error, response } = await client.POST('/api/setup', { body, cache: 'no-store' })
+    if (error || !response.ok) throwSetupError(response.status, error)
     return data as NetworkSettings
   },
   async update(body: SettingsRequest): Promise<NetworkSettings> {
-    const { data, response } = await client.PUT('/api/settings', { body, cache: 'no-store' })
-    if (!response.ok) await throwSetupError(response)
+    const { data, error, response } = await client.PUT('/api/settings', { body, cache: 'no-store' })
+    if (error || !response.ok) throwSetupError(response.status, error)
     return data as NetworkSettings
   },
 }

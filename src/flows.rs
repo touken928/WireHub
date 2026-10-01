@@ -30,6 +30,9 @@ struct Flow {
     output: Option<PacketTuple>,
     backend: String,
     backend_ip: Ipv4Addr,
+    initiator_key: String,
+    backend_key: String,
+    forward_id: Option<String>,
     last: Instant,
 }
 
@@ -51,6 +54,9 @@ pub(crate) struct Flows {
 impl Default for Flows { fn default() -> Self { Self::new(Ipv4Addr::new(10, 77, 0, 1), &[]) } }
 
 impl Flows {
+    #[cfg(test)]
+    pub(crate) fn test_state_counts(&self) -> (usize, usize) { (self.flows.len(), self.pending.len()) }
+
     pub fn new(hub_ip: Ipv4Addr, forwards: &[Forward]) -> Self {
         let service_ports = forwards.iter().filter_map(|f| protocol(&f.protocol).map(|p| (p, f.target_port))).collect();
         Self { flows: HashMap::new(), reverse: HashMap::new(), pending: HashMap::new(), pending_reverse: HashMap::new(), hub_ip, service_ports, next_udp_snat: SNAT_START, next_tcp_snat: SNAT_START }
@@ -58,6 +64,27 @@ impl Flows {
 
     pub fn clear(&mut self) {
         self.flows.clear(); self.reverse.clear(); self.pending.clear(); self.pending_reverse.clear();
+    }
+
+    pub(crate) fn reconcile(&mut self, old_hub: Option<Ipv4Addr>, new_hub: Option<Ipv4Addr>, old_forwards: &[Forward], new_forwards: &[Forward], peers: &HashMap<String, crate::transport::RuntimePeer>) {
+        let same_hub = old_hub == new_hub;
+        self.flows.retain(|key, flow| {
+            if !same_hub { return false; }
+            let Some(source) = peers.get(&key.peer) else { return false };
+            let Some(target) = peers.get(&flow.backend) else { return false };
+            if source.peer.public_key != flow.initiator_key || target.peer.public_key != flow.backend_key || source.peer.ipv4.parse::<Ipv4Addr>().ok() != Some(key.ip) || target.peer.ipv4.parse::<Ipv4Addr>().ok() != Some(flow.backend_ip) { return false; }
+            if flow.forward_id.is_some() {
+                let Some(id) = flow.forward_id.as_deref() else { return false };
+                let Some(before) = old_forwards.iter().find(|f| f.id == id) else { return false };
+                let Some(after) = new_forwards.iter().find(|f| f.id == id) else { return false };
+                if before.protocol != after.protocol || before.target_peer_id != after.target_peer_id || before.target_port != after.target_port || !after.allowed_group_ids.contains(&source.peer.group_id) || !crate::policy::forward_allowed(after, &source.peer.group_id, source.group.as_ref(), &target.peer.group_id) { return false; }
+            } else if !crate::policy::allows(source.group.as_ref().unwrap_or(&crate::model::Group {id:String::new(),name:String::new(),allowed_groups:vec![]}), target.group.as_ref().unwrap_or(&crate::model::Group {id:String::new(),name:String::new(),allowed_groups:vec![]})) { return false; }
+            true
+        });
+        self.reverse.retain(|_,key| self.flows.contains_key(key));
+        self.pending.clear(); self.pending_reverse.clear();
+        self.service_ports = new_forwards.iter().filter_map(|f| protocol(&f.protocol).map(|p|(p,f.target_port))).collect();
+        self.hub_ip = new_hub.unwrap_or(Ipv4Addr::UNSPECIFIED);
     }
 
     /// Reclaim expired records. Called at bounded sweep intervals and before capacity allocation.
@@ -71,9 +98,11 @@ impl Flows {
     pub(crate) fn prepare_direct(&mut self, packet: &ValidatedPacket, source: &Peer, destination: &Peer, now: Instant) -> Option<(Vec<u8>, Reservation)> {
         let (sport, dport) = (packet.src_port()?, packet.dst_port()?);
         let proto = packet.protocol();
-        if proto != 17 || packet.dst().to_string() != destination.ipv4 { return None; }
+        if !matches!(proto, 6 | 17) || packet.dst().to_string() != destination.ipv4 { return None; }
         let key = Tuple { peer: source.id.clone(), ip: packet.src(), port: sport, frontend_ip: packet.dst(), frontend_port: dport, protocol: proto };
-        self.prepare_common(packet, key, destination, None, now)
+        if self.flows.get(&key).is_some_and(|f| now.saturating_duration_since(f.last)>=idle(proto)) { self.remove_active(&key); }
+        if proto == 6 && !self.flows.contains_key(&key) && !packet.tcp_flags().is_some_and(|flags| flags & 2 != 0 && flags & 16 == 0) { return None; }
+        self.prepare_common(packet, key, destination, None, now, None, source.public_key.clone())
     }
 
     /// Prepare translated forwarding while retaining the frontend tuple for replies.
@@ -102,7 +131,7 @@ impl Flows {
             self.reserve_capacity(now)?;
             let snat = self.choose_snat(proto, backend, forward.target_port)?;
             let reply = Reverse { peer: backend.id.clone(), proto, src: backend_ip, sport: forward.target_port, dst: self.hub_ip, dport: snat };
-            let flow = Flow { reply: reply.clone(), output: Some(PacketTuple { src: self.hub_ip, src_port: snat, dst: backend_ip, dst_port: forward.target_port }), backend: backend.id.clone(), backend_ip, last: now };
+            let flow = Flow { reply: reply.clone(), output: Some(PacketTuple { src: self.hub_ip, src_port: snat, dst: backend_ip, dst_port: forward.target_port }), backend: backend.id.clone(), backend_ip, initiator_key:source.public_key.clone(), backend_key:backend.public_key.clone(), forward_id:Some(forward.id.clone()), last: now };
             self.pending_reverse.insert(reply, key.clone());
             self.pending.insert(key.clone(), flow.clone());
             flow
@@ -112,7 +141,7 @@ impl Flows {
         Some((output, Reservation { key, flow, is_new }))
     }
 
-    fn prepare_common(&mut self, packet: &ValidatedPacket, key: Tuple, destination: &Peer, output: Option<PacketTuple>, now: Instant) -> Option<(Vec<u8>, Reservation)> {
+    fn prepare_common(&mut self, packet: &ValidatedPacket, key: Tuple, destination: &Peer, output: Option<PacketTuple>, now: Instant, forward_id: Option<String>, initiator_key: String) -> Option<(Vec<u8>, Reservation)> {
         if self.flows.get(&key).is_some_and(|f| now.saturating_duration_since(f.last) >= idle(key.protocol)) {
             self.remove_active(&key);
         }
@@ -125,7 +154,7 @@ impl Flows {
         } else {
             self.reserve_capacity(now)?;
             let reply = Reverse { peer: destination.id.clone(), proto: key.protocol, src: key.frontend_ip, sport: key.frontend_port, dst: key.ip, dport: key.port };
-            let flow = Flow { reply: reply.clone(), output, backend: destination.id.clone(), backend_ip: destination_ip, last: now };
+            let flow = Flow { reply: reply.clone(), output, backend: destination.id.clone(), backend_ip: destination_ip, initiator_key, backend_key:destination.public_key.clone(), forward_id, last: now };
             self.pending_reverse.insert(reply, key.clone());
             self.pending.insert(key.clone(), flow.clone());
             flow
@@ -170,6 +199,14 @@ impl Flows {
         self.pending_reverse.retain(|_, value| value != key);
     }
 
+    /// Release an orphaned reservation belonging to a queued packet whose
+    /// current route no longer matches its captured provenance.
+    pub(crate) fn cancel_pending_packet(&mut self, packet: &ValidatedPacket, source: &Peer) {
+        let (Some(port),Some(frontend_port))=(packet.src_port(),packet.dst_port()) else { return };
+        let key=Tuple{peer:source.id.clone(),ip:packet.src(),port,frontend_ip:packet.dst(),frontend_port,protocol:packet.protocol()};
+        self.remove_pending(&key);
+    }
+
     fn remove_active(&mut self, key: &Tuple) {
         if let Some(flow) = self.flows.remove(key) { self.reverse.remove(&flow.reply); }
     }
@@ -177,6 +214,7 @@ impl Flows {
     /// A live reverse hit is a normal delivery reservation and must be completed
     /// with its delivery result to refresh the flow's idle timer.
     pub(crate) fn lookup_reply(&mut self, packet: &ValidatedPacket, peer: &Peer, now: Instant) -> Option<(String, Vec<u8>, Reservation)> {
+        if packet.protocol()==6 && packet.tcp_flags().is_some_and(|flags| flags & 2 != 0 && flags & 16 == 0) { return None; }
         let tuple = Reverse { peer: peer.id.clone(), proto: packet.protocol(), src: packet.src(), sport: packet.src_port()?, dst: packet.dst(), dport: packet.dst_port()? };
         let key = self.reverse.get(&tuple)?.clone();
         let flow = self.flows.get(&key)?.clone();
@@ -185,6 +223,12 @@ impl Flows {
         let packet = packet.clone().emit(Some(output));
         let target_peer = key.peer.clone();
         Some((target_peer, packet, Reservation { key, flow, is_new: false }))
+    }
+
+    pub(crate) fn has_reply_mapping(&self, packet:&ValidatedPacket, peer:&Peer, now:Instant)->bool {
+        let Some(sport)=packet.src_port() else{return false};let Some(dport)=packet.dst_port() else{return false};
+        let tuple=Reverse{peer:peer.id.clone(),proto:packet.protocol(),src:packet.src(),sport,dst:packet.dst(),dport};
+        self.reverse.get(&tuple).and_then(|key|self.flows.get(key)).is_some_and(|flow|now.saturating_duration_since(flow.last)<idle(packet.protocol()))
     }
 }
 
@@ -215,9 +259,24 @@ mod tests {
         bytes[22..24].copy_from_slice(&dport.to_be_bytes());
         if proto == 6 { bytes[32] = 0x50; bytes[33] = flags; }
         else { bytes[24..26].copy_from_slice(&8u16.to_be_bytes()); }
+        if proto == 6 {
+            let c = tcp_checksum(src.octets(), dst.octets(), &bytes[20..]);
+            bytes[36..38].copy_from_slice(&c.to_be_bytes());
+        }
         let checksum = ipv4::checksum(&bytes[..20]);
         bytes[10..12].copy_from_slice(&checksum.to_be_bytes());
         ipv4::validate_forwarded(&bytes).unwrap()
+    }
+    fn tcp_checksum(src: [u8; 4], dst: [u8; 4], segment: &[u8]) -> u16 {
+        let mut pseudo = Vec::new();
+        pseudo.extend_from_slice(&src); pseudo.extend_from_slice(&dst);
+        pseudo.extend_from_slice(&[0, 6]); pseudo.extend_from_slice(&(segment.len() as u16).to_be_bytes());
+        pseudo.extend_from_slice(segment);
+        let mut sum = 0u32;
+        for c in pseudo.chunks_exact(2) { sum += u16::from_be_bytes([c[0], c[1]]) as u32; }
+        if pseudo.len() % 2 != 0 { sum += (pseudo[pseudo.len()-1] as u32) << 8; }
+        while sum >> 16 != 0 { sum = (sum & 0xffff) + (sum >> 16); }
+        !(sum as u16)
     }
     fn t() -> Instant { Instant::now() }
 
@@ -244,7 +303,30 @@ mod tests {
             let p = packet(17, altered.1.parse().unwrap(), altered.2, altered.3.parse().unwrap(), altered.4, 0);
             assert!(flows.lookup_reply(&p, &peer, now + Duration::from_secs(11)).is_none());
         }
-        assert!(flows.prepare_direct(&packet(6, "10.77.0.2".parse().unwrap(), 1234, "10.77.0.3".parse().unwrap(), 5678, 2), &src, &dst, now).is_none());
+        assert!(flows.prepare_direct(&packet(6, "10.77.0.2".parse().unwrap(), 1234, "10.77.0.3".parse().unwrap(), 5678, 2), &src, &dst, now).is_some(),"direct TCP SYN can initiate a tracked flow");
+    }
+
+    #[test]
+    fn direct_tcp_one_way_acl_tracks_reply_but_denies_reverse_syn() {
+        let mut flows = Flows::default();
+        let source = peer("source", "10.77.0.2");
+        let destination = peer("destination", "10.77.0.3");
+        let now = t();
+        let syn = packet(6, "10.77.0.2".parse().unwrap(), 1234, "10.77.0.3".parse().unwrap(), 443, 0x02);
+        let (_, reservation) = flows.prepare_direct(&syn, &source, &destination, now)
+            .expect("one-way ACL permits initiating direct TCP SYN");
+        flows.complete(reservation, true, now);
+
+        for flags in [0x12, 0x10] { // SYN/ACK reply, then continuation ACK
+            let reply = packet(6, "10.77.0.3".parse().unwrap(), 443, "10.77.0.2".parse().unwrap(), 1234, flags);
+            let (target, _, reservation) = flows.lookup_reply(&reply, &destination, now).expect("exact reverse TCP tuple is authorized");
+            assert_eq!(target, "source");
+            flows.complete(reservation, true, now);
+        }
+        let reverse_syn = packet(6, "10.77.0.3".parse().unwrap(), 443, "10.77.0.2".parse().unwrap(), 1234, 0x02);
+        assert!(flows.lookup_reply(&reverse_syn, &destination, now).is_none(), "reverse bare SYN is a new initiation, not a reply");
+        let wrong_tuple = packet(6, "10.77.0.3".parse().unwrap(), 444, "10.77.0.2".parse().unwrap(), 1234, 0x12);
+        assert!(flows.lookup_reply(&wrong_tuple, &destination, now).is_none());
     }
 
     #[test]
@@ -335,7 +417,7 @@ mod tests {
         let mut full = Flows::default();
         for n in 0..CAPACITY {
             let key = Tuple { peer: format!("p{n}"), ip: Ipv4Addr::LOCALHOST, port: n as u16, frontend_ip: Ipv4Addr::LOCALHOST, frontend_port: 9, protocol: 17 };
-            let flow = Flow { reply: Reverse { peer: format!("b{n}"), proto: 17, src: Ipv4Addr::LOCALHOST, sport: 9, dst: Ipv4Addr::LOCALHOST, dport: n as u16 }, output: None, backend: "backend".into(), backend_ip: Ipv4Addr::LOCALHOST, last: now };
+            let flow = Flow { reply: Reverse { peer: format!("b{n}"), proto: 17, src: Ipv4Addr::LOCALHOST, sport: 9, dst: Ipv4Addr::LOCALHOST, dport: n as u16 }, output: None, backend: "backend".into(), backend_ip: Ipv4Addr::LOCALHOST, initiator_key:String::new(),backend_key:String::new(),forward_id:None,last: now };
             full.pending_reverse.insert(flow.reply.clone(), key.clone()); full.pending.insert(key, flow);
         }
         assert!(full.reserve_capacity(now).is_none());

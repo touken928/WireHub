@@ -127,6 +127,17 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint):
             "protocol": protocol, "target": target, "payload": payload, "timeout_ms": timeout,
         })
 
+    def persistent_open(index, target):
+        return control_post(clients[index], tokens[index], "/tcp/open", {"target": target})
+
+    def persistent_exchange(index, connection_id, payload, timeout=1200):
+        return control_post(clients[index], tokens[index], "/tcp/exchange", {
+            "id": connection_id, "payload": payload, "timeout_ms": timeout,
+        })
+
+    def persistent_close(index, connection_id):
+        return control_post(clients[index], tokens[index], "/tcp/close", {"id": connection_id})
+
     # Trigger encrypted traffic from all clients, including C, whose forwarding
     # policy is intentionally denied. No OS tools or kernel tunnel are involved.
     for index, label in enumerate("ABC"):
@@ -159,111 +170,133 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint):
         check(result.get("ok") and result.get("payload", nonce) == nonce,
               f"authorized A {proto.upper()} forward did not echo")
 
-    denied = {}
-    for proto in ("tcp", "udp"):
-        nonce = f"deny-C-{proto}-{secrets.token_hex(8)}"
-        denied[("C", proto)] = nonce
-        result = probe(2, proto, "172.23.45.1:18080", nonce, 1000)
-        check(not result.get("ok"), f"C {proto.upper()} forward unexpectedly succeeded")
+    # Keep one real forwarded TCP socket alive across an unrelated policy
+    # mutation; the exchanges must use the same client-side net.Conn.
+    persistent_id = None
+    try:
+        opened = persistent_open(0, "172.23.45.1:18080")
+        check(opened.get("id"), "could not open persistent forwarded TCP connection")
+        persistent_id = opened["id"]
+        persistent_before = "persistent-before-" + secrets.token_hex(8)
+        result = persistent_exchange(0, persistent_id, persistent_before)
+        check(result.get("ok"), "persistent TCP connection failed before unrelated reload")
+        request(hub_url + "/api/groups", hub_token, "POST", {"name": "unrelated-reload"}, expected=201)
+        persistent_after = "persistent-after-" + secrets.token_hex(8)
+        result = persistent_exchange(0, persistent_id, persistent_after)
+        check(result.get("ok"), "same persistent TCP connection failed after unrelated reload")
 
-    # Group ACLs are directional: A may initiate to B, but B has no reverse
-    # group permission. Confirm the existing UDP flow works and a new B->A
-    # initiation is denied, while A is listening so a mistaken arrival is seen.
-    nonce_direct = "direct-A-B-" + secrets.token_hex(8)
-    direct = probe(0, "udp", f"{ip_b}:18080", nonce_direct)
-    check(direct.get("ok") and direct.get("payload", nonce_direct) == nonce_direct,
-          "one-way A-to-B direct UDP echo did not succeed")
-    nonce_reverse = "new-B-A-" + secrets.token_hex(8)
-    reverse = probe(1, "udp", f"{ip_a}:18080", nonce_reverse, 1000)
-    check(not reverse.get("ok"), "new B-to-A direct UDP initiation unexpectedly succeeded")
+        denied = {}
+        for proto in ("tcp", "udp"):
+            nonce = f"deny-C-{proto}-{secrets.token_hex(8)}"
+            denied[("C", proto)] = nonce
+            result = probe(2, proto, "172.23.45.1:18080", nonce, 1000)
+            check(not result.get("ok"), f"C {proto.upper()} forward unexpectedly succeeded")
 
-    # ICMP must also be denied in the reverse direction before the ACL changes.
-    denied_icmp = "icmp-denied-" + secrets.token_hex(8)
-    result = probe(1, "icmp", ip_a, denied_icmp, 1000)
-    check(not result.get("ok"), "B-to-A ICMP unexpectedly succeeded without reverse ACL")
+        # Group ACLs are directional: A may initiate to B, but B has no reverse
+        # group permission. Confirm the existing UDP flow works and a new B->A
+        # initiation is denied, while A is listening so a mistaken arrival is seen.
+        nonce_direct = "direct-A-B-" + secrets.token_hex(8)
+        direct = probe(0, "udp", f"{ip_b}:18080", nonce_direct)
+        check(direct.get("ok") and direct.get("payload", nonce_direct) == nonce_direct,
+              "one-way A-to-B direct UDP echo did not succeed")
+        nonce_direct_tcp = "direct-A-B-tcp-" + secrets.token_hex(8)
+        direct_tcp = probe(0, "tcp", f"{ip_b}:18080", nonce_direct_tcp)
+        check(direct_tcp.get("ok"), "one-way A-to-B direct TCP echo did not succeed")
+        nonce_reverse = "new-B-A-" + secrets.token_hex(8)
+        reverse = probe(1, "udp", f"{ip_a}:18080", nonce_reverse, 1000)
+        check(not reverse.get("ok"), "new B-to-A direct UDP initiation unexpectedly succeeded")
+        nonce_reverse_tcp = "new-B-A-tcp-" + secrets.token_hex(8)
+        reverse_tcp = probe(1, "tcp", f"{ip_a}:18080", nonce_reverse_tcp, 1000)
+        check(not reverse_tcp.get("ok"), "new B-to-A direct TCP initiation unexpectedly succeeded")
 
-    # Capture arrival evidence before client reconfiguration clears event logs.
-    b_events_before_reverse_grant = json.dumps(
-        control(b_url, tokens[1], "/status").get("received", []))
-    check(nonce_tcp in b_events_before_reverse_grant
-          and nonce_udp in b_events_before_reverse_grant
-          and nonce_direct in b_events_before_reverse_grant,
-          "backend did not observe all authorized TCP/UDP payloads")
-    check(not any(nonce in b_events_before_reverse_grant for nonce in denied.values())
-          and nonce_reverse not in b_events_before_reverse_grant,
-          "B backend observed a denied forward or reverse-initiation payload")
-    a_events_before_reverse_grant = json.dumps(
-        control(a_url, tokens[0], "/status").get("received", []))
-    check(nonce_reverse not in a_events_before_reverse_grant,
-          "A backend observed denied B-to-A UDP initiation")
+        # ICMP must also be denied in the reverse direction before the ACL changes.
+        denied_icmp = "icmp-denied-" + secrets.token_hex(8)
+        result = probe(1, "icmp", ip_a, denied_icmp, 1000)
+        check(not result.get("ok"), "B-to-A ICMP unexpectedly succeeded without reverse ACL")
 
-    # Temporarily grant B->A, reconfigure all clients after the hub reload, and
-    # use fresh handshakes to prove the ICMP path is positively functional.
-    before_reverse_grant = handshake_times()
-    request(hub_url + f"/api/groups/{gb}/acl", hub_token, "PUT", {"allowed_groups": [ga]})
-    for url, token, config in zip(clients, tokens, configs):
-        control_post(url, token, "/configure", {"config": config})
-    control_post(b_url, tokens[1], "/serve", {"port": 18080})
-    control_post(a_url, tokens[0], "/serve", {"port": 18080})
-    time.sleep(1.1)  # handshake API timestamps have one-second precision
-    for index, label in enumerate("ABC"):
-        try:
-            probe(index, "udp", "172.23.45.1:9", "icmp-grant-handshake-" + label)
-        except Exception:
-            pass
-    wait_handshakes(before_reverse_grant)
-    nonce_icmp = "icmp-allowed-" + secrets.token_hex(8)
-    result = probe(1, "icmp", ip_a, nonce_icmp)
-    check(result.get("ok") and result.get("payload", nonce_icmp) == nonce_icmp,
-          "B-to-A ICMP echo did not succeed after reverse ACL grant")
+        # Capture exact arrival evidence while all event logs are preserved.
+        b_events_before_reverse_grant = json.dumps(
+            control(b_url, tokens[1], "/status").get("received", []))
+        check(nonce_tcp in b_events_before_reverse_grant
+              and nonce_udp in b_events_before_reverse_grant
+              and nonce_direct in b_events_before_reverse_grant,
+              "backend did not observe all authorized TCP/UDP payloads")
+        check(not any(nonce in b_events_before_reverse_grant for nonce in denied.values())
+              and nonce_reverse not in b_events_before_reverse_grant
+              and nonce_reverse_tcp not in b_events_before_reverse_grant,
+              "B backend observed a denied forward or reverse-initiation payload")
+        a_events_before_reverse_grant = json.dumps(
+            control(a_url, tokens[0], "/status").get("received", []))
+        check(nonce_reverse not in a_events_before_reverse_grant
+              and nonce_reverse_tcp not in a_events_before_reverse_grant,
+              "A backend observed denied B-to-A UDP initiation")
 
-    # C is allowed to reach B directly even though it is not allowed to use
-    # the configured forward; this distinguishes forward policy from routing.
-    nonce_c_direct = "direct-C-B-" + secrets.token_hex(8)
-    direct_c = probe(2, "udp", f"{ip_b}:18080", nonce_c_direct)
-    check(direct_c.get("ok") and direct_c.get("payload", nonce_c_direct) == nonce_c_direct,
-          "C direct UDP backend path did not succeed")
-    c_events = json.dumps(control(b_url, tokens[1], "/status").get("received", []))
-    check(nonce_c_direct in c_events,
-          "backend did not observe C's authorized direct payload")
+        # Mutate ACL in place. No client reconfiguration, listener restart, event
+        # reset, or manufactured handshake is allowed to establish the result.
+        request(hub_url + f"/api/groups/{gb}/acl", hub_token, "PUT", {"allowed_groups": [ga]})
+        nonce_icmp = "icmp-allowed-" + secrets.token_hex(8)
+        result = probe(1, "icmp", ip_a, nonce_icmp)
+        check(result.get("ok") and result.get("payload", nonce_icmp) == nonce_icmp,
+              "B-to-A ICMP echo did not succeed after reverse ACL grant")
+        reverse_tcp_nonce = "direct-B-A-tcp-" + secrets.token_hex(8)
+        reverse_tcp = probe(1, "tcp", f"{ip_a}:18080", reverse_tcp_nonce)
+        check(reverse_tcp.get("ok"), "B-to-A direct TCP did not succeed after reverse ACL grant")
 
-    # Remove the temporary reverse permission and reset every client again so
-    # subsequent checks run under the original one-way ACL and fresh state.
-    before_reverse_revoke = handshake_times()
-    request(hub_url + f"/api/groups/{gb}/acl", hub_token, "PUT", {"allowed_groups": []})
-    for url, token, config in zip(clients, tokens, configs):
-        control_post(url, token, "/configure", {"config": config})
-    control_post(b_url, tokens[1], "/serve", {"port": 18080})
-    control_post(a_url, tokens[0], "/serve", {"port": 18080})
-    time.sleep(1.1)
-    for index, label in enumerate("ABC"):
-        try:
-            probe(index, "udp", "172.23.45.1:9", "one-way-handshake-" + label)
-        except Exception:
-            pass
-    wait_handshakes(before_reverse_revoke)
+        # C is allowed to reach B directly even though it is not allowed to use
+        # the configured forward; this distinguishes forward policy from routing.
+        nonce_c_direct = "direct-C-B-" + secrets.token_hex(8)
+        direct_c = probe(2, "udp", f"{ip_b}:18080", nonce_c_direct)
+        check(direct_c.get("ok") and direct_c.get("payload", nonce_c_direct) == nonce_c_direct,
+              "C direct UDP backend path did not succeed")
+        c_events = json.dumps(control(b_url, tokens[1], "/status").get("received", []))
+        check(nonce_c_direct in c_events,
+              "backend did not observe C's authorized direct payload")
 
-    # Remove A's direct group permission, reload the hub, reset every device with
-    # its existing in-memory provisioning config, and confirm the forward is revoked.
-    before_forward_revoke = handshake_times()
-    request(hub_url + f"/api/groups/{ga}/acl", hub_token, "PUT", {"allowed_groups": []})
-    for url, token, config in zip(clients, tokens, configs):
-        control_post(url, token, "/configure", {"config": config})
-    control_post(b_url, tokens[1], "/serve", {"port": 18080})
-    control_post(a_url, tokens[0], "/serve", {"port": 18080})
-    time.sleep(1.1)
-    for index, label in enumerate("ABC"):
-        probe(index, "udp", "172.23.45.1:9", "reload-handshake-" + label)
-    wait_handshakes(before_forward_revoke)
-    for proto in ("tcp", "udp"):
-        nonce = f"revoked-{proto}-{secrets.token_hex(8)}"
-        result = probe(0, proto, "172.23.45.1:18080", nonce, 1000)
-        check(not result.get("ok"), f"A {proto.upper()} forward succeeded after ACL reload")
-    b_status = control(b_url, tokens[1], "/status")
-    events = json.dumps(b_status.get("received", []))
-    check(not any(f"revoked-{proto}-" in events for proto in ("tcp", "udp")),
-          "backend observed traffic after ACL revoke")
-    print("PASS: setup/authenticated provisioning, config privacy/shape, duplicate rejection, fresh handshakes, directional UDP/ICMP ACLs, authorized/denied TCP/UDP forwarding, backend arrival checks, and ACL reload revocation")
+        # Revoke reverse initiation; existing sessions stay untouched, but a fresh
+        # reverse TCP initiation must fail immediately after API acknowledgement.
+        request(hub_url + f"/api/groups/{gb}/acl", hub_token, "PUT", {"allowed_groups": []})
+        revoked_reverse_tcp = "revoked-reverse-tcp-" + secrets.token_hex(8)
+        reverse_tcp = probe(1, "tcp", f"{ip_a}:18080", revoked_reverse_tcp, 1000)
+        check(not reverse_tcp.get("ok"), "B-to-A TCP initiation succeeded after reverse ACL revoke")
+
+        # Revoke A's forward permission while retaining the same devices, existing
+        # connection, listeners, and event history.
+        persistent_before_revoke = "persistent-before-revoke-" + secrets.token_hex(8)
+        still_live = persistent_exchange(0, persistent_id, persistent_before_revoke)
+        check(still_live.get("ok"),
+              "existing forwarded TCP connection was already broken before A ACL revocation")
+        request(hub_url + f"/api/groups/{ga}/acl", hub_token, "PUT", {"allowed_groups": []})
+        persistent_revoked = "persistent-revoked-" + secrets.token_hex(8)
+        same_connection = persistent_exchange(0, persistent_id, persistent_revoked, 1000)
+        check(not same_connection.get("ok"), "persistent forwarded TCP survived ACL revocation")
+        revoked_forward = {}
+        for proto in ("tcp", "udp"):
+            nonce = f"revoked-{proto}-{secrets.token_hex(8)}"
+            revoked_forward[proto] = nonce
+            result = probe(0, proto, "172.23.45.1:18080", nonce, 1000)
+            check(not result.get("ok"), f"A {proto.upper()} forward succeeded after ACL reload")
+        nonce_c_direct_after = "direct-C-B-after-revoke-" + secrets.token_hex(8)
+        direct_c_after = probe(2, "tcp", f"{ip_b}:18080", nonce_c_direct_after)
+        check(direct_c_after.get("ok"), "unaffected C-to-B direct TCP control failed after A forward revoke")
+        b_status = control(b_url, tokens[1], "/status")
+        events = json.dumps(b_status.get("received", []))
+        check(not any(nonce in events for nonce in revoked_forward.values()),
+              "backend observed traffic after ACL revoke")
+        check(nonce_tcp in events and nonce_udp in events and nonce_direct_tcp in events
+              and persistent_before in events
+              and persistent_after in events and persistent_before_revoke in events
+              and nonce_c_direct_after in events,
+              "backend event log lost authorized payload evidence across policy reloads")
+        check(revoked_reverse_tcp not in events and persistent_revoked not in events,
+              "backend observed denied TCP payload after ACL acknowledgement")
+        a_events_after_revoke = json.dumps(control(a_url, tokens[0], "/status").get("received", []))
+        check(reverse_tcp_nonce in a_events_after_revoke
+              and revoked_reverse_tcp not in a_events_after_revoke,
+              "A backend did not distinguish allowed then revoked B-to-A TCP payloads")
+        print("PASS: setup/authenticated provisioning, initial fresh handshakes, same-device ACL reloads, persistent forwarded TCP continuity/revocation, directional direct TCP/UDP/ICMP, and precise backend arrival checks")
+    finally:
+        if persistent_id:
+            persistent_close(0, persistent_id)
 
 
 

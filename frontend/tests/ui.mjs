@@ -38,17 +38,30 @@ try {
   let forwards = [{ id: 'docs', name: 'Internal docs', protocol: 'tcp', target_port: 8080, target_peer_id: 'server', allowed_group_ids: ['engineering'] }]
   let settings = { subnet: '10.77.0.0/24', endpoint: 'vpn.example.com:51820', persistent_keepalive: 25 }
   let configured = true, failSave = false, failReload = false, partialSave = false
+  let failSettings = false
+  let setupCreateStatus = 200, setupCreateError = ''
   const mutations = []
   await page.route('**/api/**', async route => {
     const req = route.request(), path = new URL(req.url()).pathname, method = req.method(), body = req.postDataJSON()
     const reply = (json, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(json) })
-    if (req.headers().authorization !== 'Bearer ui-test-token') return reply({ message: 'Invalid token.' }, 401)
+    const textError = (text, status) => route.fulfill({ status, contentType: 'text/plain; charset=utf-8', body: text })
+    if (req.headers().authorization !== 'Bearer ui-test-token') return textError('unauthorized', 401)
     if (method !== 'GET') mutations.push({ method, path, body })
     if (path === '/api/setup') {
-      if (method === 'POST') { settings = body; configured = true; return reply(settings) }
+      if (method === 'POST') {
+        if (setupCreateStatus !== 200) {
+          if (setupCreateStatus === 409) { configured = true; settings = { subnet: '10.20.30.0/24', endpoint: 'saved.example.com:51820', persistent_keepalive: 25 } }
+          if (setupCreateStatus === 503) { configured = true; settings = body }
+          return textError(setupCreateError, setupCreateStatus)
+        }
+        settings = body; configured = true; return reply(settings)
+      }
       return reply({ configured, settings: configured ? settings : null })
     }
-    if (path === '/api/settings') { settings = { ...settings, ...body }; return reply(settings) }
+    if (path === '/api/settings') {
+      if (failSettings) return textError('setup required', 409)
+      settings = { ...settings, ...body }; return reply(settings)
+    }
     if (path === '/api/groups' && method === 'GET') return failReload ? reply({}, 503) : reply(groups)
     if (path.endsWith('/acl')) {
       if (failSave || (partialSave && path.includes('/operations/'))) return reply({}, 503)
@@ -57,11 +70,11 @@ try {
       return reply(group)
     }
     if (path === '/api/groups' && method === 'POST') { const group = { id: 'new-group', ...body, allowed_groups: [] }; groups.push(group); return reply(group) }
-    if (path.startsWith('/api/groups/') && method === 'DELETE') { const id = path.split('/')[3]; groups = groups.filter(g => g.id !== id); groups.forEach(g => { g.allowed_groups = g.allowed_groups.filter(to => to !== id) }); return route.fulfill({ status: 204 }) }
+    if (path.startsWith('/api/groups/') && method === 'DELETE') { const id = path.split('/')[3]; groups = groups.filter(g => g.id !== id); groups.forEach(g => { g.allowed_groups = g.allowed_groups.filter(to => to !== id) }); forwards = forwards.map(f => ({ ...f, allowed_group_ids: f.allowed_group_ids.filter(to => to !== id) })); return route.fulfill({ status: 204 }) }
     if (path === '/api/peers' && method === 'GET') return reply(peers)
     if (path === '/api/peers' && method === 'POST') { const peer = { ...peers[0], ...body, id: 'new-peer', ipv4: '10.77.0.4' }; peers.push(peer); return reply({ peer, config: '[Interface]\nPrivateKey = fixture-only\nAddress = 10.77.0.4/32' }) }
     if (path.endsWith('/group')) { const peer = peers.find(p => p.id === path.split('/')[3]); peer.group_id = body.group_id; return reply(peer) }
-    if (path.startsWith('/api/peers/') && method === 'DELETE') { peers = peers.filter(p => p.id !== path.split('/')[3]); return route.fulfill({ status: 204 }) }
+    if (path.startsWith('/api/peers/') && method === 'DELETE') { const id = path.split('/')[3]; peers = peers.filter(p => p.id !== id); forwards = forwards.filter(f => f.target_peer_id !== id); return route.fulfill({ status: 204 }) }
     if (path === '/api/forwards' && method === 'GET') return reply(forwards)
     if (path === '/api/forwards' && method === 'POST') { const forward = { id: 'new-forward', ...body }; forwards.push(forward); return reply(forward) }
     if (path.startsWith('/api/forwards/') && method === 'DELETE') { forwards = forwards.filter(f => f.id !== path.split('/')[3]); return route.fulfill({ status: 204 }) }
@@ -104,7 +117,7 @@ try {
   }
   const save = async () => { await page.getByRole('button', { name: 'Save', exact: true }).click(); await page.getByText('Policy canvas', { exact: true }).waitFor(); await poll(async () => await page.getByRole('button', { name: 'Saving', exact: true }).count() === 0, 'Save settles'); await page.getByText('Policy saved', { exact: true }).waitFor() }
   await page.goto(url); await english(); await screenshot('login')
-  await page.getByLabel('Access token').fill('wrong-token'); await page.getByRole('button', { name: 'Connect', exact: true }).click(); await page.getByRole('alert').waitFor(); await english()
+  await page.getByLabel('Access token').fill('wrong-token'); await page.getByRole('button', { name: 'Connect', exact: true }).click(); await page.getByRole('alert').waitFor(); assert.equal(await page.getByRole('alert').innerText(), 'unauthorized'); await english()
   await login(); await english(); await noOverflow(); await screenshot('overview')
   await navigate('Groups'); await node('engineering').waitFor(); await page.waitForTimeout(100); await screenshot('groups'); await english()
   await node('engineering').click(); await page.getByLabel('Close group details').click()
@@ -180,6 +193,8 @@ try {
   await page.getByRole('dialog').getByLabel('Protocol', { exact: true }).selectOption('udp'); await page.getByRole('dialog').getByLabel('Engineering', { exact: false }).check(); await page.getByRole('button', { name: 'Create', exact: true }).click(); await poll(async () => forwards.length === 2 && await page.getByRole('dialog').count() === 0 && await page.locator('.forward-card').count() === 2, 'Forward created'); await english(); await screenshot('forwards')
   await page.getByLabel('Delete forward Test service').click(); await poll(() => forwards.length === 1, 'Forward deleted')
   await navigate('Settings'); await page.getByLabel('Endpoint', { exact: true }).fill('vpn2.example.com:51820'); await page.getByRole('button', { name: 'Save changes', exact: true }).click(); await poll(async () => settings.endpoint === 'vpn2.example.com:51820' && await page.getByRole('button', { name: 'Save changes', exact: true }).count() === 1, 'Defaults saved'); await english(); await screenshot('settings')
+  // Settings errors use the backend's plain-text response contract too.
+  failSettings = true; await page.getByLabel('Endpoint', { exact: true }).fill('vpn3.example.com:51820'); await page.getByRole('button', { name: 'Save changes', exact: true }).click(); await page.getByRole('alert').filter({ hasText: 'setup required' }).waitFor(); failSettings = false
   // Narrow layout: all pages and dialogs remain usable without horizontal overflow.
   await page.setViewportSize({ width: 390, height: 844 })
   for (const name of ['Overview', 'Peers', 'Groups', 'Forwards', 'Settings']) {
@@ -188,11 +203,37 @@ try {
     if (name === 'Groups') { await node('engineering').click(); await page.getByLabel('Close group details').click(); await poll(async () => await page.getByLabel('Close group details').count() === 0, 'Group details close on mobile') }
     await screenshot(`mobile-${name.toLowerCase()}`)
   }
+  // Operations has a real incoming ACL reference to Engineering, matching the backend's cascade case.
+  // Clear the existing edge and create the incoming rule through the UI before deletion.
+  await navigate('Groups')
+  while (await edge().count()) { await edge().click(); await edge().focus(); await page.keyboard.press('Delete', { delay: 50 }); await poll(async () => await edge().count() === 0, 'Existing edge removed') }
+  await save(); await connect('operations', 'engineering'); await poll(async () => await edge().count() === 1 && (await edge().getAttribute('aria-label')).includes('Operations'), 'Incoming Operations → Engineering ACL is visible'); await save()
+  // Both Engineering peers were moved/deleted above, so backend group-deletion restrictions permit the request.
+  assert.deepEqual(groups.find(g => g.id === 'operations').allowed_groups, ['engineering'])
+  await node('engineering').click(); await page.getByRole('button', { name: 'Delete group', exact: true }).click()
+  await poll(async () => !groups.some(g => g.id === 'engineering') && !forwards[0].allowed_group_ids.includes('engineering') && await node('engineering').count() === 0 && await edge().count() === 0, 'Group deletion cascades allowlists')
+  assert.deepEqual(groups.find(g => g.id === 'operations').allowed_groups, [], 'Server cascade removes incoming ACL reference')
+  assert.equal(await page.locator('.react-flow__edge').count(), 0, 'Local policy graph drops the incoming ACL edge')
+  await navigate('Forwards'); assert.equal(await page.locator('.allow-chips').innerText(), 'No access')
+  // A peer deletion cascades its dependent forwards in both server fixtures and UI state, freeing its port.
+  await navigate('Peers'); await page.getByLabel('Delete peer Build server').click(); await poll(async () => peers.length === 1 && forwards.length === 0 && await page.locator('.peer-card').count() === 1, 'Peer deletion cascades target forwards')
+  await navigate('Forwards'); assert.equal(await page.locator('.forward-card').count(), 0)
+  await page.getByRole('button', { name: 'New forward', exact: true }).first().click(); await page.getByRole('dialog').getByLabel('Name', { exact: true }).fill('Reused port'); await page.getByRole('dialog').getByLabel('Port', { exact: true }).fill('8080'); await page.getByRole('dialog').getByLabel('Target peer', { exact: true }).selectOption('mac'); await page.getByRole('button', { name: 'Create', exact: true }).click(); await poll(() => forwards.length === 1 && forwards[0].target_peer_id === 'mac', 'Cascade frees the forward port for reuse')
   await navigate('Groups'); await page.getByRole('button', { name: 'New group', exact: true }).click(); await noOverflow(); await english(); await screenshot('mobile-dialog'); await page.keyboard.press('Escape')
   // Fresh setup, empty states, session reset, and no persisted access token.
   await page.getByRole('button', { name: 'Open navigation' }).click(); await page.getByRole('button', { name: 'Administrator Sign out' }).click(); await page.getByLabel('Access token').waitFor()
   configured = false; groups = []; peers = []; forwards = []
   await page.getByLabel('Access token').fill('ui-test-token'); await page.getByRole('button', { name: 'Connect', exact: true }).click(); await page.getByRole('heading', { name: 'Create your network.' }).waitFor(); assert.equal(await page.getByLabel('Subnet', { exact: false }).inputValue(), '10.10.10.0/24'); await english(); await noOverflow(); await screenshot('mobile-setup')
+  setupCreateStatus = 409; setupCreateError = 'setup already completed'
+  await page.getByLabel('Endpoint', { exact: true }).fill('vpn.example.com:51820'); await page.getByRole('button', { name: 'Create network' }).click(); await page.getByRole('heading', { name: 'Overview', exact: true }).waitFor(); assert.equal(settings.subnet, '10.20.30.0/24', 'A 409 reconciles by reading saved setup status')
+  await page.getByRole('button', { name: 'Open navigation' }).click(); await page.getByRole('button', { name: 'Administrator Sign out' }).click(); await page.getByLabel('Access token').waitFor(); configured = false; setupCreateStatus = 503; setupCreateError = 'settings saved, but runtime activation was not acknowledged; inspect setup status and restart the service before provisioning'
+  await page.getByLabel('Access token').fill('ui-test-token'); await page.getByRole('button', { name: 'Connect', exact: true }).click(); await page.getByRole('heading', { name: 'Create your network.' }).waitFor(); await page.getByLabel('Endpoint', { exact: true }).fill('vpn.example.com:51820'); await page.getByRole('button', { name: 'Create network' }).click(); assert.equal(await page.getByRole('alert').innerText(), 'settings saved, but runtime activation was not acknowledged; inspect setup status and restart the service before provisioning')
+  assert.equal(configured, true, 'The service persists setup before an activation failure response')
+  await page.reload(); await page.getByLabel('Access token').waitFor()
+  await page.getByLabel('Access token').fill('ui-test-token'); await page.getByRole('button', { name: 'Connect', exact: true }).click(); await page.getByRole('heading', { name: 'Overview', exact: true }).waitFor(); assert.equal(settings.endpoint, 'vpn.example.com:51820', 'Reload recovers setup persisted before activation failed')
+  await page.getByRole('button', { name: 'Open navigation' }).click(); await page.getByRole('button', { name: 'Administrator Sign out' }).click(); await page.getByLabel('Access token').waitFor()
+  configured = false; setupCreateStatus = 200; setupCreateError = ''; await page.reload(); await page.getByLabel('Access token').waitFor()
+  await page.getByLabel('Access token').fill('ui-test-token'); await page.getByRole('button', { name: 'Connect', exact: true }).click(); await page.getByRole('heading', { name: 'Create your network.' }).waitFor();
   await page.getByLabel('Endpoint', { exact: true }).fill('vpn.example.com:51820'); await page.getByRole('button', { name: 'Create network' }).click(); await page.getByRole('heading', { name: 'Overview', exact: true }).waitFor(); assert.equal(settings.subnet, '10.10.10.0/24'); assert.equal(mutations.find(m => m.path === '/api/setup' && m.method === 'POST').body.subnet, '10.10.10.0/24')
   for (const name of ['Overview', 'Peers', 'Groups', 'Forwards']) { await navigate(name); await english(); await noOverflow() }
   await page.reload(); await page.getByLabel('Access token').waitFor(); assert.equal(await page.getByLabel('Access token').inputValue(), '')

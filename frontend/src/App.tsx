@@ -6,7 +6,7 @@ import {
 } from 'lucide-react'
 import GroupsPage from './components/groups/GroupsPage'
 import '@xyflow/react/dist/style.css'
-import { client, forwardsApi, rememberToken, setupApi, type Forward, type NetworkSettings, type SetupStatus } from './api/client'
+import { ApiError, client, forwardsApi, rememberToken, setupApi, type Forward, type NetworkSettings, type SetupStatus } from './api/client'
 import type { components } from './api/schema'
 
 type Peer = components['schemas']['Peer']
@@ -136,11 +136,11 @@ export default function App() {
             const r = await client.DELETE('/api/peers/{id}', { params: { path: { id: peer.id } } })
             if (session !== sessionRef.current) return
             if (r.error) throw new Error('Deletion unconfirmed. Refresh to check the current state.')
-            setPeers(v => v.filter(x => x.id !== peer.id)); setToast('Peer removed')
+            setPeers(v => v.filter(x => x.id !== peer.id)); setForwards(v => v.filter(x => x.target_peer_id !== peer.id)); setToast('Peer removed')
           } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Unable to delete peer.')) }
           finally { if (session === sessionRef.current) setPendingPeer(null) }
         }} />}
-         {page === 'groups' && <GroupsPage onDirtyChange={setPolicyDirty} groups={groups} peers={peers} onCreate={() => setModal('group')} onSaved={() => setToast('Policy saved')} onDelete={async g => { if (!confirm(`Delete group "${g.name}"?`)) return; try { const r = await client.DELETE('/api/groups/{id}', { params: { path: { id: g.id } } }); if (activeSession !== sessionRef.current) return; if (!r.error) { setGroups(v => v.filter(x => x.id !== g.id)); setToast('Group deleted') } else setError('Deletion unconfirmed. Refresh before retrying.') } catch (e) { if (activeSession === sessionRef.current) setError(mutationFailure(e, 'Unable to delete group.')) } }} onSaveAcl={async (id, allowed) => { const r = await client.PUT('/api/groups/{id}/acl', { params: { path: { id } }, body: { allowed_groups: allowed } }); if (activeSession !== sessionRef.current) throw new Error('Session ended.'); if (r.error || !r.data) throw new Error('Save unconfirmed. Reload the policy before retrying.'); setGroups(v => v.map(g => g.id === id ? r.data! : g)) }} onReload={async () => { const r = await client.GET('/api/groups'); if (activeSession !== sessionRef.current) throw new Error('Session ended.'); if (r.error || !r.data) throw new Error('Unable to reload policy.'); setGroups(r.data) }} />}
+         {page === 'groups' && <GroupsPage onDirtyChange={setPolicyDirty} groups={groups} peers={peers} onCreate={() => setModal('group')} onSaved={() => setToast('Policy saved')} onDelete={async g => { if (!confirm(`Delete group "${g.name}"?`)) return; try { const r = await client.DELETE('/api/groups/{id}', { params: { path: { id: g.id } } }); if (activeSession !== sessionRef.current) return; if (!r.error) { setGroups(v => v.filter(x => x.id !== g.id).map(x => ({ ...x, allowed_groups: (x.allowed_groups ?? []).filter(id => id !== g.id) }))); setForwards(v => v.map(f => ({ ...f, allowed_group_ids: f.allowed_group_ids.filter(id => id !== g.id) }))); setToast('Group deleted') } else setError('Deletion unconfirmed. Refresh before retrying.') } catch (e) { if (activeSession === sessionRef.current) setError(mutationFailure(e, 'Unable to delete group.')) } }} onSaveAcl={async (id, allowed) => { const r = await client.PUT('/api/groups/{id}/acl', { params: { path: { id } }, body: { allowed_groups: allowed } }); if (activeSession !== sessionRef.current) throw new Error('Session ended.'); if (r.error || !r.data) throw new Error('Save unconfirmed. Reload the policy before retrying.'); setGroups(v => v.map(g => g.id === id ? r.data! : g)) }} onReload={async () => { const r = await client.GET('/api/groups'); if (activeSession !== sessionRef.current) throw new Error('Session ended.'); if (r.error || !r.data) throw new Error('Unable to reload policy.'); setGroups(r.data) }} />}
           {page === 'forwards' && <ForwardsPage forwards={forwards} subnet={setup?.settings?.subnet ?? ''} loadError={forwardsError} onRetry={() => void load()} peers={peers} groups={groups} onCreate={() => setModal('forward')} onDelete={async f => { if (!confirm(`Delete forward "${f.name}"?`)) return; const session = sessionRef.current; try { await forwardsApi.remove(f.id); if (session !== sessionRef.current) return; setForwards(v => v.filter(x => x.id !== f.id)); setToast('Forward deleted') } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Deletion unconfirmed. Refresh before retrying.')) } }} />}
          {page === 'settings' && setup?.settings && <SettingsPage settings={setup.settings} onSaved={settings => { setSetup({ configured: true, settings }); setToast('Settings saved') }} />}
       </div>
@@ -194,10 +194,10 @@ function SetupWizard({ onConfigured }: { onConfigured: (settings: NetworkSetting
     setSaving(true); setError('')
     try { onConfigured(await setupApi.create({ subnet: subnet.trim(), endpoint: endpoint.trim(), persistent_keepalive: Number(keepalive) })) }
     catch (e) {
-      if (e instanceof Error && /\b409\b/.test(e.message)) {
+      if (e instanceof ApiError && e.status === 409) {
         try { const status = await setupApi.get(); if (status.configured && status.settings) { onConfigured(status.settings); return } } catch { /* Preserve the conflict. */ }
         setError('Setup is already in progress. Refresh to check the network.')
-      } else setError(mutationFailure(e, 'Unable to save settings.'))
+      } else setError(e instanceof ApiError ? e.message : mutationFailure(e, 'Unable to save settings.'))
     } finally { setSaving(false) }
   }
   return <main className="auth-screen"><div className="auth-card setup-card"><Brand /><div className="auth-heading"><span className="eyebrow">INITIAL SETUP</span><h1>Create your network.</h1></div><form className="stack-form" onSubmit={e => void submit(e)}>
