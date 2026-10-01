@@ -256,6 +256,7 @@ mod security_tests {
         let mut file = windows_key::open_secure(path).expect("secure test fixture open failed");
         #[cfg(unix)]
         let mut file = OpenOptions::new().write(true).truncate(true).open(path).expect("secure test fixture open failed");
+        file.set_len(0).expect("test fixture truncate failed");
         file.write_all(bytes).expect("test fixture write failed");
     }
     #[test]
@@ -264,7 +265,10 @@ mod security_tests {
         let first=load_or_create_hub_key(&path).unwrap();assert_eq!(first.len(),32);
         assert_eq!(load_or_create_hub_key(&path).unwrap(),first);
         #[cfg(unix)] { use std::os::unix::fs::PermissionsExt;assert_eq!(fs::metadata(&path).unwrap().permissions().mode()&0o777,0o600); }
-        replace_secure_test_file(&path,b"bad");assert!(load_or_create_hub_key(&path).is_err());assert_eq!(fs::read(&path).unwrap(),b"bad");
+        replace_secure_test_file(&path,b"bad");
+        assert_eq!(fs::metadata(&path).unwrap().len(),3,"malformed fixture must replace rather than overwrite the key prefix");
+        assert_eq!(load_or_create_hub_key(&path).unwrap_err().kind(),std::io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&path).unwrap(),b"bad");
     }
     #[cfg(unix)]
     #[test]

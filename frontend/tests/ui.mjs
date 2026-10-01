@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { readFile, mkdir } from 'node:fs/promises'
+import { readFile, mkdir, writeFile } from 'node:fs/promises'
 import { resolve, extname } from 'node:path'
 import { chromium } from 'playwright'
 
@@ -19,11 +19,15 @@ const server = createServer(async (req, res) => {
 })
 await new Promise(r => server.listen(0, '127.0.0.1', r))
 const url = `http://127.0.0.1:${server.address().port}`
-let browser
+let browser, page
 try {
   browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL ?? 'chrome', headless: true })
   console.log(`UI fixture: production bundle, ${process.env.PLAYWRIGHT_CHANNEL ?? 'chrome'} ${browser.version()}, isolated loopback API, desktop 1440×1000 / mobile 390×844`)
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, reducedMotion: 'reduce' })
+  page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, reducedMotion: 'reduce' })
+  // The clock keeps ticking normally (no pause/frozen RAF). Only the toast-miss
+  // regression advances time, after the real mutation and clean UI settle.
+  await page.clock.install()
+  if (screenshots) await page.context().tracing.start({ screenshots: true, snapshots: true, sources: true })
   const runtimeErrors = []
   page.on('pageerror', error => runtimeErrors.push(error.message))
   page.on('dialog', dialog => dialog.accept())
@@ -137,7 +141,75 @@ try {
     await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2, { steps: 20 })
     await page.mouse.up()
   }
-  const save = async () => { await page.getByRole('button', { name: 'Save', exact: true }).click(); await page.getByText('Policy canvas', { exact: true }).waitFor(); await poll(async () => await page.getByRole('button', { name: 'Saving', exact: true }).count() === 0, 'Save settles'); await page.getByText('Policy saved', { exact: true }).waitFor() }
+  const sorted = values => [...values].sort()
+  const fixtureAcl = () => Object.fromEntries(groups.map(g => [g.id, sorted(g.allowed_groups)]))
+  const graphAcl = async () => {
+    const allowed = Object.fromEntries(groups.map(g => [g.id, []]))
+    const ids = new Map(groups.map(g => [g.name, g.id]))
+    for (const g of groups) {
+      if (await node(g.id).getByLabel('Intra-group access allowed', { exact: true }).count()) allowed[g.id].push(g.id)
+    }
+    for (const label of await edge().evaluateAll(edges => edges.map(e => e.getAttribute('aria-label')))) {
+      const [from, direction, to] = label.split(/ (→|↔) /)
+      assert.ok(ids.has(from) && ids.has(to), `Known groups in ${label}`)
+      allowed[ids.get(from)].push(ids.get(to))
+      if (direction === '↔') allowed[ids.get(to)].push(ids.get(from))
+    }
+    return Object.fromEntries(Object.entries(allowed).map(([id, values]) => [id, sorted(values)]))
+  }
+  const save = async (changes, { checkToast = false, expireToast = false } = {}) => {
+    // Capture the intended ACL before the fixture mutates. A clean canvas alone
+    // can also mean a failed save reloaded old rules, or a stale draft was lost.
+    const expected = { ...fixtureAcl(), ...Object.fromEntries(Object.entries(changes).map(([id, values]) => [id, sorted(values)])) }
+    await poll(async () => JSON.stringify(await graphAcl()) === JSON.stringify(expected), 'Draft graph matches intended ACL before save')
+    const changed = groups.filter(g => JSON.stringify(sorted(g.allowed_groups)) !== JSON.stringify(expected[g.id]))
+    assert.ok(changed.length, 'Save must have an actual ACL mutation')
+    assert.ok(await page.getByRole('button', { name: 'Save', exact: true }).isEnabled(), 'Dirty policy enables Save')
+    await page.getByText('Unsaved changes', { exact: true }).waitFor()
+    // Register before clicking, and match this save's PUT payload, never an old
+    // GET or a toast left over from a previous successful save.
+    const responses = changed.map(g => page.waitForResponse(r => r.request().method() === 'PUT'
+      && new URL(r.url()).pathname === `/api/groups/${g.id}/acl`
+      && JSON.stringify(sorted(r.request().postDataJSON().allowed_groups)) === JSON.stringify(expected[g.id])))
+    const toast = checkToast ? page.getByText('Policy saved', { exact: true }).waitFor() : null
+    const held = expireToast ? changed.map(g => holdNext('PUT', `/api/groups/${g.id}/acl`)) : []
+    const [_, ...confirmed] = await Promise.all([
+      (async () => {
+        await page.getByRole('button', { name: 'Save', exact: true }).click()
+        if (held.length) {
+          await Promise.all(held.map(h => h.requested))
+          assert.ok(await page.getByRole('button', { name: 'Saving', exact: true }).isDisabled(), 'Held mutation keeps Save busy')
+          assert.ok(await page.getByRole('switch', { name: 'Intra-group access' }).isDisabled(), 'Held mutation locks ACL editing')
+          await page.getByText('Unsaved changes', { exact: true }).waitFor()
+          await Promise.all(held.map(h => h.release()))
+        }
+      })(),
+      ...responses,
+    ])
+    for (const [index, response] of confirmed.entries()) {
+      assert.equal(await response.finished(), null, 'ACL response completes without network error')
+      assert.equal(response.status(), 200, 'This ACL mutation succeeded')
+      const group = await response.json()
+      assert.equal(group.id, changed[index].id)
+      assert.deepEqual(sorted(group.allowed_groups), expected[group.id], 'Mutation response confirms intended ACL')
+    }
+    assert.deepEqual(fixtureAcl(), expected, 'Authoritative fixture confirms every group ACL')
+    await page.waitForFunction(() => {
+      const button = [...document.querySelectorAll('.graph-actions button')].find(b => b.textContent === 'Save')
+      return button?.disabled && document.querySelector('.graph-status')?.textContent === 'Policy canvas'
+        && !document.querySelector('[aria-label="Discard changes"]')
+    })
+    if (toast) await toast // Keep explicit success-notification coverage on the first save.
+    if (expireToast) {
+      // Deterministically model a delayed test observer, not a slower server.
+      // Advance the real 2800 ms toast deadline without a wall-clock sleep.
+      await page.clock.runFor(2801)
+      assert.equal(await page.getByText('Policy saved', { exact: true }).count(), 0, 'Regression observes the save after its toast expires')
+    }
+    assert.ok(await page.getByRole('button', { name: 'Save', exact: true }).isDisabled(), 'Confirmed policy remains clean after settlement')
+    assert.equal(await page.getByRole('alert').count(), 0, 'Successful save has no reload/error alert')
+    assert.deepEqual(await graphAcl(), expected, 'Persistent UI matches authoritative saved ACL, including self-access')
+  }
   const refresh = page.getByRole('button', { name: 'Refresh data', exact: true })
   const refreshSettled = () => page.waitForFunction(() => !document.querySelector('[aria-label="Refresh data"]').disabled)
   const staleRefresh = async path => {
@@ -163,13 +235,13 @@ try {
   await page.getByRole('group', { name: 'New link direction' }).getByRole('button', { name: 'One way', exact: true }).click()
   await connect('engineering', 'operations'); await poll(async () => await edge().count() === 1, 'One-way drag creates an edge')
   assert.match(await edge().getAttribute('aria-label'), /^Engineering → Operations$/)
-  await save(); assert.deepEqual(groups[0].allowed_groups, ['operations']); assert.deepEqual(groups[1].allowed_groups, [])
+  await save({ engineering: ['operations'] }, { checkToast: true }); assert.deepEqual(groups[0].allowed_groups, ['operations']); assert.deepEqual(groups[1].allowed_groups, [])
   // Duplicate and self gestures never create a second edge or permission.
   await connect('engineering', 'operations'); await connect('engineering', 'engineering'); assert.equal(await edge().count(), 1)
   assert.ok(await page.getByRole('button', { name: 'Save', exact: true }).isDisabled())
   // Reverse initiation upgrades a one-way link to a single bidirectional edge.
   await connect('operations', 'engineering'); await poll(async () => /↔/.test(await edge().getAttribute('aria-label')), 'Reverse gesture creates bidirectional access')
-  await save(); assert.deepEqual(groups[1].allowed_groups, ['engineering']); assert.equal(await edge().count(), 1)
+  await save({ operations: ['engineering'] }); assert.deepEqual(groups[1].allowed_groups, ['engineering']); assert.equal(await edge().count(), 1)
   // Live nearest-side handles rematch as a group crosses its connected neighbor.
   await node('engineering').click()
   const before = await node('engineering').getAttribute('style'), previousPath = await edge().locator('.react-flow__edge-path').getAttribute('d')
@@ -184,12 +256,12 @@ try {
   await poll(async () => { const style = await node('engineering').getAttribute('style'); const x = /translate\(([-\d.]+)px/.exec(style)?.[1]; return Math.abs(Number(x) - layout.engineering.x) < .01 }, 'Layout survives page navigation')
   // Edge inspector changes direction, and keyboard deletion removes its rules.
   await edge().focus(); await page.keyboard.press('Enter'); await page.getByRole('heading', { name: 'Access direction' }).waitFor()
-  await page.getByRole('button', { name: 'Reverse', exact: true }).click(); await save()
+  await page.getByRole('button', { name: 'Reverse', exact: true }).click(); await save({ engineering: [] })
   assert.deepEqual(groups[0].allowed_groups, []); assert.deepEqual(groups[1].allowed_groups, ['engineering'])
-  await edge().focus(); await page.keyboard.press('Delete', { delay: 50 }); await poll(async () => await edge().count() === 0, 'Delete disconnects selected edge'); await save()
+  await edge().focus(); await page.keyboard.press('Delete', { delay: 50 }); await poll(async () => await edge().count() === 0, 'Delete disconnects selected edge'); await save({ operations: [] })
   assert.deepEqual(groups[1].allowed_groups, [])
   // Explicit self-access is separate from graph connections.
-  await node('engineering').click(); await page.getByRole('switch', { name: 'Intra-group access' }).check(); await save()
+  await node('engineering').click(); await page.getByRole('switch', { name: 'Intra-group access' }).check(); await save({ engineering: ['engineering'] })
   assert.deepEqual(groups[0].allowed_groups, ['engineering']); assert.equal(await edge().count(), 0)
   await page.getByRole('switch', { name: 'Intra-group access' }).uncheck(); await page.getByRole('button', { name: 'Discard changes' }).click()
   assert.ok(await page.getByRole('switch', { name: 'Intra-group access' }).isChecked())
@@ -198,7 +270,7 @@ try {
   const oldAcl = holdNext('GET', '/api/groups')
   await refresh.click(); await oldAcl.requested
   assert.ok(await refresh.isDisabled(), 'Refresh remains busy while its response is held')
-  await page.getByRole('switch', { name: 'Intra-group access' }).uncheck(); await save()
+  await page.getByRole('switch', { name: 'Intra-group access' }).uncheck(); await save({ engineering: [] })
   assert.deepEqual(groups[0].allowed_groups, [], 'Server confirmed ACL revocation')
   assert.equal(await page.getByRole('switch', { name: 'Intra-group access' }).isChecked(), false)
   await oldAcl.release(); await refreshSettled(); await screenshot('race-acl-after-old-get')
@@ -206,7 +278,8 @@ try {
   assert.equal(await page.getByRole('switch', { name: 'Intra-group access' }).isChecked(), false, 'Delayed pre-mutation GET must not restore revoked ACL access')
   await screenshot('race-acl-revoked')
   console.log('PASS: delayed old GET cannot overwrite confirmed ACL revocation; server=[], UI=off, refresh settled')
-  await page.getByRole('switch', { name: 'Intra-group access' }).check(); await save()
+  await page.getByRole('switch', { name: 'Intra-group access' }).check(); await save({ engineering: ['engineering'] }, { expireToast: true })
+  console.log('PASS: ACL save confirmed by its PUT response, server ACL, and clean persistent graph after the transient toast expires; held PUT locks editing')
   await page.getByRole('button', { name: 'Auto layout' }).click(); await page.waitForTimeout(150)
   // A partial two-group save reloads the authoritative server state.
   await page.getByRole('group', { name: 'New link direction' }).getByRole('button', { name: 'Both ways', exact: true }).click()
@@ -300,7 +373,7 @@ try {
   // Clear the existing edge and create the incoming rule through the UI before deletion.
   await navigate('Groups')
   while (await edge().count()) { await edge().click(); await edge().focus(); await page.keyboard.press('Delete', { delay: 50 }); await poll(async () => await edge().count() === 0, 'Existing edge removed') }
-  await save(); await connect('operations', 'engineering'); await poll(async () => await edge().count() === 1 && (await edge().getAttribute('aria-label')).includes('Operations'), 'Incoming Operations → Engineering ACL is visible'); await save()
+  await save({ engineering: ['engineering'] }); await connect('operations', 'engineering'); await poll(async () => await edge().count() === 1 && (await edge().getAttribute('aria-label')).includes('Operations'), 'Incoming Operations → Engineering ACL is visible'); await save({ engineering: ['engineering', 'operations'], operations: ['engineering'] })
   // Both Engineering peers were moved/deleted above, so backend group-deletion restrictions permit the request.
   assert.deepEqual(groups.find(g => g.id === 'operations').allowed_groups, ['engineering'])
   const releaseGroupCascade = await staleRefresh('/api/forwards')
@@ -340,6 +413,16 @@ try {
   assert.equal(heldResponses.size, 0, 'All deterministic response barriers were exercised')
   assert.ok(mutations.every(m => m.path.startsWith('/api/')), 'Existing API paths only')
   console.log('PASS: group details closing, compact peer rows, graph direction, drag, persistence, deletion, self-access, partial saves, recovery, CRUD, English, mobile, setup, session reset, and stale-response regressions')
+} catch (error) {
+  if (page && screenshots) {
+    try {
+      await mkdir(screenshots, { recursive: true })
+      await page.screenshot({ path: resolve(screenshots, 'failure.png'), fullPage: true })
+      await writeFile(resolve(screenshots, 'failure.txt'), `${error.stack ?? error}\n\n${await page.locator('body').innerText()}`)
+      await page.context().tracing.stop({ path: resolve(screenshots, 'failure-trace.zip') })
+    } catch (diagnosticError) { console.error('Unable to capture UI failure artifacts:', diagnosticError) }
+  }
+  throw error
 } finally {
   await browser?.close()
   await new Promise(r => server.close(r))
