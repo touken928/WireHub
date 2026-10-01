@@ -1,0 +1,20 @@
+name: Windows security
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-key-security:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Record Windows identity and privileges
+        shell: pwsh
+        run: |
+          whoami
+          whoami /priv
+      - name: Run Windows key security and integration tests
+        run: cargo test --locked

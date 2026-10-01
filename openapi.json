@@ -331,6 +331,36 @@
         }
       }
     },
+    "/api/ready": {
+      "get": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "ready",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/settings": {
       "put": {
         "tags": [

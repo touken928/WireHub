@@ -115,9 +115,23 @@ Change Endpoint and Keepalive in **Settings**. Changes apply to configurations g
 
 To update, pull the image, stop and remove the old container, then repeat the startup command with the same `wirehub-data` volume. Keep and back up this volume to preserve your network configuration.
 
+### Runtime health and capacity
+
+`/api/health` is a liveness check: it reports that the HTTP service is responding. `/api/ready` reports whether the UDP router has loaded and activated a valid runtime snapshot; it returns **503 Service Unavailable** while the router is unavailable or a reload/recovery has failed. A successful initial load—including an empty, not-yet-configured network—becomes ready. An invalid initial snapshot fails startup rather than starting a degraded router.
+
+After a runtime reload fails, WireHub fails closed, reports the reload failure, and retries loading a complete snapshot with exponential backoff (1, 2, 4 seconds, up to 30 seconds). Readiness returns to healthy only after a complete valid snapshot is installed. UDP receive errors considered recoverable are logged by error category and do not take the router offline; fatal receive errors stop the router and mark it not ready. Logs and health responses do not include keys or packet contents.
+
+Each peer is limited to **256 active plus pending flow entries**. Separately, the router's queued-delivery buffer is bounded to 256 packets and also enforces byte and time limits; excess queued work is dropped rather than growing without bound.
+
 ---
 
 Each version tag publishes **Linux amd64 / arm64** and **Windows amd64** binaries to GitHub Releases, along with **amd64 / arm64** Docker images. See [`v0`](https://github.com/touken928/WireHub/tree/v0) for the previous version.
 # Database and hub-key backups
 
 This release uses strict schema version 3. Older or structurally drifted databases are rejected; there is no automatic migration. At startup, WireHub binds the hub private-key file to the public identity persisted in SQLite; network setup does not create or bind that identity. Back up the SQLite database and hub private-key file together as an immutable identity pair. Restoring only one half can make startup fail because the persisted public identity must match the private key. Schema drift detection includes unexpected SQLite statistics tables and index objects.
+
+## Windows hub-key security
+
+On Windows, newly generated hub-key files are created exclusively with an explicit current-user owner and a protected DACL granting full control only to that user and LocalSystem. Existing key files are never silently repaired or replaced. Startup opens the key through a single validated file handle and fails closed for reparse points, null or broad/unsupported ACLs, unexpected owners, and files not granting the current user read/write access. The key file must be readable and writable by the account running WireHub because startup flushes it to stable storage. Store the key in a directory writable by that account; broad parent-directory permissions do not weaken the protected DACL on newly created keys.
+
+Windows key publication uses an exclusive, protected temporary file and keeps its handle open without write/delete sharing while attempting the non-overwriting hard-link publication. If the filesystem or directory does not support this safe publication route, startup fails rather than falling back to an overwrite or a weaker sharing mode. Back up `wirehub.sqlite3` and `wirehub.key` together and preserve their security descriptors when restoring them. The Windows security workflow exercises ACL validation, flush/read-write access, reparse-point rejection, and publication paths; creating file symlinks in the test suite requires Windows Developer Mode or an elevated test runner.

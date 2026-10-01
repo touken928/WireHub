@@ -6,6 +6,8 @@ use crate::{transport::ipv4::{PacketTuple, ValidatedPacket}, model::{Forward, Pe
 use crate::transport::ipv4;
 
 const CAPACITY: usize = 16_384;
+/// Maximum active and pending flows initiated by one peer, across TCP and UDP.
+const PEER_CAPACITY: usize = 256;
 const UDP_IDLE: Duration = Duration::from_secs(60);
 const TCP_IDLE: Duration = Duration::from_secs(300);
 const SNAT_START: u16 = 40_000;
@@ -45,6 +47,7 @@ pub(crate) struct Flows {
     reverse: HashMap<Reverse, Tuple>,
     pending: HashMap<Tuple, Flow>,
     pending_reverse: HashMap<Reverse, Tuple>,
+    peer_counts: HashMap<String, usize>,
     hub_ip: Ipv4Addr,
     service_ports: HashSet<(u8, u16)>,
     next_udp_snat: u16,
@@ -59,11 +62,11 @@ impl Flows {
 
     pub fn new(hub_ip: Ipv4Addr, forwards: &[Forward]) -> Self {
         let service_ports = forwards.iter().filter_map(|f| protocol(&f.protocol).map(|p| (p, f.target_port))).collect();
-        Self { flows: HashMap::new(), reverse: HashMap::new(), pending: HashMap::new(), pending_reverse: HashMap::new(), hub_ip, service_ports, next_udp_snat: SNAT_START, next_tcp_snat: SNAT_START }
+        Self { flows: HashMap::new(), reverse: HashMap::new(), pending: HashMap::new(), pending_reverse: HashMap::new(), peer_counts: HashMap::new(), hub_ip, service_ports, next_udp_snat: SNAT_START, next_tcp_snat: SNAT_START }
     }
 
     pub fn clear(&mut self) {
-        self.flows.clear(); self.reverse.clear(); self.pending.clear(); self.pending_reverse.clear();
+        self.flows.clear(); self.reverse.clear(); self.pending.clear(); self.pending_reverse.clear(); self.peer_counts.clear();
     }
 
     pub(crate) fn reconcile(&mut self, old_hub: Option<Ipv4Addr>, new_hub: Option<Ipv4Addr>, old_forwards: &[Forward], new_forwards: &[Forward], peers: &HashMap<String, crate::transport::RuntimePeer>) {
@@ -81,16 +84,30 @@ impl Flows {
             } else if !crate::policy::allows(source.group.as_ref().unwrap_or(&crate::model::Group {id:String::new(),name:String::new(),allowed_groups:vec![]}), target.group.as_ref().unwrap_or(&crate::model::Group {id:String::new(),name:String::new(),allowed_groups:vec![]})) { return false; }
             true
         });
+        let service_ports: HashSet<_> = new_forwards.iter().filter_map(|f| protocol(&f.protocol).map(|p| (p, f.target_port))).collect();
+        self.remove_service_port_collisions(&service_ports);
         self.reverse.retain(|_,key| self.flows.contains_key(key));
         self.pending.clear(); self.pending_reverse.clear();
-        self.service_ports = new_forwards.iter().filter_map(|f| protocol(&f.protocol).map(|p|(p,f.target_port))).collect();
+        self.rebuild_peer_counts();
+        self.service_ports = service_ports;
         self.hub_ip = new_hub.unwrap_or(Ipv4Addr::UNSPECIFIED);
+    }
+
+    fn remove_service_port_collisions(&mut self, service_ports: &HashSet<(u8, u16)>) {
+        self.flows.retain(|_, flow| {
+            !flow.output.as_ref().is_some_and(|output| service_ports.contains(&(flow.reply.proto, output.src_port)))
+        });
+        self.reverse.retain(|_, key| self.flows.contains_key(key));
+        self.rebuild_peer_counts();
     }
 
     /// Reclaim expired records. Called at bounded sweep intervals and before capacity allocation.
     pub fn expire(&mut self, now: Instant) {
         self.flows.retain(|key, flow| now.saturating_duration_since(flow.last) < idle(key.protocol));
         self.reverse.retain(|_, key| self.flows.contains_key(key));
+        self.pending.retain(|key, flow| now.saturating_duration_since(flow.last) < idle(key.protocol));
+        self.pending_reverse.retain(|_, key| self.pending.contains_key(key));
+        self.rebuild_peer_counts();
     }
 
     /// Prepare ordinary direct UDP delivery. `destination` identifies the peer
@@ -128,12 +145,13 @@ impl Flows {
             return None;
         } else {
             if proto == 6 && !packet.tcp_flags().is_some_and(|flags| flags & 2 != 0 && flags & 16 == 0) { return None; }
-            self.reserve_capacity(now)?;
+            self.reserve_capacity(&key.peer, now)?;
             let snat = self.choose_snat(proto, backend, forward.target_port)?;
             let reply = Reverse { peer: backend.id.clone(), proto, src: backend_ip, sport: forward.target_port, dst: self.hub_ip, dport: snat };
             let flow = Flow { reply: reply.clone(), output: Some(PacketTuple { src: self.hub_ip, src_port: snat, dst: backend_ip, dst_port: forward.target_port }), backend: backend.id.clone(), backend_ip, initiator_key:source.public_key.clone(), backend_key:backend.public_key.clone(), forward_id:Some(forward.id.clone()), last: now };
             self.pending_reverse.insert(reply, key.clone());
             self.pending.insert(key.clone(), flow.clone());
+            self.add_peer_count(&key.peer);
             flow
         };
         let is_new = !self.flows.contains_key(&key);
@@ -152,20 +170,28 @@ impl Flows {
         } else if self.pending.contains_key(&key) {
             return None;
         } else {
-            self.reserve_capacity(now)?;
+            self.reserve_capacity(&key.peer, now)?;
             let reply = Reverse { peer: destination.id.clone(), proto: key.protocol, src: key.frontend_ip, sport: key.frontend_port, dst: key.ip, dport: key.port };
             let flow = Flow { reply: reply.clone(), output, backend: destination.id.clone(), backend_ip: destination_ip, initiator_key, backend_key:destination.public_key.clone(), forward_id, last: now };
             self.pending_reverse.insert(reply, key.clone());
             self.pending.insert(key.clone(), flow.clone());
+            self.add_peer_count(&key.peer);
             flow
         };
         let is_new = !self.flows.contains_key(&key);
         Some((packet.clone().emit(flow.output), Reservation { key, flow, is_new }))
     }
 
-    fn reserve_capacity(&mut self, now: Instant) -> Option<()> {
-        if self.flows.len() + self.pending.len() >= CAPACITY { self.expire(now); }
-        (self.flows.len() + self.pending.len() < CAPACITY).then_some(())
+    fn reserve_capacity(&mut self, peer: &str, now: Instant) -> Option<()> {
+        // Sweep at the relevant boundary too: a peer can be full long before
+        // the global table is, and expired records must not strand its quota.
+        if self.flows.len() + self.pending.len() >= CAPACITY
+            || self.peer_counts.get(peer).copied().unwrap_or(0) >= PEER_CAPACITY
+        {
+            self.expire(now);
+        }
+        (self.flows.len() + self.pending.len() < CAPACITY
+            && self.peer_counts.get(peer).copied().unwrap_or(0) < PEER_CAPACITY).then_some(())
     }
 
     fn choose_snat(&mut self, proto: u8, backend: &Peer, target_port: u16) -> Option<u16> {
@@ -184,17 +210,29 @@ impl Flows {
     /// Commit/refresh only after successful business-data delivery; failure only releases pending state.
     pub fn complete(&mut self, reservation: Reservation, delivered: bool, now: Instant) {
         if !delivered {
-            if reservation.is_new && self.pending.get(&reservation.key).is_some_and(|f| f.reply == reservation.flow.reply) { self.remove_pending(&reservation.key); }
+            if reservation.is_new && self.pending.get(&reservation.key).is_some_and(|f| f.reply == reservation.flow.reply && f.last == reservation.flow.last) { self.remove_pending(&reservation.key); }
+            return;
+        }
+        // Expiry, clear, or reconciliation may have invalidated a queued
+        // reservation while delivery was outstanding. Do not resurrect it.
+        if reservation.is_new
+            && !self.pending.get(&reservation.key).is_some_and(|f| f.reply == reservation.flow.reply && f.last == reservation.flow.last)
+        {
             return;
         }
         let mut flow = reservation.flow;
         flow.last = now;
-        self.remove_pending(&reservation.key);
+        self.detach_pending(&reservation.key);
         self.reverse.insert(flow.reply.clone(), reservation.key.clone());
         self.flows.insert(reservation.key, flow);
     }
 
     fn remove_pending(&mut self, key: &Tuple) {
+        if self.pending.remove(key).is_some() { self.remove_peer_count(&key.peer); }
+        self.pending_reverse.retain(|_, value| value != key);
+    }
+
+    fn detach_pending(&mut self, key: &Tuple) {
         self.pending.remove(key);
         self.pending_reverse.retain(|_, value| value != key);
     }
@@ -208,7 +246,21 @@ impl Flows {
     }
 
     fn remove_active(&mut self, key: &Tuple) {
-        if let Some(flow) = self.flows.remove(key) { self.reverse.remove(&flow.reply); }
+        if let Some(flow) = self.flows.remove(key) { self.reverse.remove(&flow.reply); self.remove_peer_count(&key.peer); }
+    }
+
+    fn add_peer_count(&mut self, peer: &str) { *self.peer_counts.entry(peer.to_owned()).or_default() += 1; }
+
+    fn remove_peer_count(&mut self, peer: &str) {
+        if let Some(count) = self.peer_counts.get_mut(peer) {
+            *count = count.saturating_sub(1);
+            if *count == 0 { self.peer_counts.remove(peer); }
+        }
+    }
+
+    fn rebuild_peer_counts(&mut self) {
+        self.peer_counts.clear();
+        for key in self.flows.keys().chain(self.pending.keys()) { *self.peer_counts.entry(key.peer.clone()).or_default() += 1; }
     }
 
     /// A live reverse hit is a normal delivery reservation and must be completed
@@ -420,12 +472,119 @@ mod tests {
             let flow = Flow { reply: Reverse { peer: format!("b{n}"), proto: 17, src: Ipv4Addr::LOCALHOST, sport: 9, dst: Ipv4Addr::LOCALHOST, dport: n as u16 }, output: None, backend: "backend".into(), backend_ip: Ipv4Addr::LOCALHOST, initiator_key:String::new(),backend_key:String::new(),forward_id:None,last: now };
             full.pending_reverse.insert(flow.reply.clone(), key.clone()); full.pending.insert(key, flow);
         }
-        assert!(full.reserve_capacity(now).is_none());
+        assert!(full.reserve_capacity("capacity-check", now).is_none());
 
         let mut exhausted = Flows::default();
         for port in SNAT_START..=SNAT_END {
             exhausted.pending_reverse.insert(Reverse { peer: backend.id.clone(), proto: 17, src: backend.ipv4.parse().unwrap(), sport: 53, dst: exhausted.hub_ip, dport: port }, Tuple { peer: format!("used{port}"), ip: Ipv4Addr::LOCALHOST, port, frontend_ip: Ipv4Addr::LOCALHOST, frontend_port: 53, protocol: 17 });
         }
         assert!(exhausted.choose_snat(17, &backend, 53).is_none());
+    }
+
+    #[test]
+    fn per_initiator_quota_is_shared_by_protocols_and_released_on_cleanup() {
+        let backend = peer("backend", "10.77.0.3");
+        let source = peer("source", "10.77.0.2");
+        let other = peer("other", "10.77.0.4");
+        let udp_forward = forward("udp", 53);
+        let tcp_forward = forward("tcp", 443);
+        let now = t();
+        let mut flows = Flows::default();
+
+        // Active UDP and pending TCP both count; distinct source ports cannot
+        // evade the per-initiator limit, and a different initiator is unaffected.
+        for port in 0..(PEER_CAPACITY / 2) {
+            let p = packet(17, source.ipv4.parse().unwrap(), port as u16, flows.hub_ip, 53, 0);
+            let (_, r) = flows.prepare_forward_packet(&p, &source, &udp_forward, &backend, now).unwrap();
+            flows.complete(r, true, now);
+        }
+        for port in (PEER_CAPACITY / 2)..PEER_CAPACITY {
+            let p = packet(6, source.ipv4.parse().unwrap(), port as u16, flows.hub_ip, 443, 2);
+            assert!(flows.prepare_forward_packet(&p, &source, &tcp_forward, &backend, now).is_some());
+        }
+        let denied = packet(17, source.ipv4.parse().unwrap(), 10_000, flows.hub_ip, 53, 0);
+        assert!(flows.prepare_forward_packet(&denied, &source, &udp_forward, &backend, now).is_none());
+        let allowed = packet(17, other.ipv4.parse().unwrap(), 10_000, flows.hub_ip, 53, 0);
+        assert!(flows.prepare_forward_packet(&allowed, &other, &udp_forward, &backend, now).is_some());
+
+        // Repeated traffic on an already-active key refreshes without quota.
+        let existing = packet(17, source.ipv4.parse().unwrap(), 0, flows.hub_ip, 53, 0);
+        assert!(flows.prepare_forward_packet(&existing, &source, &udp_forward, &backend, now).is_some());
+
+        // Failed pending delivery releases a slot immediately.
+        let pending_key = Tuple { peer: source.id.clone(), ip: source.ipv4.parse().unwrap(), port: (PEER_CAPACITY / 2) as u16, frontend_ip: flows.hub_ip, frontend_port: 443, protocol: 6 };
+        let reservation = flows.pending.get(&pending_key).cloned().unwrap();
+        flows.complete(Reservation { key: pending_key, flow: reservation, is_new: true }, false, now);
+        let replacement = packet(6, source.ipv4.parse().unwrap(), PEER_CAPACITY as u16, flows.hub_ip, 443, 2);
+        assert!(flows.prepare_forward_packet(&replacement, &source, &tcp_forward, &backend, now).is_some());
+
+        // Expiration, reconcile, and clear all restore admission capacity.
+        flows.expire(now + Duration::from_secs(301));
+        let after_expiry = packet(17, source.ipv4.parse().unwrap(), 11_000, flows.hub_ip, 53, 0);
+        assert!(flows.prepare_forward_packet(&after_expiry, &source, &udp_forward, &backend, now + Duration::from_secs(301)).is_some());
+        flows.reconcile(Some(flows.hub_ip), Some(flows.hub_ip), &[], &[], &HashMap::new());
+        assert!(flows.flows.is_empty() && flows.pending.is_empty());
+        assert!(flows.prepare_forward_packet(&after_expiry, &source, &udp_forward, &backend, now + Duration::from_secs(302)).is_some());
+        flows.clear();
+        assert!(flows.prepare_forward_packet(&after_expiry, &source, &udp_forward, &backend, now + Duration::from_secs(303)).is_some());
+    }
+
+    #[test]
+    fn direct_quota_sweeps_peer_expiry_and_ignores_late_reservations() {
+        let source = peer("source", "10.77.0.2");
+        let destination = peer("destination", "10.77.0.3");
+        let now = t();
+        let mut flows = Flows::default();
+        let mut last_reservation = None;
+
+        for port in 0..PEER_CAPACITY {
+            let p = packet(17, source.ipv4.parse().unwrap(), port as u16,
+                destination.ipv4.parse().unwrap(), 9000, 0);
+            let (_, reservation) = flows.prepare_direct(&p, &source, &destination, now).unwrap();
+            if port + 1 == PEER_CAPACITY { last_reservation = Some(reservation); }
+            else { flows.complete(reservation, true, now); }
+        }
+        assert_eq!(flows.peer_counts.get(&source.id), Some(&PEER_CAPACITY));
+
+        // Pending state also consumes quota. Expire it at the per-peer
+        // boundary while the global table is nowhere near full.
+        let pending_packet = packet(17, source.ipv4.parse().unwrap(), 1000,
+            destination.ipv4.parse().unwrap(), 9000, 0);
+        assert!(flows.prepare_direct(&pending_packet, &source, &destination, now).is_none());
+        flows.expire(now + UDP_IDLE);
+        let reservation = last_reservation.unwrap();
+        flows.complete(reservation, true, now + UDP_IDLE);
+        assert!(flows.flows.is_empty());
+        assert!(!flows.peer_counts.contains_key(&source.id));
+
+        // Admission itself performs the same targeted cleanup; no separate
+        // periodic global sweep is required for a full peer.
+        let p = packet(17, source.ipv4.parse().unwrap(), 1001,
+            destination.ipv4.parse().unwrap(), 9000, 0);
+        assert!(flows.prepare_direct(&p, &source, &destination, now + UDP_IDLE).is_some());
+    }
+
+    #[test]
+    fn service_port_collision_removes_only_matching_protocol_snat_mapping() {
+        let mut flows = Flows::default();
+        let source = "source".to_string();
+        let peer_ip = Ipv4Addr::new(10, 77, 0, 2);
+        let hub_ip = flows.hub_ip;
+        for (port, proto, snat) in [(1234, 17, 40000), (1235, 17, 40001), (1236, 6, 40000)] {
+            let key = Tuple { peer: source.clone(), ip: peer_ip, port, frontend_ip: hub_ip, frontend_port: 9000, protocol: proto };
+            let reply = Reverse { peer: "backend".into(), proto, src: "10.77.0.3".parse().unwrap(), sport: 9000, dst: hub_ip, dport: snat };
+            let flow = Flow { reply: reply.clone(), output: Some(PacketTuple { src: hub_ip, src_port: snat, dst: reply.src, dst_port: 9000 }), backend: "backend".into(), backend_ip: reply.src, initiator_key: String::new(), backend_key: String::new(), forward_id: Some("f".into()), last: t() };
+            flows.reverse.insert(reply, key.clone());
+            flows.flows.insert(key, flow);
+        }
+        flows.rebuild_peer_counts();
+        assert_eq!(flows.peer_counts.get(&source), Some(&3));
+        let service_ports = HashSet::from([(17, 40000)]);
+        flows.remove_service_port_collisions(&service_ports);
+        assert_eq!(flows.peer_counts.get(&source), Some(&2));
+        assert!(!flows.flows.values().any(|flow| flow.reply.proto == 17 && flow.output.as_ref().is_some_and(|out| out.src_port == 40000)));
+        assert!(flows.flows.values().any(|flow| flow.reply.proto == 17 && flow.output.as_ref().is_some_and(|out| out.src_port == 40001)));
+        assert!(flows.flows.values().any(|flow| flow.reply.proto == 6 && flow.output.as_ref().is_some_and(|out| out.src_port == 40000)));
+        assert!(!flows.reverse.keys().any(|reply| reply.proto == 17 && reply.dport == 40000));
     }
 }

@@ -65,6 +65,7 @@ def check(condition, message):
 def scenario(hub_url, clients, hub_token, tokens, endpoint):
     a_url, b_url, c_url = clients
     check(request(hub_url + "/api/health")["ok"], "hub health check failed")
+    check(request(hub_url + "/api/ready")["ok"], "hub readiness check failed after successful UDP startup")
     request(hub_url + "/api/setup", expected=401)
 
     setup = request(hub_url + "/api/setup", hub_token, "POST", {

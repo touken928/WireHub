@@ -50,20 +50,28 @@ export default function App() {
   const [loginBusy, setLoginBusy] = useState(false)
   const [setup, setSetup] = useState<SetupStatus | null>(null)
   const sessionRef = useRef(0)
+  // Confirmed writes invalidate every read begun before them, including cascade data.
+  const mutationEpochRef = useRef(0)
+  const loadRef = useRef(0)
+  const invalidateLoads = () => { ++mutationEpochRef.current }
 
   const load = useCallback(async () => {
     if (!connected || !setup?.configured) return
     const session = sessionRef.current
+    const epoch = mutationEpochRef.current, request = ++loadRef.current
+    const isCurrent = () => session === sessionRef.current && epoch === mutationEpochRef.current && request === loadRef.current
     setBusy(true); setError('')
     try {
       const [p, g] = await Promise.all([client.GET('/api/peers'), client.GET('/api/groups')])
-      if (session !== sessionRef.current) return
+      if (!isCurrent()) return
       if (p.error || g.error) throw new Error('Unable to load data. Check your access token.')
       setPeers(p.data ?? []); setGroups(g.data ?? []); setUpdatedAt(new Date())
-      try { const list = await forwardsApi.list(); if (session === sessionRef.current) { setForwards(list); setForwardsError('') } }
-      catch (e) { if (session === sessionRef.current) setForwardsError(e instanceof Error ? e.message : 'Unable to load forwards.') }
-    } catch (e) { if (session === sessionRef.current) setError(e instanceof Error ? e.message : 'Connection failed. Check the server.') }
-    finally { if (session === sessionRef.current) setBusy(false) }
+      try { const list = await forwardsApi.list(); if (isCurrent()) { setForwards(list); setForwardsError('') } }
+      catch (e) { if (isCurrent()) setForwardsError(e instanceof Error ? e.message : 'Unable to load forwards.') }
+    } catch (e) { if (isCurrent()) setError(e instanceof Error ? e.message : 'Connection failed. Check the server.') }
+    // An invalidated read still owns its spinner until it settles; an older read
+    // must never clear the busy state of a newer request or a different session.
+    finally { if (session === sessionRef.current && request === loadRef.current) setBusy(false) }
   }, [connected, setup?.configured])
   useEffect(() => { void load() }, [load])
   useEffect(() => { if (!policyDirty) return; const guard = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = '' }; window.addEventListener('beforeunload', guard); return () => window.removeEventListener('beforeunload', guard) }, [policyDirty])
@@ -82,6 +90,7 @@ export default function App() {
       setSetup(setupStatus)
       if (setupStatus.configured) {
         const response = await client.GET('/api/peers')
+        if (session !== sessionRef.current) return
         if (response.error || !response.data) throw new Error('Invalid token or insufficient access.')
         setPeers(response.data)
       }
@@ -126,7 +135,7 @@ export default function App() {
             const r = await client.PUT('/api/peers/{id}/group', { params: { path: { id: peer.id } }, body: { group_id: groupId } })
             if (session !== sessionRef.current) return
             if (r.error || !r.data) throw new Error('Move unconfirmed. Refresh to check the group.')
-            setPeers(v => v.map(x => x.id === peer.id ? r.data! : x)); setToast('Group updated')
+            invalidateLoads(); setPeers(v => v.map(x => x.id === peer.id ? r.data! : x)); setToast('Group updated')
           } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Unable to move peer.')) }
           finally { if (session === sessionRef.current) setPendingPeer(null) }
         }} onDelete={async peer => {
@@ -136,16 +145,18 @@ export default function App() {
             const r = await client.DELETE('/api/peers/{id}', { params: { path: { id: peer.id } } })
             if (session !== sessionRef.current) return
             if (r.error) throw new Error('Deletion unconfirmed. Refresh to check the current state.')
-            setPeers(v => v.filter(x => x.id !== peer.id)); setForwards(v => v.filter(x => x.target_peer_id !== peer.id)); setToast('Peer removed')
+            invalidateLoads(); setPeers(v => v.filter(x => x.id !== peer.id)); setForwards(v => v.filter(x => x.target_peer_id !== peer.id)); setToast('Peer removed')
           } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Unable to delete peer.')) }
           finally { if (session === sessionRef.current) setPendingPeer(null) }
         }} />}
-         {page === 'groups' && <GroupsPage onDirtyChange={setPolicyDirty} groups={groups} peers={peers} onCreate={() => setModal('group')} onSaved={() => setToast('Policy saved')} onDelete={async g => { if (!confirm(`Delete group "${g.name}"?`)) return; try { const r = await client.DELETE('/api/groups/{id}', { params: { path: { id: g.id } } }); if (activeSession !== sessionRef.current) return; if (!r.error) { setGroups(v => v.filter(x => x.id !== g.id).map(x => ({ ...x, allowed_groups: (x.allowed_groups ?? []).filter(id => id !== g.id) }))); setForwards(v => v.map(f => ({ ...f, allowed_group_ids: f.allowed_group_ids.filter(id => id !== g.id) }))); setToast('Group deleted') } else setError('Deletion unconfirmed. Refresh before retrying.') } catch (e) { if (activeSession === sessionRef.current) setError(mutationFailure(e, 'Unable to delete group.')) } }} onSaveAcl={async (id, allowed) => { const r = await client.PUT('/api/groups/{id}/acl', { params: { path: { id } }, body: { allowed_groups: allowed } }); if (activeSession !== sessionRef.current) throw new Error('Session ended.'); if (r.error || !r.data) throw new Error('Save unconfirmed. Reload the policy before retrying.'); setGroups(v => v.map(g => g.id === id ? r.data! : g)) }} onReload={async () => { const r = await client.GET('/api/groups'); if (activeSession !== sessionRef.current) throw new Error('Session ended.'); if (r.error || !r.data) throw new Error('Unable to reload policy.'); setGroups(r.data) }} />}
-          {page === 'forwards' && <ForwardsPage forwards={forwards} subnet={setup?.settings?.subnet ?? ''} loadError={forwardsError} onRetry={() => void load()} peers={peers} groups={groups} onCreate={() => setModal('forward')} onDelete={async f => { if (!confirm(`Delete forward "${f.name}"?`)) return; const session = sessionRef.current; try { await forwardsApi.remove(f.id); if (session !== sessionRef.current) return; setForwards(v => v.filter(x => x.id !== f.id)); setToast('Forward deleted') } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Deletion unconfirmed. Refresh before retrying.')) } }} />}
-         {page === 'settings' && setup?.settings && <SettingsPage settings={setup.settings} onSaved={settings => { setSetup({ configured: true, settings }); setToast('Settings saved') }} />}
+         {page === 'groups' && <GroupsPage onDirtyChange={setPolicyDirty} groups={groups} peers={peers} onCreate={() => setModal('group')} onSaved={() => { if (activeSession === sessionRef.current) setToast('Policy saved') }} onDelete={async g => { if (!confirm(`Delete group "${g.name}"?`)) return; try { const r = await client.DELETE('/api/groups/{id}', { params: { path: { id: g.id } } }); if (activeSession !== sessionRef.current) return; if (!r.error) { invalidateLoads(); setGroups(v => v.filter(x => x.id !== g.id).map(x => ({ ...x, allowed_groups: (x.allowed_groups ?? []).filter(id => id !== g.id) }))); setForwards(v => v.map(f => ({ ...f, allowed_group_ids: f.allowed_group_ids.filter(id => id !== g.id) }))); setToast('Group deleted') } else setError('Deletion unconfirmed. Refresh before retrying.') } catch (e) { if (activeSession === sessionRef.current) setError(mutationFailure(e, 'Unable to delete group.')) } }} onSaveAcl={async (id, allowed) => { const r = await client.PUT('/api/groups/{id}/acl', { params: { path: { id } }, body: { allowed_groups: allowed } }); if (activeSession !== sessionRef.current) throw new Error('Session ended.'); if (r.error || !r.data) throw new Error('Save unconfirmed. Reload the policy before retrying.'); invalidateLoads(); setGroups(v => v.map(g => g.id === id ? r.data! : g)) }} onReload={async () => { const epoch = mutationEpochRef.current; const r = await client.GET('/api/groups'); if (activeSession !== sessionRef.current) throw new Error('Session ended.'); if (epoch !== mutationEpochRef.current) throw new Error('Policy changed while reloading. Reload again.'); if (r.error || !r.data) throw new Error('Unable to reload policy.'); setGroups(r.data) }} />}
+          {page === 'forwards' && <ForwardsPage forwards={forwards} subnet={setup?.settings?.subnet ?? ''} loadError={forwardsError} onRetry={() => void load()} peers={peers} groups={groups} onCreate={() => setModal('forward')} onDelete={async f => { if (!confirm(`Delete forward "${f.name}"?`)) return; const session = sessionRef.current; try { await forwardsApi.remove(f.id); if (session !== sessionRef.current) return; invalidateLoads(); setForwards(v => v.filter(x => x.id !== f.id)); setToast('Forward deleted') } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Deletion unconfirmed. Refresh before retrying.')) } }} />}
+         {page === 'settings' && setup?.settings && <SettingsPage settings={setup.settings} onSaved={settings => { if (activeSession !== sessionRef.current) return; setSetup({ configured: true, settings }); setToast('Settings saved') }} />}
       </div>
     </main>
     {modal && <Modal kind={modal} session={sessionRef.current} isSessionCurrent={session => session === sessionRef.current} groups={groups} peers={peers} forwards={forwards} subnet={setup?.settings?.subnet ?? ''} onClose={() => setModal(null)} onCreated={async value => {
+      if (activeSession !== sessionRef.current) return
+      invalidateLoads()
       if (modal === 'peer') { setModal(null); setProvision(value as Provision); setPeers(v => [...v, (value as Provision).peer]) }
       if (modal === 'group') { setGroups(v => [...v, value as Group]); setModal(null); setToast('Group created') }
       if (modal === 'forward') { setForwards(v => [...v, value as Forward]); setModal(null); setToast('Forward created') }

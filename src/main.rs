@@ -6,6 +6,8 @@ mod policy;
 mod storage;
 mod static_assets;
 mod transport;
+#[cfg(windows)]
+mod windows_key;
 
 use std::{env, fs::{self, File, OpenOptions}, io::{Read, Write}, net::{Ipv4Addr, SocketAddr}, path::Path, sync::Arc};
 use axum::{routing::{get, put, delete}, Router};
@@ -35,9 +37,11 @@ async fn main() -> anyhow_placeholder::Result<()> {
     let public=PublicKey::from(&StaticSecret::from(private));
     let (reload_tx, reload_rx) = mpsc::channel(16);
     let runtime_stats = transport::RuntimeStats::default();
-    let state = api::AppState { store: store.clone(), token:Some(token), hub_public:base64::Engine::encode(&base64::engine::general_purpose::STANDARD,public.as_bytes()), reload_tx, runtime_stats: runtime_stats.clone() };
+    let readiness=transport::Readiness::default();
+    let state = api::AppState { store: store.clone(), token:Some(token), hub_public:base64::Engine::encode(&base64::engine::general_purpose::STANDARD,public.as_bytes()), reload_tx, runtime_stats: runtime_stats.clone(), readiness:readiness.clone() };
     let app = Router::new()
         .route("/api/health", get(api::health))
+        .route("/api/ready", get(api::ready))
         .route("/api/setup", get(api::get_setup).post(api::post_setup))
         .route("/api/settings", put(api::put_settings))
         .route("/api/groups", get(api::list_groups).post(api::create_group))
@@ -53,10 +57,119 @@ async fn main() -> anyhow_placeholder::Result<()> {
     let tcp = tokio::net::TcpListener::bind(SocketAddr::from((bind, port))).await?;
     let udp = tokio::net::UdpSocket::bind(SocketAddr::from(([0,0,0,0], port))).await?;
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(transport::run_udp(udp, store, private, reload_rx, runtime_stats, Some(ready_tx)));
-    ready_rx.await.map_err(|_| "UDP router failed during startup")?.map_err(|_| "failed to load persisted peers; refusing to start")?;
-    axum::serve(tcp, app).await?;
-    Ok(())
+    let udp_task=tokio::spawn(transport::run_udp(udp, store, private, reload_rx, runtime_stats, readiness.clone(), Some(ready_tx)));
+    match ready_rx.await {
+        Err(_) => return Err("UDP router failed during startup".into()),
+        Ok(Err(())) => return Err("failed to load persisted peers; refusing to start".into()),
+        Ok(Ok(())) => {}
+    }
+    supervise_udp_and_http(udp_task, async move { axum::serve(tcp, app).await }, readiness).await
+}
+
+async fn supervise_udp_and_http<F>(
+    mut udp_task: tokio::task::JoinHandle<Result<(), ()>>,
+    http: F,
+    readiness: transport::Readiness,
+) -> anyhow_placeholder::Result<()>
+where
+    F: std::future::Future<Output = std::io::Result<()>>,
+{
+    tokio::pin!(http);
+    tokio::select! {
+        result = &mut udp_task => {
+            readiness.set(false);
+            match result {
+                Ok(Ok(())) | Ok(Err(())) => Err("UDP router exited unexpectedly".into()),
+                Err(_) => Err("UDP router task panicked".into()),
+            }
+        }
+        result = &mut http => {
+            readiness.set(false);
+            udp_task.abort();
+            // Await the aborted task so its future has been dropped before returning.
+            let _ = udp_task.await;
+            result?;
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod supervision_tests {
+    use super::*;
+    use std::{future::{pending, Future}, io};
+    use tokio::sync::oneshot;
+
+    struct DropSignal(Option<oneshot::Sender<()>>);
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() { let _ = tx.send(()); }
+        }
+    }
+
+    fn pending_http(tx: oneshot::Sender<()>) -> impl Future<Output = io::Result<()>> {
+        async move {
+            let _dropped = DropSignal(Some(tx));
+            pending().await
+        }
+    }
+
+    async fn assert_udp_exit(task: tokio::task::JoinHandle<Result<(), ()>>, expected: &str) {
+        let readiness = transport::Readiness::default();
+        readiness.set(true);
+        let (http_dropped_tx, http_dropped_rx) = oneshot::channel();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            supervise_udp_and_http(task, pending_http(http_dropped_tx), readiness.clone()),
+        ).await.expect("supervisor timed out");
+        assert_eq!(result.unwrap_err().to_string(), expected);
+        assert!(!readiness.is_ready());
+        tokio::time::timeout(std::time::Duration::from_secs(1), http_dropped_rx)
+            .await.expect("HTTP future was not dropped").unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_normal_exit_and_error_both_stop_http() {
+        assert_udp_exit(tokio::spawn(async { Ok(()) }), "UDP router exited unexpectedly").await;
+        assert_udp_exit(tokio::spawn(async { Err(()) }), "UDP router exited unexpectedly").await;
+    }
+
+    #[tokio::test]
+    async fn udp_panic_stops_http() {
+        assert_udp_exit(tokio::spawn(async { panic!("stub UDP panic"); #[allow(unreachable_code)] Ok(()) }), "UDP router task panicked").await;
+    }
+
+    async fn assert_http_completion(result: io::Result<()>, should_succeed: bool) {
+        let readiness = transport::Readiness::default();
+        readiness.set(true);
+        let (udp_dropped_tx, udp_dropped_rx) = oneshot::channel();
+        let (udp_started_tx, udp_started_rx) = oneshot::channel();
+        let udp = tokio::spawn(async move {
+            let _dropped = DropSignal(Some(udp_dropped_tx));
+            let _ = udp_started_tx.send(());
+            pending::<Result<(), ()>>().await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), udp_started_rx)
+            .await.expect("UDP task did not start").unwrap();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            supervise_udp_and_http(udp, async move { result }, readiness.clone()),
+        ).await.expect("supervisor timed out");
+        assert!(!readiness.is_ready());
+        tokio::time::timeout(std::time::Duration::from_secs(1), udp_dropped_rx)
+            .await.expect("UDP task was not cancelled").unwrap();
+        match (outcome, should_succeed) {
+            (Ok(()), true) => {}
+            (Err(error), false) => assert_eq!(error.to_string(), "stub HTTP failure"),
+            (other, _) => panic!("unexpected HTTP supervisor result: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_success_and_failure_abort_and_finish_udp() {
+        assert_http_completion(Ok(()), true).await;
+        assert_http_completion(Err(io::Error::other("stub HTTP failure")), false).await;
+    }
 }
 
 #[cfg(test)]
@@ -78,10 +191,14 @@ fn load_hub_key_synced(path:&Path)->std::io::Result<[u8;32]> {
     load_hub_key_inner(path,true)
 }
 fn load_hub_key_inner(path:&Path,sync:bool)->std::io::Result<[u8;32]> {
+    #[cfg(windows)]
+    let file=windows_key::open_secure(path)?;
     let meta=fs::symlink_metadata(path)?;
     if !meta.file_type().is_file(){return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,"hub key must be a regular, non-symlink file"))}
     #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;if meta.permissions().mode()&0o777!=0o600{return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,"existing hub key must have mode 0600"))}}
-    let file=File::open(path)?;let opened=file.metadata()?;
+    #[cfg(not(windows))]
+    let file=File::open(path)?;
+    let opened=file.metadata()?;
     #[cfg(unix)] {use std::os::unix::fs::MetadataExt;if meta.dev()!=opened.dev()||meta.ino()!=opened.ino(){return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,"hub key changed while opening"))}}
     #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;if opened.permissions().mode()&0o777!=0o600{return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,"existing hub key must have mode 0600"))}}
     let mut bytes=Vec::new();(&file).take(33).read_to_end(&mut bytes)?;if bytes.len()!=32{return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,"existing hub key must be exactly 32 bytes; refusing to rotate"))}if sync { file.sync_all()?; } Ok(bytes.try_into().unwrap())
@@ -103,10 +220,14 @@ where F:FnMut(PublishCheckpoint)->std::io::Result<()> {
     let temp_path;
     let mut options=OpenOptions::new();options.write(true).create_new(true);
     #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
-    let (mut file,p)=loop {let candidate=parent.join(format!(".{}.{}.tmp",name.to_string_lossy(),hex::encode(rand::random::<[u8;8]>())));match options.open(&candidate){Ok(f)=>break(f,candidate),Err(e) if e.kind()==std::io::ErrorKind::AlreadyExists=>continue,Err(e)=>return Err(e)}};
+    let (mut file,p)=loop {let candidate=parent.join(format!(".{}.{}.tmp",name.to_string_lossy(),hex::encode(rand::random::<[u8;8]>())));#[cfg(windows)] let opened=windows_key::create_new(&candidate);#[cfg(not(windows))] let opened=options.open(&candidate);match opened{Ok(f)=>break(f,candidate),Err(e) if e.kind()==std::io::ErrorKind::AlreadyExists=>continue,Err(e)=>return Err(e)}};
     temp_path=p;
-    let result=(||{file.write_all(key)?;file.sync_all()?;checkpoint(PublishCheckpoint::TempSynced)?;drop(file);
+    let result=(||{file.write_all(key)?;file.sync_all()?;checkpoint(PublishCheckpoint::TempSynced)?;
+        // On Windows keep the CREATE_NEW handle alive with no write/delete sharing through hard-link
+        // creation, so the temporary pathname cannot be swapped for attacker-controlled content.
+        #[cfg(not(windows))] drop(file);
         let published=match fs::hard_link(&temp_path,path){Ok(())=>{checkpoint(PublishCheckpoint::Linked)?;*key},Err(e) if e.kind()==std::io::ErrorKind::AlreadyExists=>{let winner=load_hub_key_synced(path)?;checkpoint(PublishCheckpoint::CollisionWinnerSynced)?;winner},Err(e)=>return Err(e)};
+        #[cfg(windows)] drop(file);
         fs::remove_file(&temp_path)?;
         #[cfg(unix)] {File::open(parent)?.sync_all()?;}
         Ok(published)})();
@@ -116,13 +237,34 @@ where F:FnMut(PublishCheckpoint)->std::io::Result<()> {
 #[cfg(test)]
 mod security_tests {
     use super::*;
+    fn secure_test_file(path: &Path, bytes: &[u8]) {
+        #[cfg(windows)]
+        {
+            let mut file = windows_key::create_new(path).expect("secure test fixture creation failed");
+            file.write_all(bytes).expect("test fixture write failed");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true).mode(0o600);
+            options.open(path).expect("test fixture creation failed").write_all(bytes).expect("test fixture write failed");
+        }
+    }
+    fn replace_secure_test_file(path: &Path, bytes: &[u8]) {
+        #[cfg(windows)]
+        let mut file = windows_key::open_secure(path).expect("secure test fixture open failed");
+        #[cfg(unix)]
+        let mut file = OpenOptions::new().write(true).truncate(true).open(path).expect("secure test fixture open failed");
+        file.write_all(bytes).expect("test fixture write failed");
+    }
     #[test]
     fn hub_key_is_exclusive_persistent_and_rejects_malformed_existing_file() {
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("hub.key");
         let first=load_or_create_hub_key(&path).unwrap();assert_eq!(first.len(),32);
         assert_eq!(load_or_create_hub_key(&path).unwrap(),first);
         #[cfg(unix)] { use std::os::unix::fs::PermissionsExt;assert_eq!(fs::metadata(&path).unwrap().permissions().mode()&0o777,0o600); }
-        fs::write(&path,b"bad").unwrap();assert!(load_or_create_hub_key(&path).is_err());assert_eq!(fs::read(&path).unwrap(),b"bad");
+        replace_secure_test_file(&path,b"bad");assert!(load_or_create_hub_key(&path).is_err());assert_eq!(fs::read(&path).unwrap(),b"bad");
     }
     #[cfg(unix)]
     #[test]
@@ -142,8 +284,10 @@ mod security_tests {
     #[test]
     fn key_reader_rejects_oversized_file_after_short_reads() {
         let dir=tempfile::tempdir().unwrap(); let path=dir.path().join("oversized");
-        fs::write(&path,[9u8;33]).unwrap();
-        assert!(load_hub_key(&path).is_err());
+        secure_test_file(&path,&[9u8;33]);
+        let error=load_hub_key(&path).unwrap_err();
+        assert_eq!(error.kind(),std::io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(),"existing hub key must be exactly 32 bytes; refusing to rotate");
     }
     #[test]
     fn relative_key_path_can_be_published() {
@@ -175,9 +319,23 @@ mod security_tests {
     #[test]
     fn key_publication_collision_keeps_complete_winner_without_overwrite() {
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("winner.key");let winner=[51u8;32];let contender=[52u8;32];
-        fs::write(&path,winner).unwrap();
-        #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();}
+        secure_test_file(&path,&winner);
         let mut stages=Vec::new();assert_eq!(publish_hub_key_with(&path,&contender,|stage|{stages.push(stage);Ok(())}).unwrap(),winner);assert_eq!(fs::read(&path).unwrap(),winner);assert_eq!(stages,vec![PublishCheckpoint::TempSynced,PublishCheckpoint::CollisionWinnerSynced]);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_temp_file_cannot_be_replaced_during_publication_window() {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("protected.key");let proposed=[61u8;32];
+        let mut attempted=false;
+        assert_eq!(publish_hub_key_with(&path,&proposed,|stage|{
+            if stage==PublishCheckpoint::TempSynced {
+                let temp=fs::read_dir(dir.path())?.next().unwrap()?.path();
+                assert!(fs::remove_file(&temp).is_err(),"exclusive open temp handle must prevent pathname replacement");
+                attempted=true;
+            }
+            Ok(())
+        }).unwrap(),proposed);
+        assert!(attempted);assert_eq!(fs::read(&path).unwrap(),proposed);
     }
 }
 

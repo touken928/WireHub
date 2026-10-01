@@ -2,9 +2,9 @@ use std::{sync::Arc, time::Duration};
 use axum::{extract::{Path,State}, http::{header, HeaderMap,StatusCode}, response::IntoResponse, Json};
 use rand::{rngs::OsRng,RngCore};
 use boringtun::x25519::{PublicKey,StaticSecret};
-use crate::{model::*,storage::Store,transport::{ReloadCommand,RuntimeStats}};
+use crate::{model::*,storage::Store,transport::{Readiness,ReloadCommand,RuntimeStats}};
 
-#[derive(Clone)] pub struct AppState { pub store:Arc<Store>, pub token:Option<String>, pub hub_public:String, pub reload_tx:tokio::sync::mpsc::Sender<ReloadCommand>, pub runtime_stats:RuntimeStats }
+#[derive(Clone)] pub struct AppState { pub store:Arc<Store>, pub token:Option<String>, pub hub_public:String, pub reload_tx:tokio::sync::mpsc::Sender<ReloadCommand>, pub runtime_stats:RuntimeStats, pub readiness:Readiness }
 fn auth(h:&HeaderMap,s:&AppState)->bool { s.token.as_ref().filter(|t|!t.trim().is_empty()).is_some_and(|t|h.get("authorization").and_then(|v|v.to_str().ok()).is_some_and(|v|v==format!("Bearer {t}"))) }
 fn err(code:StatusCode,msg:&str)->impl IntoResponse {(code,msg.to_string())}
 async fn reload(s:&AppState)->bool { let (ack,wait)=tokio::sync::oneshot::channel(); if tokio::time::timeout(Duration::from_secs(3),s.reload_tx.send(ReloadCommand{ack})).await.is_err(){return false} matches!(tokio::time::timeout(Duration::from_secs(3),wait).await,Ok(Ok(Ok(())))) }
@@ -18,6 +18,8 @@ pub async fn post_setup(State(s):State<AppState>,h:HeaderMap,Json(request):Json<
 pub async fn put_settings(State(s):State<AppState>,h:HeaderMap,Json(request):Json<SettingsRequest>)->impl IntoResponse {if !auth(&h,&s){return err(StatusCode::UNAUTHORIZED,"unauthorized").into_response()}match s.store.update_settings(&request.endpoint,request.persistent_keepalive){Ok(settings)=>Json(settings).into_response(),Err(e)=>{if e.to_string().contains("network setup is required"){err(StatusCode::CONFLICT,"setup required").into_response()}else if is_input_error(&e){err(StatusCode::BAD_REQUEST,"invalid settings").into_response()}else{err(StatusCode::INTERNAL_SERVER_ERROR,"database error").into_response()}}}}
 #[utoipa::path(get,path="/api/health",responses((status=200,body=Status)))]
 pub async fn health()->Json<Status>{Json(Status{ok:true})}
+#[utoipa::path(get,path="/api/ready",responses((status=200,body=Status),(status=503,body=Status)))]
+pub async fn ready(State(s):State<AppState>)->impl IntoResponse {if s.readiness.is_ready(){(StatusCode::OK,Json(Status{ok:true})).into_response()}else{(StatusCode::SERVICE_UNAVAILABLE,Json(Status{ok:false})).into_response()}}
 #[utoipa::path(get,path="/api/groups",responses((status=200,body=[Group])))]
 pub async fn list_groups(State(s):State<AppState>,h:HeaderMap)->impl IntoResponse {if !auth(&h,&s){return err(StatusCode::UNAUTHORIZED,"unauthorized").into_response()} match s.store.groups(){Ok(x)=>Json(x).into_response(),Err(_)=>err(StatusCode::INTERNAL_SERVER_ERROR,"database error").into_response()}}
 #[utoipa::path(post,path="/api/groups",request_body=NewGroup,responses((status=201,body=Group)))]
@@ -50,26 +52,37 @@ pub async fn create_forward(State(s):State<AppState>,h:HeaderMap,Json(n):Json<Ne
 pub async fn delete_forward(State(s):State<AppState>,h:HeaderMap,Path(id):Path<String>)->impl IntoResponse {if !auth(&h,&s){return err(StatusCode::UNAUTHORIZED,"unauthorized").into_response()}match s.store.remove_forward(&id){Ok(1)=>if reload(&s).await{StatusCode::NO_CONTENT.into_response()}else{err(StatusCode::SERVICE_UNAVAILABLE,"runtime reload failed").into_response()},Ok(_)=>err(StatusCode::NOT_FOUND,"forward not found").into_response(),Err(e)=>delete_error(e).into_response()}}
 fn delete_error(error:rusqlite::Error)->axum::response::Response {if matches!(error,rusqlite::Error::SqliteFailure(ref e,_) if e.code==rusqlite::ErrorCode::ConstraintViolation){err(StatusCode::CONFLICT,"resource is in use").into_response()}else{err(StatusCode::INTERNAL_SERVER_ERROR,"database error").into_response()}}
 fn uuid()->String{let mut b=[0;16];OsRng.fill_bytes(&mut b);hex::encode(b)}
-pub fn openapi()->String { use utoipa::OpenApi; #[derive(OpenApi)] #[openapi(paths(health,get_setup,post_setup,put_settings,list_groups,create_group,delete_group,set_acl,list_peers,create_peer,delete_peer,move_peer,list_forwards,create_forward,delete_forward),components(schemas(NetworkSettings,SetupStatus,SetupRequest,SettingsRequest,Group,Peer,PeerStatus,NewGroup,NewPeer,PeerProvision,MovePeer,SetAcl,Status,Forward,NewForward)))] struct Doc; Doc::openapi().to_pretty_json().unwrap() }
+    pub fn openapi()->String { use utoipa::OpenApi; #[derive(OpenApi)] #[openapi(paths(health,ready,get_setup,post_setup,put_settings,list_groups,create_group,delete_group,set_acl,list_peers,create_peer,delete_peer,move_peer,list_forwards,create_forward,delete_forward),components(schemas(NetworkSettings,SetupStatus,SetupRequest,SettingsRequest,Group,Peer,PeerStatus,NewGroup,NewPeer,PeerProvision,MovePeer,SetAcl,Status,Forward,NewForward)))] struct Doc; Doc::openapi().to_pretty_json().unwrap() }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     fn test_state(configured:bool)->(AppState,tokio::sync::mpsc::Receiver<ReloadCommand>,HeaderMap){
         let store=Arc::new(Store::open(":memory:").unwrap());store.bind_test_identity();if configured{store.setup("10.88.0.0/24","hub.example:51820",25).unwrap();}
-        let (reload_tx,reload_rx)=tokio::sync::mpsc::channel(8);let state=AppState{store,token:Some("secret".into()),hub_public:String::new(),reload_tx,runtime_stats:RuntimeStats::default()};let mut headers=HeaderMap::new();headers.insert("authorization","Bearer secret".parse().unwrap());(state,reload_rx,headers)
+        let (reload_tx,reload_rx)=tokio::sync::mpsc::channel(8);let state=AppState{store,token:Some("secret".into()),hub_public:String::new(),reload_tx,runtime_stats:RuntimeStats::default(),readiness:Readiness::default()};let mut headers=HeaderMap::new();headers.insert("authorization","Bearer secret".parse().unwrap());(state,reload_rx,headers)
     }
     async fn response_text(response:axum::response::Response)->(StatusCode,String){let status=response.status();let bytes=axum::body::to_bytes(response.into_body(),usize::MAX).await.unwrap();(status,String::from_utf8_lossy(&bytes).into_owned())}
     #[test]
     fn authentication_fails_closed_for_missing_or_empty_token() {
-        let (reload_tx,_) = tokio::sync::mpsc::channel(1);let state=AppState{store:Arc::new(Store::open(":memory:").unwrap()),token:None,hub_public:String::new(),reload_tx,runtime_stats:RuntimeStats::default()};
+        let (reload_tx,_) = tokio::sync::mpsc::channel(1);let state=AppState{store:Arc::new(Store::open(":memory:").unwrap()),token:None,hub_public:String::new(),reload_tx,runtime_stats:RuntimeStats::default(),readiness:Readiness::default()};
         assert!(!auth(&HeaderMap::new(),&state));
         let state=AppState{token:Some(String::new()),..state};assert!(!auth(&HeaderMap::new(),&state));
     }
     #[test]
     fn authentication_requires_exact_bearer_token() {
-        let (reload_tx,_) = tokio::sync::mpsc::channel(1);let state=AppState{store:Arc::new(Store::open(":memory:").unwrap()),token:Some("secret".into()),hub_public:String::new(),reload_tx,runtime_stats:RuntimeStats::default()};
+        let (reload_tx,_) = tokio::sync::mpsc::channel(1);let state=AppState{store:Arc::new(Store::open(":memory:").unwrap()),token:Some("secret".into()),hub_public:String::new(),reload_tx,runtime_stats:RuntimeStats::default(),readiness:Readiness::default()};
         assert!(!auth(&HeaderMap::new(),&state));let mut headers=HeaderMap::new();headers.insert("authorization","Bearer secret".parse().unwrap());assert!(auth(&headers,&state));
+    }
+    #[tokio::test]
+    async fn readiness_is_separate_from_compatible_liveness_health() {
+        let (state,_,_)=test_state(false);
+        let (status,body)=response_text(health().await.into_response()).await;
+        assert_eq!(status,StatusCode::OK);assert!(body.contains("\"ok\":true"));
+        let (status,_)=response_text(ready(State(state.clone())).await.into_response()).await;
+        assert_eq!(status,StatusCode::SERVICE_UNAVAILABLE);
+        state.readiness.set(true);
+        let (status,body)=response_text(ready(State(state)).await.into_response()).await;
+        assert_eq!(status,StatusCode::OK);assert!(body.contains("\"ok\":true"));
     }
     #[tokio::test]
     async fn provisioning_uses_standard_wireguard_base64_without_persisting_private_key() {
@@ -78,7 +91,7 @@ mod tests {
         store.bind_test_identity();store.setup("192.168.44.0/24","hub.example:51820",25).unwrap();
         store.add_group(&Group{id:"g".into(),name:"group".into(),allowed_groups:vec![]}).unwrap();
         let (reload_tx,mut reload_rx)=tokio::sync::mpsc::channel::<ReloadCommand>(1);tokio::spawn(async move{if let Some(command)=reload_rx.recv().await{let _=command.ack.send(Ok(()));}});
-        let state=AppState{store:store.clone(),token:Some("secret".into()),hub_public:"hub-public".into(),reload_tx,runtime_stats:RuntimeStats::default()};
+        let state=AppState{store:store.clone(),token:Some("secret".into()),hub_public:"hub-public".into(),reload_tx,runtime_stats:RuntimeStats::default(),readiness:Readiness::default()};
         let mut headers=HeaderMap::new();headers.insert("authorization","Bearer secret".parse().unwrap());
         let response=create_peer(State(state),headers,Json(NewPeer{name:"client".into(),group_id:"g".into()})).await.into_response();
         assert_eq!(response.status(),StatusCode::CREATED);
@@ -109,7 +122,7 @@ mod tests {
         let store=Arc::new(Store::open(":memory:").unwrap());
         let (reload_tx,mut reload_rx)=tokio::sync::mpsc::channel::<ReloadCommand>(1);
         tokio::spawn(async move { if let Some(command)=reload_rx.recv().await { let _=command.ack.send(Err(())); } });
-        store.bind_test_identity();let state=AppState{store:store.clone(),token:Some("secret".into()),hub_public:String::new(),reload_tx,runtime_stats:RuntimeStats::default()};
+        store.bind_test_identity();let state=AppState{store:store.clone(),token:Some("secret".into()),hub_public:String::new(),reload_tx,runtime_stats:RuntimeStats::default(),readiness:Readiness::default()};
         let mut headers=HeaderMap::new();headers.insert("authorization","Bearer secret".parse().unwrap());
         let response=post_setup(State(state),headers,Json(SetupRequest{subnet:"172.23.45.0/24".into(),endpoint:"hub.example:51820".into(),persistent_keepalive:25})).await.into_response();
         assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);

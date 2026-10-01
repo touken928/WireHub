@@ -1,9 +1,9 @@
 //! Userspace WireGuard UDP router. Policy mutations are acknowledged by the dataplane.
-use std::{collections::{HashMap, VecDeque}, net::{Ipv4Addr,SocketAddr}, sync::Arc, time::{Duration, Instant}};
+use std::{collections::{HashMap, VecDeque}, net::{Ipv4Addr,SocketAddr}, sync::{Arc,atomic::{AtomicBool,Ordering}}, time::{Duration, Instant}};
 
 use boringtun::{noise::{handshake::parse_handshake_anon, rate_limiter::RateLimiter, Packet, Tunn, TunnResult}, x25519::{PublicKey, StaticSecret}};
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use tokio::{net::UdpSocket, sync::{mpsc, oneshot, RwLock}, time};
 
 #[path = "ipv4.rs"]
@@ -15,6 +15,39 @@ const TIMER: Duration = Duration::from_secs(1);
 const PENDING_LIMIT: usize = 256;
 const PENDING_BYTES: usize = 1024 * 1024;
 const PENDING_TTL: Duration = Duration::from_secs(3);
+const RETRY_INITIAL: Duration = Duration::from_secs(1);
+const RETRY_MAX: Duration = Duration::from_secs(30);
+
+#[derive(Debug)]
+struct SnapshotRetry { delay: Duration }
+impl SnapshotRetry {
+    fn new() -> Self { Self { delay: RETRY_INITIAL } }
+    fn failed_at(&mut self, now: Instant) -> Instant {
+        let retry_at = now + self.delay;
+        self.delay = self.delay.saturating_mul(2).min(RETRY_MAX);
+        retry_at
+    }
+    fn succeeded(&mut self) { self.delay = RETRY_INITIAL; }
+}
+
+fn recoverable_udp_error(kind: std::io::ErrorKind) -> bool {
+    matches!(kind, std::io::ErrorKind::Interrupted | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::AddrNotAvailable)
+}
+
+fn classify_udp_receive<T>(received: std::io::Result<T>, readiness: &Readiness) -> Result<Option<T>, ()> {
+    match received {
+        Ok(datagram) => Ok(Some(datagram)),
+        Err(error) if recoverable_udp_error(error.kind()) => {
+            eprintln!("recoverable UDP receive error: {:?}", error.kind());
+            Ok(None)
+        }
+        Err(error) => {
+            readiness.set(false);
+            eprintln!("fatal UDP receive error: {:?}", error.kind());
+            Err(())
+        }
+    }
+}
 
 #[cfg(test)]
 thread_local! { static ANON_PARSE_COUNT: AtomicUsize = AtomicUsize::new(0); }
@@ -32,6 +65,12 @@ struct QueueObservation {
 tokio::task_local! { static QUEUE_OBSERVER: mpsc::UnboundedSender<QueueObservation>; }
 
 pub type RuntimeStats = Arc<RwLock<HashMap<String, (u64, u64, Option<i64>, Option<i64>)>>>;
+#[derive(Clone, Default)]
+pub struct Readiness(Arc<AtomicBool>);
+impl Readiness {
+    pub fn is_ready(&self)->bool { self.0.load(Ordering::Acquire) }
+    pub fn set(&self, ready:bool) { self.0.store(ready,Ordering::Release); }
+}
 pub struct ReloadCommand { pub ack: oneshot::Sender<Result<(), ()>> }
 
 pub(crate) struct RuntimePeer {
@@ -45,7 +84,7 @@ pub(crate) struct RuntimePeer {
 
 /// Run the WireGuard router on an already-bound UDP socket. `hub_private` is
 /// the hub's persisted static private key; it is never written by this module.
-pub async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [u8; 32], mut commands: mpsc::Receiver<ReloadCommand>, stats: RuntimeStats, startup: Option<oneshot::Sender<Result<(), ()>>>) {
+pub async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [u8; 32], mut commands: mpsc::Receiver<ReloadCommand>, stats: RuntimeStats, readiness:Readiness, startup: Option<oneshot::Sender<Result<(), ()>>>) -> Result<(),()> {
     let hub_secret = StaticSecret::from(hub_private);
     let hub_public = PublicKey::from(&hub_secret);
     let rate_limiter = Arc::new(RateLimiter::new(&hub_public, 100));
@@ -61,38 +100,28 @@ pub async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [u8; 32]
     let mut timers = time::interval(TIMER);
     let mut next_index = 1u32;
 
-    // Persisted peers must be installed before the listener is reported ready.
-    let startup_result = async {
-        let snapshot = store.runtime_snapshot().map_err(|_| ())?;
-        validate_persisted_addresses(&snapshot)?;
-        hub_ip = snapshot.settings.as_ref().map(|settings| Subnet24::parse(&settings.subnet).map_err(|_| ())?.hub_ip().parse::<Ipv4Addr>().map_err(|_| ())).transpose()?;
-        forwards = snapshot.forwards;
-        if let Some(hub) = hub_ip { nat = Flows::new(hub, &forwards); }
-        load_peers(snapshot.groups, snapshot.peers, hub_private, rate_limiter.clone(), &mut peers, &mut indexes, &mut next_index, &stats).await
-    }.await;
-    if let Some(ready) = startup { let _ = ready.send(startup_result); }
-    if startup_result.is_err() { return; }
+    readiness.set(false);
+    if let Err(error) = apply_snapshot(&store,hub_private,rate_limiter.clone(),&mut peers,&mut indexes,&mut next_index,&mut forwards,&mut hub_ip,&mut nat,&mut queued_deliveries,&mut pending_bytes,&stats,HashMap::new()).await {
+        readiness.set(false);
+        if let Some(ready) = startup { let _ = ready.send(Err(())); }
+        return Err(error);
+    }
+    readiness.set(true);
+    let mut retry = SnapshotRetry::new();
+    let mut retry_at: Option<Instant> = None;
+    if let Some(ready) = startup { let _ = ready.send(Ok(())); }
 
     loop {
         tokio::select! {
             biased;
             command = commands.recv() => {
-                let Some(command) = command else { break };
+                let Some(command) = command else { readiness.set(false); return Err(()) };
                 // Snapshot and validate before touching the installed runtime. A failed
                 // reload is fail-closed; a valid reload reconciles authenticated state.
                 let old = std::mem::take(&mut peers);
-                let result = store.runtime_snapshot().map_err(|_| ()).and_then(|snapshot| {
-                    validate_persisted_addresses(&snapshot)?;
-                    let updated_hub_ip = snapshot.settings.as_ref().map(|settings| Subnet24::parse(&settings.subnet).map_err(|_| ())?.hub_ip().parse::<Ipv4Addr>().map_err(|_| ())).transpose()?;
-                    let updated_forwards = snapshot.forwards;
-                    install_peers(&snapshot.groups, snapshot.peers, hub_private, rate_limiter.clone(), &mut peers, &mut indexes, &mut next_index, old)?;
-                    nat.reconcile(hub_ip, updated_hub_ip, &forwards, &updated_forwards, &peers);
-                    retain_pending(&mut queued_deliveries, &mut pending_bytes, &peers, &updated_forwards, updated_hub_ip, &nat);
-                    forwards = updated_forwards;
-                    hub_ip = updated_hub_ip;
-                    Ok(())
-                });
-                if result.is_err() { peers.clear(); indexes.clear(); nat.clear(); queued_deliveries.clear(); pending_bytes=0; }
+                let result = apply_snapshot(&store,hub_private,rate_limiter.clone(),&mut peers,&mut indexes,&mut next_index,&mut forwards,&mut hub_ip,&mut nat,&mut queued_deliveries,&mut pending_bytes,&stats,old).await;
+                if result.is_err() { eprintln!("runtime reload snapshot failed; runtime remains fail-closed");peers.clear(); indexes.clear(); forwards.clear(); hub_ip=None; nat.clear(); queued_deliveries.clear(); pending_bytes=0; readiness.set(false);retry.succeeded();retry_at=Some(retry.failed_at(Instant::now())); }
+                else { readiness.set(true); retry.succeeded();retry_at=None; }
                 publish_stats(&peers, &stats).await;
                 let _ = command.ack.send(result);
             }
@@ -105,9 +134,19 @@ pub async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [u8; 32]
                 }
                 drain_pending(&socket, &mut queued_deliveries, &mut pending_bytes, &mut peers, &forwards, hub_ip, &mut nat, &mut out).await;
                 publish_stats(&peers, &stats).await;
+                if retry_at.is_some_and(|at|Instant::now()>=at) {
+                    match apply_snapshot(&store,hub_private,rate_limiter.clone(),&mut peers,&mut indexes,&mut next_index,&mut forwards,&mut hub_ip,&mut nat,&mut queued_deliveries,&mut pending_bytes,&stats,HashMap::new()).await {
+                        Ok(())=>{ readiness.set(true);retry_at=None;retry.succeeded(); }
+                        Err(())=>{ readiness.set(false);retry_at=Some(retry.failed_at(Instant::now()));eprintln!("runtime snapshot recovery failed; remaining fail-closed"); }
+                    }
+                }
             }
             received = socket.recv_from(&mut datagram) => {
-                let Ok((len, endpoint)) = received else { continue };
+                let (len, endpoint) = match classify_udp_receive(received, &readiness) {
+                    Ok(Some(received)) => received,
+                    Ok(None) => continue,
+                    Err(()) => return Err(()),
+                };
                 let bytes = &datagram[..len];
                 let verified = rate_limiter.verify_packet(Some(endpoint.ip()), bytes, &mut out);
                 let parsed: Result<Packet<'_>, ()> = match verified {
@@ -341,9 +380,17 @@ async fn deliver_plan(socket:&UdpSocket, peers:&mut HashMap<String,RuntimePeer>,
 
 fn unix_now() -> i64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64 }
 
-async fn load_peers(groups:Vec<Group>, current:Vec<Peer>, key:[u8;32], limiter:Arc<RateLimiter>, peers:&mut HashMap<String,RuntimePeer>, indexes:&mut HashMap<u32,String>, next:&mut u32, stats:&RuntimeStats)->Result<(),()> {
-    let result=install_peers(&groups,current,key,limiter,peers,indexes,next,HashMap::new());
-    if result.is_ok(){publish_stats(peers,stats).await;} result
+async fn apply_snapshot(store:&Store,key:[u8;32],limiter:Arc<RateLimiter>,peers:&mut HashMap<String,RuntimePeer>,indexes:&mut HashMap<u32,String>,next:&mut u32,forwards:&mut Vec<Forward>,hub_ip:&mut Option<Ipv4Addr>,nat:&mut Flows,pending:&mut VecDeque<PendingDelivery>,pending_bytes:&mut usize,stats:&RuntimeStats,old:HashMap<String,RuntimePeer>)->Result<(),()> {
+    let snapshot=store.runtime_snapshot().map_err(|_|())?;
+    validate_persisted_addresses(&snapshot)?;
+    let updated_hub_ip=snapshot.settings.as_ref().map(|settings|Subnet24::parse(&settings.subnet).map_err(|_|())?.hub_ip().parse::<Ipv4Addr>().map_err(|_|())).transpose()?;
+    let updated_forwards=snapshot.forwards;
+    install_peers(&snapshot.groups,snapshot.peers,key,limiter,peers,indexes,next,old)?;
+    nat.reconcile(*hub_ip,updated_hub_ip,forwards,&updated_forwards,peers);
+    retain_pending(pending,pending_bytes,peers,&updated_forwards,updated_hub_ip,nat);
+    *forwards=updated_forwards;*hub_ip=updated_hub_ip;
+    publish_stats(peers,stats).await;
+    Ok(())
 }
 
 fn install_peers(groups:&[Group],current:Vec<Peer>,key:[u8;32],limiter:Arc<RateLimiter>,peers:&mut HashMap<String,RuntimePeer>,indexes:&mut HashMap<u32,String>,next:&mut u32,mut old:HashMap<String,RuntimePeer>)->Result<(),()> {
@@ -442,6 +489,125 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_retry_schedule_caps_and_resets_after_success() {
+        let start = Instant::now();
+        let mut retry = SnapshotRetry::new();
+        let mut at = start;
+        for (next_delay, elapsed) in [(2,1), (4,3), (8,7), (16,15), (30,31), (30,61), (30,91)] {
+            at = retry.failed_at(at);
+            assert_eq!(at.duration_since(start), Duration::from_secs(elapsed));
+            assert_eq!(retry.delay, Duration::from_secs(next_delay));
+        }
+        retry.succeeded();
+        assert_eq!(retry.failed_at(start).duration_since(start), RETRY_INITIAL);
+    }
+
+    #[test]
+    fn udp_receive_error_classifier_recovers_expected_datagram_errors_only() {
+        for kind in [std::io::ErrorKind::Interrupted, std::io::ErrorKind::ConnectionReset, std::io::ErrorKind::ConnectionRefused, std::io::ErrorKind::AddrNotAvailable] {
+            assert!(recoverable_udp_error(kind), "{kind:?}");
+        }
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::NotConnected, std::io::ErrorKind::Other] {
+            assert!(!recoverable_udp_error(kind), "{kind:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn udp_receive_task_survives_recoverable_errors_and_fails_on_fatal_error() {
+        async fn injected_receiver(mut incoming: mpsc::UnboundedReceiver<std::io::Result<u8>>, readiness: Readiness) -> Result<u8, ()> {
+            loop {
+                match classify_udp_receive(incoming.recv().await.expect("injected receive result"), &readiness)? {
+                    Some(datagram) => return Ok(datagram),
+                    None => continue,
+                }
+            }
+        }
+        let readiness=Readiness::default();readiness.set(true);
+        let (tx,rx)=mpsc::unbounded_channel();
+        let task=tokio::spawn(injected_receiver(rx,readiness.clone()));
+        for kind in [std::io::ErrorKind::Interrupted,std::io::ErrorKind::ConnectionReset,std::io::ErrorKind::ConnectionRefused] {
+            tx.send(Err(std::io::Error::from(kind))).unwrap();
+        }
+        tx.send(Ok(42)).unwrap();
+        assert_eq!(timeout(Duration::from_secs(1),task).await.unwrap().unwrap(),Ok(42));
+        assert!(readiness.is_ready(),"recoverable receive errors do not degrade readiness");
+
+        let fatal_readiness=Readiness::default();fatal_readiness.set(true);
+        let (tx,rx)=mpsc::unbounded_channel();
+        let task=tokio::spawn(injected_receiver(rx,fatal_readiness.clone()));
+        tx.send(Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))).unwrap();
+        assert_eq!(timeout(Duration::from_secs(1),task).await.unwrap().unwrap(),Err(()));
+        assert!(!fatal_readiness.is_ready(),"fatal receive error clears readiness before task exit");
+    }
+
+    #[test]
+    fn invalid_late_peer_does_not_partially_install_snapshot() {
+        let group = Group { id: "g".into(), name: "g".into(), allowed_groups: vec![] };
+        let secret = StaticSecret::from([71u8; 32]);
+        let key = base64::engine::general_purpose::STANDARD.encode(PublicKey::from(&secret).as_bytes());
+        let peer = |id: &str, public_key: &str| Peer { id: id.into(), name: id.into(), public_key: public_key.into(), ipv4: format!("10.77.0.{}", if id == "a" { 2 } else { 3 }), group_id: "g".into(), received_bytes: 0, sent_bytes: 0, last_handshake_unix: None };
+        let mut installed = HashMap::new();
+        let mut prior = peer("prior", &key);
+        prior.id = "old".into();
+        let index = 0x100;
+        installed.insert("old".into(), RuntimePeer { peer: prior, group: Some(group.clone()), tunnel: Tunn::new(StaticSecret::from([72u8;32]), PublicKey::from(&secret), None, None, index >> 8, None), endpoint: None, last_data_unix: None, receiver_index: index });
+        let before_peer_ids: Vec<_> = installed.keys().cloned().collect();
+        let mut indexes = HashMap::from([(index, "old".to_owned())]);
+        let before_indexes = indexes.clone();
+        let mut next = 0;
+        let mut invalid_late = vec![peer("a", &key), peer("z", "not-a-valid-public-key")];
+        // Valid peer comes first to prove that its provisional install is not published.
+        invalid_late[0].id = "a".into();
+        assert!(install_peers(&[group.clone()], invalid_late, [73u8;32], Arc::new(RateLimiter::new(&PublicKey::from(&secret),100)), &mut installed, &mut indexes, &mut next, HashMap::new()).is_err());
+        assert_eq!(installed.keys().cloned().collect::<Vec<_>>(), before_peer_ids);
+        assert_eq!(indexes, before_indexes);
+    }
+
+    #[test]
+    fn reload_reconcile_removes_new_udp_service_port_collision_only() {
+        fn forward(id:&str,protocol:&str,target_port:u16)->Forward {
+            Forward{id:id.into(),name:id.into(),protocol:protocol.into(),target_peer_id:"backend".into(),target_port,allowed_group_ids:vec!["source".into()]}
+        }
+        fn runtime_peer(id:&str,ip:&str,group:Group,secret:[u8;32],receiver_index:u32)->RuntimePeer {
+            let public=PublicKey::from(&StaticSecret::from(secret));
+            let peer=Peer{id:id.into(),name:id.into(),public_key:base64::engine::general_purpose::STANDARD.encode(public.as_bytes()),ipv4:ip.into(),group_id:group.id.clone(),received_bytes:0,sent_bytes:0,last_handshake_unix:None};
+            RuntimePeer{peer,group:Some(group),tunnel:Tunn::new(StaticSecret::from(secret),PublicKey::from(&StaticSecret::from([99;32])),None,None,receiver_index>>8,None),endpoint:None,last_data_unix:None,receiver_index}
+        }
+        fn install_flow(flows:&mut Flows,forward:&Forward,source:&Peer,backend:&Peer,source_port:u16,protocol:u8,flags:u8)->u16 {
+            let packet=ipv4::validate_forwarded(&service_packet(protocol,source.ipv4.parse::<Ipv4Addr>().unwrap().octets(),[10,77,0,1],source_port,forward.target_port,flags,b"req")).unwrap();
+            let (translated,reservation)=flows.prepare_forward_packet(&packet,source,forward,backend,Instant::now()).unwrap();
+            let snat=u16::from_be_bytes(translated[20..22].try_into().unwrap());
+            flows.complete(reservation,true,Instant::now());
+            snat
+        }
+        let source_group=Group{id:"source".into(),name:"source".into(),allowed_groups:vec!["backend".into()]};
+        let backend_group=Group{id:"backend".into(),name:"backend".into(),allowed_groups:vec![]};
+        let mut peers=HashMap::new();
+        peers.insert("source".into(),runtime_peer("source","10.77.0.2",source_group.clone(),[91;32],0x100));
+        peers.insert("backend".into(),runtime_peer("backend","10.77.0.3",backend_group,[92;32],0x200));
+        let source=peers["source"].peer.clone();let backend=peers["backend"].peer.clone();
+        let udp=forward("udp-9000","udp",9000);let tcp=forward("tcp-9000","tcp",9000);
+        let old_forwards=vec![udp.clone(),tcp.clone()];
+        let mut flows=Flows::new("10.77.0.1".parse().unwrap(),&old_forwards);
+        let udp_collision=install_flow(&mut flows,&udp,&source,&backend,1234,17,0);
+        let udp_preserved=install_flow(&mut flows,&udp,&source,&backend,1235,17,0);
+        let tcp_same_number=install_flow(&mut flows,&tcp,&source,&backend,1236,6,2);
+        assert_eq!((udp_collision,udp_preserved,tcp_same_number),(40000,40001,40000));
+
+        // A newly configured UDP service claims the old UDP mapping's SNAT port.
+        let mut new_forwards=old_forwards.clone();new_forwards.push(forward("udp-40000","udp",40000));
+        flows.reconcile(Some("10.77.0.1".parse().unwrap()),Some("10.77.0.1".parse().unwrap()),&old_forwards,&new_forwards,&peers);
+
+        let reply=|protocol,source_port,destination_port|ipv4::validate_forwarded(&service_packet(protocol,[10,77,0,3],[10,77,0,1],source_port,destination_port,0,b"reply")).unwrap();
+        assert!(flows.lookup_reply(&reply(17,9000,40000),&backend,Instant::now()).is_none(),"stale UDP reply must not shadow the newly configured UDP service");
+        let (target,_,reservation)=flows.lookup_reply(&reply(17,9000,40001),&backend,Instant::now()).expect("non-colliding UDP mapping remains active");
+        assert_eq!(target,"source");flows.complete(reservation,true,Instant::now());
+        let (target,_,reservation)=flows.lookup_reply(&reply(6,9000,40000),&backend,Instant::now()).expect("same numeric TCP mapping is protocol-independent");
+        assert_eq!(target,"source");flows.complete(reservation,true,Instant::now());
+        assert_eq!(flows.test_state_counts().0,2);
+    }
+
+    #[test]
     fn forward_requires_both_allowlist_and_directed_backend_acl() {
         let forward=Forward{id:"f".into(),name:"f".into(),protocol:"tcp".into(),target_peer_id:"b".into(),target_port:8080,allowed_group_ids:vec!["a".into()]};
         let group=Group{id:"a".into(),name:"a".into(),allowed_groups:vec!["b".into()]};
@@ -476,17 +642,95 @@ mod tests {
         rusqlite::Connection::open(dir.path().join("startup.sqlite")).unwrap().execute("UPDATE forwards SET allowed='not-json'",[]).unwrap();
         let socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let (_tx,rx)=mpsc::channel(1);let (ready,wait)=oneshot::channel();
-        tokio::spawn(run_udp(socket,startup_store,[42;32],rx,RuntimeStats::default(),Some(ready)));
-        assert!(wait.await.unwrap().is_err(),"startup reports invalid persisted forward state");
+        let readiness=Readiness::default();let stats=RuntimeStats::default();
+        let task=tokio::spawn(run_udp(socket,startup_store,[42;32],rx,stats.clone(),readiness.clone(),Some(ready)));
+        assert!(wait.await.unwrap().is_err(),"failed initial snapshot is reported to startup");
+        assert!(!readiness.is_ready(),"invalid startup snapshot is not ready");
+        assert!(task.await.unwrap().is_err(),"failed startup does not enter the runtime loop");
 
         let reload_store=broken_store(&dir.path().join("reload.sqlite")).await;
         let socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let (tx,rx)=mpsc::channel(1);let (ready,wait)=oneshot::channel();
-        tokio::spawn(run_udp(socket,reload_store.clone(),[43;32],rx,RuntimeStats::default(),Some(ready)));
+        let readiness=Readiness::default();let stats=RuntimeStats::default();
+        let task=tokio::spawn(run_udp(socket,reload_store.clone(),[43;32],rx,stats.clone(),readiness.clone(),Some(ready)));
         wait.await.unwrap().unwrap();
+        assert!(readiness.is_ready());
         rusqlite::Connection::open(dir.path().join("reload.sqlite")).unwrap().execute("UPDATE forwards SET allowed='not-json'",[]).unwrap();
         let (ack,ack_wait)=oneshot::channel();tx.send(ReloadCommand{ack}).await.unwrap();
         assert!(ack_wait.await.unwrap().is_err(),"reload reports invalid persisted forward state");
+        assert!(!readiness.is_ready(),"failed reload marks runtime degraded");
+        assert!(stats.read().await.is_empty(),"failed reload clears runtime peer stats");
+        time::sleep(Duration::from_millis(1200)).await;
+        assert!(!readiness.is_ready(),"failed retry remains fail-closed");
+        rusqlite::Connection::open(dir.path().join("reload.sqlite")).unwrap().execute("UPDATE forwards SET allowed='[\"g\"]'",[]).unwrap();
+        let deadline=Instant::now()+Duration::from_secs(4);
+        while !readiness.is_ready()&&Instant::now()<deadline {time::sleep(Duration::from_millis(50)).await;}
+        assert!(readiness.is_ready(),"timer recovers after a complete valid snapshot is restored");
+        assert!(stats.read().await.contains_key("p"),"recovery installs the latest persisted peer snapshot");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn malformed_snapshot_recovery_installs_only_latest_policy_and_peers() {
+        timeout(Duration::from_secs(20), async {
+            let dir=tempfile::tempdir().unwrap();
+            let db=dir.path().join("latest-policy.sqlite");
+            let store=Arc::new(Store::open(db.to_str().unwrap()).unwrap());
+            store.bind_test_identity();store.setup("10.88.0.0/24","hub.example:51820",25).unwrap();
+            for group in [
+                Group{id:"a".into(),name:"A".into(),allowed_groups:vec!["b".into()]},
+                Group{id:"c".into(),name:"C".into(),allowed_groups:vec!["b".into()]},
+                Group{id:"b".into(),name:"B".into(),allowed_groups:vec![]},
+            ] { store.add_group(&group).unwrap(); }
+            store.set_acl("a", &["b".into()]).unwrap();store.set_acl("c", &["b".into()]).unwrap();
+            let secrets=[StaticSecret::from([81u8;32]),StaticSecret::from([82u8;32]),StaticSecret::from([83u8;32])];
+            for ((id,ip,group),secret) in [("a","10.88.0.2","a"),("b","10.88.0.3","b"),("c","10.88.0.4","c")].into_iter().zip(secrets.iter()) {
+                store.add_peer(&Peer{id:id.into(),name:id.into(),public_key:base64::engine::general_purpose::STANDARD.encode(PublicKey::from(secret).as_bytes()),ipv4:ip.into(),group_id:group.into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None}).unwrap();
+            }
+            let hub_private=[84u8;32];let hub_public=PublicKey::from(&StaticSecret::from(hub_private));
+            let server=UdpSocket::bind("127.0.0.1:0").await.unwrap();let address=server.local_addr().unwrap();
+            let (commands,receiver)=mpsc::channel(2);let (ready,started)=oneshot::channel();
+            let readiness=Readiness::default();let stats=RuntimeStats::default();
+            let task=tokio::spawn(run_udp(server,store.clone(),hub_private,receiver,stats.clone(),readiness.clone(),Some(ready)));
+            started.await.unwrap().unwrap();assert!(readiness.is_ready());
+            let sockets=[UdpSocket::bind("127.0.0.1:0").await.unwrap(),UdpSocket::bind("127.0.0.1:0").await.unwrap(),UdpSocket::bind("127.0.0.1:0").await.unwrap()];
+            let mut clients:Vec<Tunn>=secrets.iter().cloned().enumerate().map(|(i,s)|Tunn::new(s,hub_public,None,None,90+i as u32,None)).collect();
+            let mut tx=vec![0;65535];let mut rx=vec![0;65535];
+            for i in 0..3 { establish_client(&sockets[i],address,&mut clients[i],&mut tx,&mut rx).await; }
+            let packet=|src,dst,payload|service_packet(17,src,dst,12000,9000,0,payload);
+            for (index,source,dest,payload) in [(0,[10,88,0,2],[10,88,0,3],b"initial-a".as_slice()),(2,[10,88,0,4],[10,88,0,3],b"initial-c".as_slice())] {
+                send_inner(&sockets[index],address,&mut clients[index],&packet(source,dest,payload),&mut tx).await;
+                assert_eq!(&timeout(Duration::from_secs(2),recv_inner(&sockets[1],&mut clients[1],&mut rx,&mut tx)).await.unwrap()[28..],payload);
+            }
+
+            rusqlite::Connection::open(&db).unwrap().execute("UPDATE groups SET allowed='broken-json' WHERE id='c'",[]).unwrap();
+            let (ack,wait)=oneshot::channel();commands.send(ReloadCommand{ack}).await.unwrap();
+            assert!(wait.await.unwrap().is_err());assert!(!readiness.is_ready());
+            assert!(stats.read().await.is_empty(),"failed snapshot publishes no partial peer statistics");
+            // Mutate the still-malformed database while fail-closed: revoke A,
+            // and add a new group/peer. Timer retries must not expose a partial install.
+            store.set_acl("a", &[]).unwrap();
+            store.add_group(&Group{id:"new".into(),name:"New".into(),allowed_groups:vec![]}).unwrap();
+            let d_secret=StaticSecret::from([85u8;32]);
+            store.add_peer(&Peer{id:"d".into(),name:"D".into(),public_key:base64::engine::general_purpose::STANDARD.encode(PublicKey::from(&d_secret).as_bytes()),ipv4:"10.88.0.5".into(),group_id:"new".into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None}).unwrap();
+            time::sleep(Duration::from_millis(2200)).await;
+            assert!(!readiness.is_ready());assert!(stats.read().await.is_empty(),"retry failure remains empty and fail-closed");
+
+            rusqlite::Connection::open(&db).unwrap().execute("UPDATE groups SET allowed='[\"b\"]' WHERE id='c'",[]).unwrap();
+            let deadline=Instant::now()+Duration::from_secs(4);
+            while !readiness.is_ready()&&Instant::now()<deadline {time::sleep(Duration::from_millis(40)).await;}
+            assert!(readiness.is_ready(),"timer retries the repaired latest snapshot without another reload");
+            assert!(stats.read().await.contains_key("d"),"latest complete snapshot includes the added peer");
+            clients[0]=Tunn::new(secrets[0].clone(),hub_public,None,None,90,None);
+            clients[1]=Tunn::new(secrets[1].clone(),hub_public,None,None,91,None);
+            clients[2]=Tunn::new(secrets[2].clone(),hub_public,None,None,92,None);
+            for i in [0,1,2] { establish_client(&sockets[i],address,&mut clients[i],&mut tx,&mut rx).await; }
+            send_inner(&sockets[0],address,&mut clients[0],&packet([10,88,0,2],[10,88,0,3],b"revoked-a"),&mut tx).await;
+            assert_no_inner(&sockets[1],address,&mut clients[1],&mut rx,&mut tx).await;
+            send_inner(&sockets[2],address,&mut clients[2],&packet([10,88,0,4],[10,88,0,3],b"allowed-c"),&mut tx).await;
+            assert_eq!(&timeout(Duration::from_secs(2),recv_inner(&sockets[1],&mut clients[1],&mut rx,&mut tx)).await.unwrap()[28..],b"allowed-c");
+            task.abort();
+        }).await.expect("bounded malformed snapshot recovery test");
     }
 
     async fn establish_client(socket: &UdpSocket, address: SocketAddr, client: &mut Tunn, tx: &mut [u8], rx: &mut [u8]) {
@@ -559,8 +803,10 @@ mod tests {
         let server=UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let address=server.local_addr().unwrap();
         let (commands,receiver)=mpsc::channel(1);let (ready,started)=oneshot::channel();
-        tokio::spawn(run_udp(server,store,hub_private,receiver,RuntimeStats::default(),Some(ready)));
+        let readiness=Readiness::default();
+        tokio::spawn(run_udp(server,store,hub_private,receiver,RuntimeStats::default(),readiness.clone(),Some(ready)));
         started.await.unwrap().unwrap();
+        assert!(readiness.is_ready(),"successful UDP startup with no setup is ready");
         let sender=UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let hub_public=PublicKey::from(&StaticSecret::from(hub_private));
         let mut tx=vec![0;65535];let mut rx=vec![0;65535];
@@ -662,7 +908,7 @@ mod tests {
         let server=UdpSocket::bind("127.0.0.1:0").await.unwrap(); let address=server.local_addr().unwrap();
         let (commands_tx,commands_rx)=mpsc::channel(4); let (ready,ready_rx)=oneshot::channel();
         let stats=RuntimeStats::default();
-        tokio::spawn(run_udp(server,store.clone(),hub_private,commands_rx,stats.clone(),Some(ready))); ready_rx.await.unwrap().unwrap();
+        tokio::spawn(run_udp(server,store.clone(),hub_private,commands_rx,stats.clone(),Readiness::default(),Some(ready))); ready_rx.await.unwrap().unwrap();
         let sockets = [UdpSocket::bind("127.0.0.1:0").await.unwrap(),UdpSocket::bind("127.0.0.1:0").await.unwrap(),UdpSocket::bind("127.0.0.1:0").await.unwrap(),UdpSocket::bind("127.0.0.1:0").await.unwrap()];
         let mut clients: Vec<Tunn> = secrets.into_iter().enumerate().map(|(i,s)|Tunn::new(s,hub_public,None,None,60+i as u32,None)).collect();
         let mut tx=vec![0;65535]; let mut rx=vec![0;65535];
@@ -746,9 +992,16 @@ mod tests {
         clients[3]=Tunn::new(StaticSecret::from([34u8;32]),hub_public,None,None,63,None);
         establish_client(&sockets[2],address,&mut clients[2],&mut tx,&mut rx).await;
         establish_client(&sockets[3],address,&mut clients[3],&mut tx,&mut rx).await;
-        send_inner(&sockets[1],address,&mut clients[1],translated_reply.as_ref().unwrap(),&mut tx).await;
+        // The newly configured TCP service claims the old TCP mapping's SNAT
+        // port (40001), so that reply must no longer reach A. The UDP mapping
+        // uses a protocol-independent port allocation (40000) and remains valid.
+        let stale_tcp_reply=service_packet(6,[192,168,44,3],[192,168,44,1],8080,40001,0x12,b"reply");
+        send_inner(&sockets[1],address,&mut clients[1],&stale_tcp_reply,&mut tx).await;
+        assert_no_inner(&sockets[0],address,&mut clients[0],&mut rx,&mut tx).await;
+        let retained_udp_reply=service_packet(17,[192,168,44,3],[192,168,44,1],8080,40000,0,b"reply");
+        send_inner(&sockets[1],address,&mut clients[1],&retained_udp_reply,&mut tx).await;
         let retained_reply=recv_inner(&sockets[0],&mut clients[0],&mut rx,&mut tx).await;
-        assert_eq!(&retained_reply[40..],b"reply","unrelated reload preserves the established authorized mapping");
+        assert_eq!(&retained_reply[28..],b"reply","non-colliding UDP mapping remains live");
         for (number,flags) in [(6,0x02),(17,0)] {
             let request=service_packet(number,[192,168,44,2],[192,168,44,1],12346,8080,flags,b"after-reload");
             send_inner(&sockets[0],address,&mut clients[0],&request,&mut tx).await;
@@ -808,7 +1061,7 @@ mod tests {
         let address=server.local_addr().unwrap();
         let (commands_tx,commands_rx)=mpsc::channel(1);
         let (ready,ready_rx)=oneshot::channel();
-        tokio::spawn(run_udp(server,store,hub_private,commands_rx,RuntimeStats::default(),Some(ready)));
+        tokio::spawn(run_udp(server,store,hub_private,commands_rx,RuntimeStats::default(),Readiness::default(),Some(ready)));
         ready_rx.await.unwrap().unwrap();
         let hub_public=PublicKey::from(&StaticSecret::from(hub_private));
         let original=UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -864,7 +1117,7 @@ mod tests {
         let hub_private=[173u8;32];let hub_public=PublicKey::from(&StaticSecret::from(hub_private));
         let server=UdpSocket::bind("127.0.0.1:0").await.unwrap();let address=server.local_addr().unwrap();
         let (commands,receiver)=mpsc::channel(1);let (ready,started)=oneshot::channel();let stats=RuntimeStats::default();
-        tokio::spawn(run_udp(server,store.clone(),hub_private,receiver,stats.clone(),Some(ready)));started.await.unwrap().unwrap();
+        tokio::spawn(run_udp(server,store.clone(),hub_private,receiver,stats.clone(),Readiness::default(),Some(ready)));started.await.unwrap().unwrap();
         let a_socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();let b_socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut a=Tunn::new(a_secret,hub_public,None,None,71,None);let mut b=Tunn::new(b_secret,hub_public,None,None,72,None);
         let mut tx=vec![0;65535];let mut rx=vec![0;65535];
@@ -906,7 +1159,7 @@ mod tests {
         let address=server.local_addr().unwrap();
         let (commands_tx, commands_rx)=mpsc::channel(4);
         let stats=RuntimeStats::default();
-        let (ready,ready_rx)=oneshot::channel();tokio::spawn(run_udp(server,store.clone(),hub_private,commands_rx,stats.clone(),Some(ready)));
+        let (ready,ready_rx)=oneshot::channel();tokio::spawn(run_udp(server,store.clone(),hub_private,commands_rx,stats.clone(),Readiness::default(),Some(ready)));
         ready_rx.await.unwrap().unwrap();
         let hub_public=PublicKey::from(&StaticSecret::from(hub_private));
         let client_a_socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -1027,7 +1280,7 @@ mod tests {
         let server=UdpSocket::bind("127.0.0.1:0").await.unwrap(); let address=server.local_addr().unwrap();
         let (commands_tx,commands_rx)=mpsc::channel(2); let (ready,ready_rx)=oneshot::channel();
         let stats=RuntimeStats::default();
-        tokio::spawn(run_udp(server,store.clone(),hub_private,commands_rx,stats.clone(),Some(ready))); ready_rx.await.unwrap().unwrap();
+        tokio::spawn(run_udp(server,store.clone(),hub_private,commands_rx,stats.clone(),Readiness::default(),Some(ready))); ready_rx.await.unwrap().unwrap();
         let a_socket=UdpSocket::bind("127.0.0.1:0").await.unwrap(); let b_socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut a=Tunn::new(a_secret.clone(),hub_public,None,None,81,None); let mut b=Tunn::new(b_secret.clone(),hub_public,None,None,82,None);
         let mut tx=vec![0;65535]; let mut rx=vec![0;65535];
@@ -1101,7 +1354,7 @@ mod tests {
         let (commands_tx,commands_rx)=mpsc::channel(2);let (ready,ready_rx)=oneshot::channel();
         let stats=RuntimeStats::default();
         let (queue_observer,mut observations)=mpsc::unbounded_channel();
-        tokio::spawn(QUEUE_OBSERVER.scope(queue_observer,run_udp(server,store.clone(),hub_private,commands_rx,stats.clone(),Some(ready))));ready_rx.await.unwrap().unwrap();
+        tokio::spawn(QUEUE_OBSERVER.scope(queue_observer,run_udp(server,store.clone(),hub_private,commands_rx,stats.clone(),Readiness::default(),Some(ready))));ready_rx.await.unwrap().unwrap();
         let a_socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();let b_socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut a=Tunn::new(a_secret,hub_public,None,None,91,None);let mut b=Tunn::new(b_secret,hub_public,None,None,92,None);
         let mut tx=vec![0;65535];let mut rx=vec![0;65535];
@@ -1200,7 +1453,7 @@ mod tests {
         let (commands_tx,commands_rx)=mpsc::channel(2);let (ready,ready_rx)=oneshot::channel();
         let stats=RuntimeStats::default();
         let (queue_observer,mut observations)=mpsc::unbounded_channel();
-        tokio::spawn(QUEUE_OBSERVER.scope(queue_observer,run_udp(server,store.clone(),hub_private,commands_rx,stats.clone(),Some(ready))));ready_rx.await.unwrap().unwrap();
+        tokio::spawn(QUEUE_OBSERVER.scope(queue_observer,run_udp(server,store.clone(),hub_private,commands_rx,stats.clone(),Readiness::default(),Some(ready))));ready_rx.await.unwrap().unwrap();
         let a_socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();let b_socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut a=Tunn::new(a_secret,hub_public,None,None,101,None);let mut b=Tunn::new(b_secret,hub_public,None,None,102,None);
         let mut tx=vec![0;65535];let mut rx=vec![0;65535];
@@ -1448,7 +1701,7 @@ mod tests {
         let address = socket.local_addr().unwrap();
         let (commands, receiver) = mpsc::channel(1);
         let (ready, started) = oneshot::channel();
-        tokio::spawn(run_udp(socket,store,[161u8;32],receiver,RuntimeStats::default(),Some(ready)));
+        tokio::spawn(run_udp(socket,store,[161u8;32],receiver,RuntimeStats::default(),Readiness::default(),Some(ready)));
         started.await.unwrap().unwrap();
         let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let before = ANON_PARSE_COUNT.with(|count| count.load(Ordering::SeqCst));
@@ -1476,7 +1729,7 @@ mod tests {
         let hub_private=[93u8;32]; let hub_public=PublicKey::from(&StaticSecret::from(hub_private));
         let server=UdpSocket::bind("127.0.0.1:0").await.unwrap(); let address=server.local_addr().unwrap();
         let (commands_tx,commands_rx)=mpsc::channel(2); let (ready,ready_rx)=oneshot::channel(); let stats=RuntimeStats::default();
-        tokio::spawn(run_udp(server,store.clone(),hub_private,commands_rx,stats.clone(),Some(ready))); ready_rx.await.unwrap().unwrap();
+        tokio::spawn(run_udp(server,store.clone(),hub_private,commands_rx,stats.clone(),Readiness::default(),Some(ready))); ready_rx.await.unwrap().unwrap();
         let a_socket=UdpSocket::bind("127.0.0.1:0").await.unwrap(); let b_socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut a=Tunn::new(a_secret.clone(),hub_public,None,None,91,None); let mut b=Tunn::new(b_secret.clone(),hub_public,None,None,92,None);
         let mut tx=vec![0;65535]; let mut rx=vec![0;65535];
