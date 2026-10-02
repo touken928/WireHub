@@ -16,6 +16,7 @@ readiness.
 | `protocol/` | TCP, UDP and ICMP implementations selected through a closed enum and static dispatch |
 | `checksum.rs` | IPv4/ICMP checksums, transport pseudo-header checksums and incremental correction of quoted packets |
 | `flows/` | Shared direct/forward allocation, reverse indices, delivery reservations, quotas, expiry and revocation |
+| `dataplane.rs` / `dataplane/tests.rs` | Synchronous routing and pending-delivery state, with its unit tests |
 | `policy.rs` | Directed group ACLs, forward authorization and assigned source-address checks |
 | `runtime.rs` / `control.rs` | WireGuard packet routing, lifecycle readiness, acknowledged reload and peer statistics |
 | `snapshot.rs` | Typed runtime snapshot compilation |
@@ -47,8 +48,8 @@ including truncated quotes and IPv4 UDP packets with checksum disabled.
 
 ## Flow lifecycle
 
-The synchronous `DataPlane` owns compiled routing configuration, flows and the
-pending-delivery queue. `Flows` owns indices and resource limits. A reservation is exclusive while new,
+The synchronous `DataPlane` in `dataplane.rs` owns compiled routing configuration,
+flows and the pending-delivery queue. `Flows` owns indices and resource limits. A reservation is exclusive while new,
 and it must be completed with the actual delivery result. Only successful
 delivery commits state or refreshes idle time. Generation checks prevent expired
 or revoked reservations from restoring removed mappings. The pending queue
