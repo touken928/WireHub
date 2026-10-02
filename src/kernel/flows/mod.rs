@@ -1,8 +1,7 @@
 //! Bounded bidirectional state. Pending reservations never grant reply access.
 use std::{collections::{HashMap, HashSet}, net::Ipv4Addr, time::Instant};
 
-use crate::model::Forward;
-use crate::kernel::snapshot::{PeerConfigView, PeerKey};
+use crate::kernel::snapshot::{ForwardConfig, PeerConfigView, PeerKey};
 use super::{policy::{self, PeerPolicy}, ipv4::ValidatedPacket, protocol::{PacketTuple, FlowAssociation, FlowEvent, FlowState, RewritePlan}};
 #[cfg(test)]
 use crate::kernel::{ipv4, protocol::{TcpState, TCP_ESTABLISHED_IDLE, TCP_HANDSHAKE_IDLE, TCP_CLOSED_GRACE, UDP_IDLE}};
@@ -44,7 +43,8 @@ struct Flow {
 
 /// A delivery must call `complete` exactly once. Failed delivery releases a new
 /// reservation; only successful delivery installs or refreshes active state.
-pub(crate) struct Reservation { key: Tuple, flow: Flow, is_new: bool, from_initiator: bool, event: FlowEvent }
+#[must_use = "a reservation must be completed to commit or release flow state"]
+pub(crate) struct Reservation { key: Tuple, generation: u64, is_new: bool, from_initiator: bool, event: FlowEvent }
 
 pub(crate) struct Flows {
     flows: HashMap<Tuple, Flow>,
@@ -62,14 +62,36 @@ pub(crate) struct Flows {
     expiry_scans: usize,
 }
 
-impl Default for Flows { fn default() -> Self { Self::new(Ipv4Addr::new(10, 77, 0, 1), &[]) } }
+impl Default for Flows { fn default() -> Self { Self::new(Ipv4Addr::new(10, 77, 0, 1), &[] as &[ForwardConfig]) } }
 
 impl Flows {
     #[cfg(test)]
+    pub(crate) fn prepare_direct_test(&mut self, packet:&ValidatedPacket, source:&impl PeerConfigView, destination:&impl PeerConfigView, now:Instant)->Option<(Vec<u8>,Reservation)> {
+        let (plan,reservation)=self.prepare_direct(packet,source,destination,now)?;
+        match packet.clone().rewrite(plan) { Some(bytes)=>Some((bytes,reservation)), None=>{self.complete(reservation,false,now);None} }
+    }
+    #[cfg(test)]
+    pub(crate) fn prepare_forward_packet_test<F:Clone+Into<ForwardConfig>>(&mut self, packet:&ValidatedPacket, source:&impl PeerConfigView, forward:&F, backend:&impl PeerConfigView, now:Instant)->Option<(Vec<u8>,Reservation)> {
+        let forward=forward.clone().into();
+        let (plan,reservation)=self.prepare_forward_packet(packet,source,&forward,backend,now)?;
+        match packet.clone().rewrite(plan) { Some(bytes)=>Some((bytes,reservation)), None=>{self.complete(reservation,false,now);None} }
+    }
+    #[cfg(test)]
+    pub(crate) fn lookup_reply_test(&mut self, packet:&ValidatedPacket, peer:&impl PeerConfigView, now:Instant)->Option<(String,Vec<u8>,Option<Reservation>)> {
+        let (target,plan,reservation)=self.lookup_reply(packet,peer,now)?;
+        match packet.clone().rewrite(plan) { Some(bytes)=>Some((target,bytes,reservation)), None=>{if let Some(r)=reservation {self.complete(r,false,now)} None} }
+    }
+    #[cfg(test)]
     pub(crate) fn test_state_counts(&self) -> (usize, usize) { (self.flows.len(), self.pending.len()) }
+    #[cfg(test)]
+    pub(crate) fn test_active_observation(&self) -> Option<(Instant, usize, usize, usize)> {
+        self.flows.values().next().map(|flow| (flow.last,self.reverse.len(),self.pending_reverse.len(),self.peer_counts.values().sum()))
+    }
+    #[cfg(test)]
+    pub(crate) fn test_index_counts(&self) -> (usize,usize,usize) { (self.reverse.len(),self.pending_reverse.len(),self.peer_counts.values().sum()) }
 
-    pub fn new(hub_ip: Ipv4Addr, forwards: &[Forward]) -> Self {
-        let service_ports = forwards.iter().filter_map(|f| protocol(&f.protocol).map(|p| (p, f.target_port))).collect();
+    pub fn new<F: Clone + Into<ForwardConfig>>(hub_ip: Ipv4Addr, forwards: &[F]) -> Self {
+        let service_ports = forwards.iter().cloned().map(Into::into).map(|f:ForwardConfig| (f.protocol.number(), f.target_port)).collect();
         Self { flows: HashMap::new(), reverse: HashMap::new(), pending: HashMap::new(), pending_reverse: HashMap::new(), peer_counts: HashMap::new(), hub_ip, service_ports, next_udp_snat: SNAT_START, next_tcp_snat: SNAT_START, earliest_expiry: None, next_generation: Some(1), #[cfg(test)] expiry_scans: 0 }
     }
 
@@ -78,7 +100,7 @@ impl Flows {
         self.earliest_expiry = None;
     }
 
-    pub(crate) fn reconcile<'a>(&mut self, old_hub: Option<Ipv4Addr>, new_hub: Option<Ipv4Addr>, old_forwards: &[Forward], new_forwards: &[Forward], peer_policy: impl Fn(&str) -> Option<PeerPolicy<'a>>) {
+    pub(crate) fn reconcile<'a>(&mut self, old_hub: Option<Ipv4Addr>, new_hub: Option<Ipv4Addr>, old_forwards: &[ForwardConfig], new_forwards: &[ForwardConfig], peer_policy: impl Fn(&str) -> Option<PeerPolicy<'a>>) {
         let same_hub = old_hub == new_hub;
         self.flows.retain(|key, flow| {
             if !same_hub { return false; }
@@ -93,7 +115,7 @@ impl Flows {
             } else if !policy::route_allowed(source.group, target.group) { return false; }
             true
         });
-        let service_ports: HashSet<_> = new_forwards.iter().filter_map(|f| protocol(&f.protocol).map(|p| (p, f.target_port))).collect();
+        let service_ports: HashSet<_> = new_forwards.iter().map(|f| (f.protocol.number(), f.target_port)).collect();
         self.remove_service_port_collisions(&service_ports);
         self.reverse.retain(|_,key| self.flows.contains_key(key));
         self.pending.clear(); self.pending_reverse.clear();
@@ -123,17 +145,17 @@ impl Flows {
     }
 
     /// Direct and translated delivery share allocation, quotas and commit semantics.
-    pub(crate) fn prepare_direct(&mut self, packet: &ValidatedPacket, source: &impl PeerConfigView, destination: &impl PeerConfigView, now: Instant) -> Option<(Vec<u8>, Reservation)> {
+    pub(crate) fn prepare_direct(&mut self, packet: &ValidatedPacket, source: &impl PeerConfigView, destination: &impl PeerConfigView, now: Instant) -> Option<(RewritePlan, Reservation)> {
         if packet.dst() != destination.ip() { return None; }
         self.prepare(packet, source, destination, None, now)
     }
 
-    pub(crate) fn prepare_forward_packet(&mut self, packet: &ValidatedPacket, source: &impl PeerConfigView, forward: &Forward, backend: &impl PeerConfigView, now: Instant) -> Option<(Vec<u8>, Reservation)> {
-        if packet.protocol() != protocol(&forward.protocol)? || packet.dst() != self.hub_ip || packet.dst_port()? != forward.target_port { return None; }
+    pub(crate) fn prepare_forward_packet(&mut self, packet: &ValidatedPacket, source: &impl PeerConfigView, forward: &ForwardConfig, backend: &impl PeerConfigView, now: Instant) -> Option<(RewritePlan, Reservation)> {
+        if packet.protocol() != forward.protocol.number() || packet.dst() != self.hub_ip || packet.dst_port()? != forward.target_port { return None; }
         self.prepare(packet, source, backend, Some(forward), now)
     }
 
-    fn prepare(&mut self, packet: &ValidatedPacket, source: &impl PeerConfigView, destination: &impl PeerConfigView, forward: Option<&Forward>, now: Instant) -> Option<(Vec<u8>, Reservation)> {
+    fn prepare(&mut self, packet: &ValidatedPacket, source: &impl PeerConfigView, destination: &impl PeerConfigView, forward: Option<&ForwardConfig>, now: Instant) -> Option<(RewritePlan, Reservation)> {
         let FlowAssociation::Connection { protocol, tuple, event } = packet.association() else { return None };
         let key = Tuple { peer: source.id().to_owned(), ip: tuple.src, port: tuple.src_port, frontend_ip: tuple.dst, frontend_port: tuple.dst_port, protocol };
         // An expired tuple is a new flow and must satisfy its protocol's initiation rule.
@@ -163,8 +185,8 @@ impl Flows {
             flow
         };
         let is_new = !self.flows.contains_key(&key);
-        let bytes = packet.clone().rewrite(flow.output.map_or(RewritePlan::Keep, RewritePlan::Transport))?;
-        Some((bytes, Reservation { key, flow, is_new, from_initiator: true, event }))
+        let plan=flow.output.map_or(RewritePlan::Keep, RewritePlan::Transport);
+        Some((plan, Reservation { key, generation:flow.generation, is_new, from_initiator: true, event }))
     }
 
     fn reserve_capacity(&mut self, peer: &str, now: Instant) -> Option<()> {
@@ -195,27 +217,23 @@ impl Flows {
     /// Commit/refresh only after successful business-data delivery; failure only releases pending state.
     pub fn complete(&mut self, reservation: Reservation, delivered: bool, now: Instant) {
         if !delivered {
-            if reservation.is_new && self.pending.get(&reservation.key).is_some_and(|f| f.generation == reservation.flow.generation) { self.remove_pending(&reservation.key); }
+            if reservation.is_new && self.pending.get(&reservation.key).is_some_and(|f| f.generation == reservation.generation) { self.remove_pending(&reservation.key); }
             return;
         }
         // Expiry, clear, or reconciliation may have invalidated a queued
         // reservation while delivery was outstanding. Do not resurrect it.
         let valid = if reservation.is_new {
-            self.pending.get(&reservation.key).is_some_and(|f| f.generation == reservation.flow.generation)
+            self.pending.get(&reservation.key).is_some_and(|f| f.generation == reservation.generation)
         } else {
-            self.flows.get(&reservation.key).is_some_and(|f| f.generation == reservation.flow.generation)
+            self.flows.get(&reservation.key).is_some_and(|f| f.generation == reservation.generation)
         };
         if !valid {
             return;
         }
         let key = reservation.key.clone();
-        let mut flow = reservation.flow;
-        if let Some(current) = self.flows.get(&reservation.key) {
-            // Use the most recently committed protocol state when multiple
-            // deliveries were prepared before either completion was processed.
-            flow.state = current.state;
-            flow.last = flow.last.max(current.last);
-        }
+        let current = if reservation.is_new { self.pending.get(&key) } else { self.flows.get(&key) };
+        let Some(current) = current.filter(|flow| flow.generation == reservation.generation) else { return };
+        let mut flow = current.clone();
         if flow.state.on_delivered(reservation.event, reservation.from_initiator, now) { flow.last = flow.last.max(now); }
         if reservation.is_new { self.detach_pending(&reservation.key); }
         self.reverse.insert(flow.reply.clone(), key.clone());
@@ -232,14 +250,6 @@ impl Flows {
     fn detach_pending(&mut self, key: &Tuple) {
         self.pending.remove(key);
         self.pending_reverse.retain(|_, value| value != key);
-    }
-
-    /// Release an orphaned reservation belonging to a queued packet whose
-    /// current route no longer matches its captured provenance.
-    pub(crate) fn cancel_pending_packet(&mut self, packet: &ValidatedPacket, source: &impl PeerConfigView) {
-        let (Some(port),Some(frontend_port))=(packet.src_port(),packet.dst_port()) else { return };
-        let key=Tuple{peer:source.id().to_owned(),ip:packet.src(),port,frontend_ip:packet.dst(),frontend_port,protocol:packet.protocol()};
-        self.remove_pending(&key);
     }
 
     fn remove_active(&mut self, key: &Tuple) {
@@ -277,7 +287,7 @@ impl Flows {
 
     /// Resolve both transport replies and related ICMP errors through the same
     /// committed reverse index. Related errors never create or refresh state.
-    pub(crate) fn lookup_reply(&mut self, packet: &ValidatedPacket, peer: &impl PeerConfigView, now: Instant) -> Option<(String, Vec<u8>, Reservation)> {
+    pub(crate) fn lookup_reply(&mut self, packet: &ValidatedPacket, peer: &impl PeerConfigView, now: Instant) -> Option<(String, RewritePlan, Option<Reservation>)> {
         let key = self.reply_key(packet, peer)?.clone();
         let flow = self.flows.get(&key)?.clone();
         if flow.deadline() <= now { self.remove_active(&key); return None; }
@@ -286,8 +296,9 @@ impl Flows {
             FlowAssociation::Related { .. } => RewritePlan::Related { original: PacketTuple { src: key.ip, src_port: key.port, dst: key.frontend_ip, dst_port: key.frontend_port }, sender: key.frontend_ip, recipient: key.ip },
             FlowAssociation::Stateless => return None,
         };
-        let bytes = packet.clone().rewrite(plan)?;
-        Some((key.peer.clone(), bytes, Reservation { key, flow, is_new: false, from_initiator: false, event: packet.association().event() }))
+        let target=key.peer.clone();
+        let reservation = if matches!(packet.association(), FlowAssociation::Related { .. }) { None } else { Some(Reservation { key, generation:flow.generation, is_new: false, from_initiator: false, event: packet.association().event() }) };
+        Some((target, plan, reservation))
     }
 
     fn reply_key(&self, packet: &ValidatedPacket, peer: &impl PeerConfigView) -> Option<&Tuple> {
@@ -314,7 +325,6 @@ impl Flows {
 }
 
 impl Flow { fn deadline(&self) -> Instant { self.state.deadline(self.last) } }
-fn protocol(value: &str) -> Option<u8> { match value { "tcp" => Some(6), "udp" => Some(17), _ => None } }
 
 #[cfg(test)]
 mod tests;
