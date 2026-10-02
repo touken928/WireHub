@@ -1,25 +1,32 @@
 # Network kernel
 
-All data-plane code lives in this directory. `mod.rs` exposes the UDP router,
-readiness, reload commands and runtime statistics to the application. Network
-configuration validation is available through `config`.
+All network runtime code lives in this directory. The public kernel boundary is
+`Kernel::initialize` plus `Kernel::run`; initialization loads and validates a
+complete snapshot before the application can start HTTP. The returned cloned
+`KernelHandle` exposes readiness, acknowledged reload, and immutable peer
+statistics without exposing runtime channels or mutable state. Initialization
+loads and installs a valid snapshot and publishes stats before readiness becomes
+true. The kernel is initialized at that point; it is running only while its
+`run` future is being polled. Dropping or terminating that future clears
+readiness.
 
 | Module | Responsibility |
 | --- | --- |
 | `ipv4.rs` | Strict IPv4 envelope validation, authenticated source validation and one ingress TTL decrement |
-| `protocol/` | TCP, UDP and ICMP implementations of the same parsing, association and rewriting contract |
+| `protocol/` | TCP, UDP and ICMP implementations selected through a closed enum and static dispatch |
 | `checksum.rs` | IPv4/ICMP checksums, transport pseudo-header checksums and incremental correction of quoted packets |
 | `flows/` | Shared direct/forward allocation, reverse indices, delivery reservations, quotas, expiry and revocation |
 | `policy.rs` | Directed group ACLs, forward authorization and assigned source-address checks |
-| `router/` | WireGuard authentication, runtime snapshots, packet routing, bounded pending delivery and statistics |
-| `config.rs` | Subnet, endpoint and keepalive validation |
+| `runtime.rs` / `control.rs` | WireGuard packet routing, lifecycle readiness, acknowledged reload and peer statistics |
+| `snapshot.rs` | Typed runtime snapshot compilation |
+| `../network.rs` | Shared subnet, endpoint and keepalive validation |
 
 ## Protocol contract
 
-`PacketProtocol` defines `parse`, `association` and `rewrite`. `TransportPacket`
-dispatches to the TCP, UDP or ICMP implementation using a closed enum and static
-dispatch. IPv4 validation precedes transport parsing, and invalid packets are
-rejected before routing.
+`TransportPacket` dispatches parsing, association and rewriting to TCP, UDP or
+ICMP through a closed enum and static dispatch; there is no protocol trait.
+IPv4 validation precedes transport parsing, and invalid packets are rejected
+before routing.
 
 The router consumes three association types:
 
@@ -40,11 +47,13 @@ including truncated quotes and IPv4 UDP packets with checksum disabled.
 
 ## Flow lifecycle
 
-`Flows` owns indices and resource limits. A reservation is exclusive while new,
+The synchronous `DataPlane` owns compiled routing configuration, flows and the
+pending-delivery queue. `Flows` owns indices and resource limits. A reservation is exclusive while new,
 and it must be completed with the actual delivery result. Only successful
 delivery commits state or refreshes idle time. Generation checks prevent expired
-or revoked reservations from restoring removed mappings. The pending WireGuard
-delivery queue retains source, destination and route provenance for revalidation.
+or revoked reservations from restoring removed mappings. The pending queue
+retains ingress and route provenance for revalidation, but never retains a flow
+reservation; retries revalidate against current policy.
 
 `FlowState::on_delivered` and `deadline` delegate lifecycle behavior to protocol
 implementations. TCP owns handshake tracking, FIN direction tracking and the
@@ -61,3 +70,7 @@ unrelated reloads; failed snapshots clear routing state and trigger retries.
 
 Tests live beside their respective modules. HTTP management and persistence stay
 in `src/api` and `src/storage`; their public API and database schema are unchanged.
+Reload commands are bounded and serialized with packet processing. A reload
+loads the newest persisted snapshot when the kernel handles it; rejected loads
+fail closed and retry with backoff. Readiness belongs to the kernel lifecycle
+and becomes false when its run future is dropped or terminates.

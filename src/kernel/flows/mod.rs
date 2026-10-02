@@ -1,10 +1,21 @@
 //! Bounded bidirectional state. Pending reservations never grant reply access.
-use std::{collections::{HashMap, HashSet}, net::Ipv4Addr, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    net::Ipv4Addr,
+    time::Instant,
+};
 
+use super::{
+    ipv4::ValidatedPacket,
+    policy::{self, PeerPolicy},
+    protocol::{ConnectionEvent, FlowAssociation, FlowState, PacketTuple, RewritePlan},
+};
 use crate::kernel::snapshot::{ForwardConfig, PeerConfigView, PeerKey};
-use super::{policy::{self, PeerPolicy}, ipv4::ValidatedPacket, protocol::{PacketTuple, FlowAssociation, FlowEvent, FlowState, RewritePlan}};
 #[cfg(test)]
-use crate::kernel::{ipv4, protocol::{TcpState, TCP_ESTABLISHED_IDLE, TCP_HANDSHAKE_IDLE, TCP_CLOSED_GRACE, UDP_IDLE}};
+use crate::kernel::{
+    ipv4,
+    protocol::{TcpState, TCP_CLOSED_GRACE, TCP_ESTABLISHED_IDLE, TCP_HANDSHAKE_IDLE, UDP_IDLE},
+};
 #[cfg(test)]
 use std::time::Duration;
 
@@ -25,7 +36,14 @@ pub(crate) struct Tuple {
 }
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
-struct Reverse { peer: String, proto: u8, src: Ipv4Addr, sport: u16, dst: Ipv4Addr, dport: u16 }
+struct Reverse {
+    peer: String,
+    proto: u8,
+    src: Ipv4Addr,
+    sport: u16,
+    dst: Ipv4Addr,
+    dport: u16,
+}
 
 #[derive(Clone)]
 struct Flow {
@@ -44,7 +62,13 @@ struct Flow {
 /// A delivery must call `complete` exactly once. Failed delivery releases a new
 /// reservation; only successful delivery installs or refreshes active state.
 #[must_use = "a reservation must be completed to commit or release flow state"]
-pub(crate) struct Reservation { key: Tuple, generation: u64, is_new: bool, from_initiator: bool, event: FlowEvent }
+pub(crate) struct Reservation {
+    key: Tuple,
+    generation: u64,
+    is_new: bool,
+    from_initiator: bool,
+    event: ConnectionEvent,
+}
 
 pub(crate) struct Flows {
     flows: HashMap<Tuple, Flow>,
@@ -62,63 +86,190 @@ pub(crate) struct Flows {
     expiry_scans: usize,
 }
 
-impl Default for Flows { fn default() -> Self { Self::new(Ipv4Addr::new(10, 77, 0, 1), &[] as &[ForwardConfig]) } }
+impl Default for Flows {
+    fn default() -> Self {
+        Self::new(Ipv4Addr::new(10, 77, 0, 1), &[] as &[ForwardConfig])
+    }
+}
 
 impl Flows {
     #[cfg(test)]
-    pub(crate) fn prepare_direct_test(&mut self, packet:&ValidatedPacket, source:&impl PeerConfigView, destination:&impl PeerConfigView, now:Instant)->Option<(Vec<u8>,Reservation)> {
-        let (plan,reservation)=self.prepare_direct(packet,source,destination,now)?;
-        match packet.clone().rewrite(plan) { Some(bytes)=>Some((bytes,reservation)), None=>{self.complete(reservation,false,now);None} }
+    pub(crate) fn prepare_direct_test(
+        &mut self,
+        packet: &ValidatedPacket,
+        source: &impl PeerConfigView,
+        destination: &impl PeerConfigView,
+        now: Instant,
+    ) -> Option<(Vec<u8>, Reservation)> {
+        let (plan, reservation) = self.prepare_direct(packet, source, destination, now)?;
+        match packet.clone().rewrite(plan) {
+            Some(bytes) => Some((bytes, reservation)),
+            None => {
+                self.complete(reservation, false, now);
+                None
+            }
+        }
     }
     #[cfg(test)]
-    pub(crate) fn prepare_forward_packet_test<F:Clone+Into<ForwardConfig>>(&mut self, packet:&ValidatedPacket, source:&impl PeerConfigView, forward:&F, backend:&impl PeerConfigView, now:Instant)->Option<(Vec<u8>,Reservation)> {
-        let forward=forward.clone().into();
-        let (plan,reservation)=self.prepare_forward_packet(packet,source,&forward,backend,now)?;
-        match packet.clone().rewrite(plan) { Some(bytes)=>Some((bytes,reservation)), None=>{self.complete(reservation,false,now);None} }
+    pub(crate) fn prepare_forward_packet_test<F: Clone + Into<ForwardConfig>>(
+        &mut self,
+        packet: &ValidatedPacket,
+        source: &impl PeerConfigView,
+        forward: &F,
+        backend: &impl PeerConfigView,
+        now: Instant,
+    ) -> Option<(Vec<u8>, Reservation)> {
+        let forward = forward.clone().into();
+        let (plan, reservation) =
+            self.prepare_forward_packet(packet, source, &forward, backend, now)?;
+        match packet.clone().rewrite(plan) {
+            Some(bytes) => Some((bytes, reservation)),
+            None => {
+                self.complete(reservation, false, now);
+                None
+            }
+        }
     }
     #[cfg(test)]
-    pub(crate) fn lookup_reply_test(&mut self, packet:&ValidatedPacket, peer:&impl PeerConfigView, now:Instant)->Option<(String,Vec<u8>,Option<Reservation>)> {
-        let (target,plan,reservation)=self.lookup_reply(packet,peer,now)?;
-        match packet.clone().rewrite(plan) { Some(bytes)=>Some((target,bytes,reservation)), None=>{if let Some(r)=reservation {self.complete(r,false,now)} None} }
+    pub(crate) fn lookup_reply_test(
+        &mut self,
+        packet: &ValidatedPacket,
+        peer: &impl PeerConfigView,
+        now: Instant,
+    ) -> Option<(String, Vec<u8>, Option<Reservation>)> {
+        let (target, plan, reservation) = self.lookup_reply(packet, peer, now)?;
+        match packet.clone().rewrite(plan) {
+            Some(bytes) => Some((target, bytes, reservation)),
+            None => {
+                if let Some(r) = reservation {
+                    self.complete(r, false, now)
+                }
+                None
+            }
+        }
     }
     #[cfg(test)]
-    pub(crate) fn test_state_counts(&self) -> (usize, usize) { (self.flows.len(), self.pending.len()) }
+    pub(crate) fn test_state_counts(&self) -> (usize, usize) {
+        (self.flows.len(), self.pending.len())
+    }
     #[cfg(test)]
     pub(crate) fn test_active_observation(&self) -> Option<(Instant, usize, usize, usize)> {
-        self.flows.values().next().map(|flow| (flow.last,self.reverse.len(),self.pending_reverse.len(),self.peer_counts.values().sum()))
+        self.flows.values().next().map(|flow| {
+            (
+                flow.last,
+                self.reverse.len(),
+                self.pending_reverse.len(),
+                self.peer_counts.values().sum(),
+            )
+        })
     }
     #[cfg(test)]
-    pub(crate) fn test_index_counts(&self) -> (usize,usize,usize) { (self.reverse.len(),self.pending_reverse.len(),self.peer_counts.values().sum()) }
+    pub(crate) fn test_index_counts(&self) -> (usize, usize, usize) {
+        (
+            self.reverse.len(),
+            self.pending_reverse.len(),
+            self.peer_counts.values().sum(),
+        )
+    }
 
     pub fn new<F: Clone + Into<ForwardConfig>>(hub_ip: Ipv4Addr, forwards: &[F]) -> Self {
-        let service_ports = forwards.iter().cloned().map(Into::into).map(|f:ForwardConfig| (f.protocol.number(), f.target_port)).collect();
-        Self { flows: HashMap::new(), reverse: HashMap::new(), pending: HashMap::new(), pending_reverse: HashMap::new(), peer_counts: HashMap::new(), hub_ip, service_ports, next_udp_snat: SNAT_START, next_tcp_snat: SNAT_START, earliest_expiry: None, next_generation: Some(1), #[cfg(test)] expiry_scans: 0 }
+        let service_ports = forwards
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .map(|f: ForwardConfig| (f.protocol.number(), f.target_port))
+            .collect();
+        Self {
+            flows: HashMap::new(),
+            reverse: HashMap::new(),
+            pending: HashMap::new(),
+            pending_reverse: HashMap::new(),
+            peer_counts: HashMap::new(),
+            hub_ip,
+            service_ports,
+            next_udp_snat: SNAT_START,
+            next_tcp_snat: SNAT_START,
+            earliest_expiry: None,
+            next_generation: Some(1),
+            #[cfg(test)]
+            expiry_scans: 0,
+        }
     }
 
     pub fn clear(&mut self) {
-        self.flows.clear(); self.reverse.clear(); self.pending.clear(); self.pending_reverse.clear(); self.peer_counts.clear();
+        self.flows.clear();
+        self.reverse.clear();
+        self.pending.clear();
+        self.pending_reverse.clear();
+        self.peer_counts.clear();
         self.earliest_expiry = None;
     }
 
-    pub(crate) fn reconcile<'a>(&mut self, old_hub: Option<Ipv4Addr>, new_hub: Option<Ipv4Addr>, old_forwards: &[ForwardConfig], new_forwards: &[ForwardConfig], peer_policy: impl Fn(&str) -> Option<PeerPolicy<'a>>) {
+    pub(crate) fn reconcile<'a>(
+        &mut self,
+        old_hub: Option<Ipv4Addr>,
+        new_hub: Option<Ipv4Addr>,
+        old_forwards: &[ForwardConfig],
+        new_forwards: &[ForwardConfig],
+        peer_policy: impl Fn(&str) -> Option<PeerPolicy<'a>>,
+    ) {
         let same_hub = old_hub == new_hub;
         self.flows.retain(|key, flow| {
-            if !same_hub { return false; }
-            let Some(source) = peer_policy(&key.peer) else { return false };
-            let Some(target) = peer_policy(&flow.backend) else { return false };
-            if source.peer.key_identity() != flow.initiator_key || target.peer.key_identity() != flow.backend_key || source.peer.ip() != key.ip || target.peer.ip() != flow.backend_ip { return false; }
+            if !same_hub {
+                return false;
+            }
+            let Some(source) = peer_policy(&key.peer) else {
+                return false;
+            };
+            let Some(target) = peer_policy(&flow.backend) else {
+                return false;
+            };
+            if source.peer.key_identity() != flow.initiator_key
+                || target.peer.key_identity() != flow.backend_key
+                || source.peer.ip() != key.ip
+                || target.peer.ip() != flow.backend_ip
+            {
+                return false;
+            }
             if flow.forward_id.is_some() {
-                let Some(id) = flow.forward_id.as_deref() else { return false };
-                let Some(before) = old_forwards.iter().find(|f| f.id == id) else { return false };
-                let Some(after) = new_forwards.iter().find(|f| f.id == id) else { return false };
-                if before.protocol != after.protocol || before.target_peer_id != after.target_peer_id || before.target_port != after.target_port || !after.allowed_group_ids.iter().any(|id|id==source.peer.group_id()) || !policy::forward_allowed(after, source.peer.group_id(), source.group, target.peer.group_id()) { return false; }
-            } else if !policy::route_allowed(source.group, target.group) { return false; }
+                let Some(id) = flow.forward_id.as_deref() else {
+                    return false;
+                };
+                let Some(before) = old_forwards.iter().find(|f| f.id == id) else {
+                    return false;
+                };
+                let Some(after) = new_forwards.iter().find(|f| f.id == id) else {
+                    return false;
+                };
+                if before.protocol != after.protocol
+                    || before.target_peer_id != after.target_peer_id
+                    || before.target_port != after.target_port
+                    || !after
+                        .allowed_group_ids
+                        .iter()
+                        .any(|id| id == source.peer.group_id())
+                    || !policy::forward_allowed(
+                        after,
+                        source.peer.group_id(),
+                        source.group,
+                        target.peer.group_id(),
+                    )
+                {
+                    return false;
+                }
+            } else if !policy::route_allowed(source.group, target.group) {
+                return false;
+            }
             true
         });
-        let service_ports: HashSet<_> = new_forwards.iter().map(|f| (f.protocol.number(), f.target_port)).collect();
+        let service_ports: HashSet<_> = new_forwards
+            .iter()
+            .map(|f| (f.protocol.number(), f.target_port))
+            .collect();
         self.remove_service_port_collisions(&service_ports);
-        self.reverse.retain(|_,key| self.flows.contains_key(key));
-        self.pending.clear(); self.pending_reverse.clear();
+        self.reverse.retain(|_, key| self.flows.contains_key(key));
+        self.pending.clear();
+        self.pending_reverse.clear();
         self.rebuild_peer_counts();
         self.recompute_earliest_expiry();
         self.service_ports = service_ports;
@@ -127,7 +278,10 @@ impl Flows {
 
     fn remove_service_port_collisions(&mut self, service_ports: &HashSet<(u8, u16)>) {
         self.flows.retain(|_, flow| {
-            !flow.output.as_ref().is_some_and(|output| service_ports.contains(&(flow.reply.proto, output.src_port)))
+            !flow
+                .output
+                .as_ref()
+                .is_some_and(|output| service_ports.contains(&(flow.reply.proto, output.src_port)))
         });
         self.reverse.retain(|_, key| self.flows.contains_key(key));
         self.rebuild_peer_counts();
@@ -135,49 +289,132 @@ impl Flows {
 
     /// Reclaim expired records. Called at bounded sweep intervals and before capacity allocation.
     pub fn expire(&mut self, now: Instant) {
-        #[cfg(test)] { self.expiry_scans += 1; }
+        #[cfg(test)]
+        {
+            self.expiry_scans += 1;
+        }
         self.flows.retain(|_, flow| flow.deadline() > now);
         self.reverse.retain(|_, key| self.flows.contains_key(key));
         self.pending.retain(|_, flow| flow.deadline() > now);
-        self.pending_reverse.retain(|_, key| self.pending.contains_key(key));
+        self.pending_reverse
+            .retain(|_, key| self.pending.contains_key(key));
         self.rebuild_peer_counts();
         self.recompute_earliest_expiry();
     }
 
     /// Direct and translated delivery share allocation, quotas and commit semantics.
-    pub(crate) fn prepare_direct(&mut self, packet: &ValidatedPacket, source: &impl PeerConfigView, destination: &impl PeerConfigView, now: Instant) -> Option<(RewritePlan, Reservation)> {
-        if packet.dst() != destination.ip() { return None; }
+    pub(crate) fn prepare_direct(
+        &mut self,
+        packet: &ValidatedPacket,
+        source: &impl PeerConfigView,
+        destination: &impl PeerConfigView,
+        now: Instant,
+    ) -> Option<(RewritePlan, Reservation)> {
+        if packet.dst() != destination.ip() {
+            return None;
+        }
         self.prepare(packet, source, destination, None, now)
     }
 
-    pub(crate) fn prepare_forward_packet(&mut self, packet: &ValidatedPacket, source: &impl PeerConfigView, forward: &ForwardConfig, backend: &impl PeerConfigView, now: Instant) -> Option<(RewritePlan, Reservation)> {
-        if packet.protocol() != forward.protocol.number() || packet.dst() != self.hub_ip || packet.dst_port()? != forward.target_port { return None; }
+    pub(crate) fn prepare_forward_packet(
+        &mut self,
+        packet: &ValidatedPacket,
+        source: &impl PeerConfigView,
+        forward: &ForwardConfig,
+        backend: &impl PeerConfigView,
+        now: Instant,
+    ) -> Option<(RewritePlan, Reservation)> {
+        if packet.protocol() != forward.protocol.number()
+            || packet.dst() != self.hub_ip
+            || packet.dst_port()? != forward.target_port
+        {
+            return None;
+        }
         self.prepare(packet, source, backend, Some(forward), now)
     }
 
-    fn prepare(&mut self, packet: &ValidatedPacket, source: &impl PeerConfigView, destination: &impl PeerConfigView, forward: Option<&ForwardConfig>, now: Instant) -> Option<(RewritePlan, Reservation)> {
-        let FlowAssociation::Connection { protocol, tuple, event } = packet.association() else { return None };
-        let key = Tuple { peer: source.id().to_owned(), ip: tuple.src, port: tuple.src_port, frontend_ip: tuple.dst, frontend_port: tuple.dst_port, protocol };
+    fn prepare(
+        &mut self,
+        packet: &ValidatedPacket,
+        source: &impl PeerConfigView,
+        destination: &impl PeerConfigView,
+        forward: Option<&ForwardConfig>,
+        now: Instant,
+    ) -> Option<(RewritePlan, Reservation)> {
+        let FlowAssociation::Connection(connection) = packet.association() else {
+            return None;
+        };
+        let protocol = connection.event.protocol().number();
+        let tuple = connection.tuple;
+        let event = connection.event;
+        let key = Tuple {
+            peer: source.id().to_owned(),
+            ip: tuple.src,
+            port: tuple.src_port,
+            frontend_ip: tuple.dst,
+            frontend_port: tuple.dst_port,
+            protocol,
+        };
         // An expired tuple is a new flow and must satisfy its protocol's initiation rule.
-        if self.flows.get(&key).is_some_and(|flow| flow.deadline() <= now) { self.remove_active(&key); }
+        if self
+            .flows
+            .get(&key)
+            .is_some_and(|flow| flow.deadline() <= now)
+        {
+            self.remove_active(&key);
+        }
         let destination_ip = destination.ip();
         let flow = if let Some(flow) = self.flows.get(&key).cloned() {
-            if flow.backend != destination.id() || flow.backend_ip != destination_ip || flow.forward_id.as_deref() != forward.map(|f| f.id.as_str()) { return None; }
-            if event.starts_new_tcp() && flow.state.is_closing() { return None; }
+            if flow.backend != destination.id()
+                || flow.backend_ip != destination_ip
+                || flow.forward_id.as_deref() != forward.map(|f| f.id.as_str())
+            {
+                return None;
+            }
+            if event.starts_new_tcp() && flow.state.is_closing() {
+                return None;
+            }
             flow
         } else {
             // A pending token has a single owner; failed delivery must not release
             // another packet's reservation for the same tuple.
-            if self.pending.contains_key(&key) { return None; }
+            if self.pending.contains_key(&key) {
+                return None;
+            }
             let state = event.initial_state()?;
             self.reserve_capacity(&key.peer, now)?;
             let output = if let Some(forward) = forward {
-                Some(PacketTuple { src: self.hub_ip, src_port: self.choose_snat(protocol, destination, forward.target_port)?, dst: destination_ip, dst_port: forward.target_port })
-            } else { None };
+                Some(PacketTuple {
+                    src: self.hub_ip,
+                    src_port: self.choose_snat(protocol, destination, forward.target_port)?,
+                    dst: destination_ip,
+                    dst_port: forward.target_port,
+                })
+            } else {
+                None
+            };
             let wire = output.unwrap_or(tuple);
-            let reply = Reverse { peer: destination.id().to_owned(), proto: protocol, src: wire.dst, sport: wire.dst_port, dst: wire.src, dport: wire.src_port };
+            let reply = Reverse {
+                peer: destination.id().to_owned(),
+                proto: protocol,
+                src: wire.dst,
+                sport: wire.dst_port,
+                dst: wire.src,
+                dport: wire.src_port,
+            };
             let generation = self.allocate_generation()?;
-            let flow = Flow { reply: reply.clone(), output, backend: destination.id().to_owned(), backend_ip: destination_ip, initiator_key: source.key_identity(), backend_key: destination.key_identity(), forward_id: forward.map(|f| f.id.clone()), last: now, generation, state };
+            let flow = Flow {
+                reply: reply.clone(),
+                output,
+                backend: destination.id().to_owned(),
+                backend_ip: destination_ip,
+                initiator_key: source.key_identity(),
+                backend_key: destination.key_identity(),
+                forward_id: forward.map(|f| f.id.clone()),
+                last: now,
+                generation,
+                state,
+            };
             self.pending_reverse.insert(reply, key.clone());
             self.pending.insert(key.clone(), flow.clone());
             self.note_expiry(flow.deadline());
@@ -185,31 +422,69 @@ impl Flows {
             flow
         };
         let is_new = !self.flows.contains_key(&key);
-        let plan=flow.output.map_or(RewritePlan::Keep, RewritePlan::Transport);
-        Some((plan, Reservation { key, generation:flow.generation, is_new, from_initiator: true, event }))
+        let plan = flow
+            .output
+            .map_or(RewritePlan::Keep, RewritePlan::Transport);
+        Some((
+            plan,
+            Reservation {
+                key,
+                generation: flow.generation,
+                is_new,
+                from_initiator: true,
+                event,
+            },
+        ))
     }
 
     fn reserve_capacity(&mut self, peer: &str, now: Instant) -> Option<()> {
         // Sweep at the relevant boundary too: a peer can be full long before
         // the global table is, and expired records must not strand its quota.
         if (self.flows.len() + self.pending.len() >= CAPACITY
-            || self.peer_counts.get(peer).copied().unwrap_or(0) >= PEER_CAPACITY
-        ) && self.earliest_expiry.is_some_and(|deadline| deadline <= now) {
+            || self.peer_counts.get(peer).copied().unwrap_or(0) >= PEER_CAPACITY)
+            && self.earliest_expiry.is_some_and(|deadline| deadline <= now)
+        {
             self.expire(now);
         }
         (self.flows.len() + self.pending.len() < CAPACITY
-            && self.peer_counts.get(peer).copied().unwrap_or(0) < PEER_CAPACITY).then_some(())
+            && self.peer_counts.get(peer).copied().unwrap_or(0) < PEER_CAPACITY)
+            .then_some(())
     }
 
-    fn choose_snat(&mut self, proto: u8, backend: &impl PeerConfigView, target_port: u16) -> Option<u16> {
+    fn choose_snat(
+        &mut self,
+        proto: u8,
+        backend: &impl PeerConfigView,
+        target_port: u16,
+    ) -> Option<u16> {
         let backend_ip = backend.ip();
         let slots = (SNAT_END - SNAT_START + 1) as usize;
-        let counter = if proto == 6 { &mut self.next_tcp_snat } else { &mut self.next_udp_snat };
+        let counter = if proto == 6 {
+            &mut self.next_tcp_snat
+        } else {
+            &mut self.next_udp_snat
+        };
         for _ in 0..slots {
             let candidate = *counter;
-            *counter = if candidate == SNAT_END { SNAT_START } else { candidate + 1 };
-            let idx = Reverse { peer: backend.id().to_owned(), proto, src: backend_ip, sport: target_port, dst: self.hub_ip, dport: candidate };
-            if !self.service_ports.contains(&(proto, candidate)) && !self.reverse.contains_key(&idx) && !self.pending_reverse.contains_key(&idx) { return Some(candidate); }
+            *counter = if candidate == SNAT_END {
+                SNAT_START
+            } else {
+                candidate + 1
+            };
+            let idx = Reverse {
+                peer: backend.id().to_owned(),
+                proto,
+                src: backend_ip,
+                sport: target_port,
+                dst: self.hub_ip,
+                dport: candidate,
+            };
+            if !self.service_ports.contains(&(proto, candidate))
+                && !self.reverse.contains_key(&idx)
+                && !self.pending_reverse.contains_key(&idx)
+            {
+                return Some(candidate);
+            }
         }
         None
     }
@@ -217,25 +492,49 @@ impl Flows {
     /// Commit/refresh only after successful business-data delivery; failure only releases pending state.
     pub fn complete(&mut self, reservation: Reservation, delivered: bool, now: Instant) {
         if !delivered {
-            if reservation.is_new && self.pending.get(&reservation.key).is_some_and(|f| f.generation == reservation.generation) { self.remove_pending(&reservation.key); }
+            if reservation.is_new
+                && self
+                    .pending
+                    .get(&reservation.key)
+                    .is_some_and(|f| f.generation == reservation.generation)
+            {
+                self.remove_pending(&reservation.key);
+            }
             return;
         }
         // Expiry, clear, or reconciliation may have invalidated a queued
         // reservation while delivery was outstanding. Do not resurrect it.
         let valid = if reservation.is_new {
-            self.pending.get(&reservation.key).is_some_and(|f| f.generation == reservation.generation)
+            self.pending
+                .get(&reservation.key)
+                .is_some_and(|f| f.generation == reservation.generation)
         } else {
-            self.flows.get(&reservation.key).is_some_and(|f| f.generation == reservation.generation)
+            self.flows
+                .get(&reservation.key)
+                .is_some_and(|f| f.generation == reservation.generation)
         };
         if !valid {
             return;
         }
         let key = reservation.key.clone();
-        let current = if reservation.is_new { self.pending.get(&key) } else { self.flows.get(&key) };
-        let Some(current) = current.filter(|flow| flow.generation == reservation.generation) else { return };
+        let current = if reservation.is_new {
+            self.pending.get(&key)
+        } else {
+            self.flows.get(&key)
+        };
+        let Some(current) = current.filter(|flow| flow.generation == reservation.generation) else {
+            return;
+        };
         let mut flow = current.clone();
-        if flow.state.on_delivered(reservation.event, reservation.from_initiator, now) { flow.last = flow.last.max(now); }
-        if reservation.is_new { self.detach_pending(&reservation.key); }
+        if flow
+            .state
+            .on_delivered(reservation.event, reservation.from_initiator, now)
+        {
+            flow.last = flow.last.max(now);
+        }
+        if reservation.is_new {
+            self.detach_pending(&reservation.key);
+        }
         self.reverse.insert(flow.reply.clone(), key.clone());
         let deadline = flow.deadline();
         self.flows.insert(key, flow);
@@ -243,7 +542,9 @@ impl Flows {
     }
 
     fn remove_pending(&mut self, key: &Tuple) {
-        if self.pending.remove(key).is_some() { self.remove_peer_count(&key.peer); }
+        if self.pending.remove(key).is_some() {
+            self.remove_peer_count(&key.peer);
+        }
         self.pending_reverse.retain(|_, value| value != key);
     }
 
@@ -253,25 +554,37 @@ impl Flows {
     }
 
     fn remove_active(&mut self, key: &Tuple) {
-        if let Some(flow) = self.flows.remove(key) { self.reverse.remove(&flow.reply); self.remove_peer_count(&key.peer); }
+        if let Some(flow) = self.flows.remove(key) {
+            self.reverse.remove(&flow.reply);
+            self.remove_peer_count(&key.peer);
+        }
     }
 
-    fn add_peer_count(&mut self, peer: &str) { *self.peer_counts.entry(peer.to_owned()).or_default() += 1; }
+    fn add_peer_count(&mut self, peer: &str) {
+        *self.peer_counts.entry(peer.to_owned()).or_default() += 1;
+    }
 
     fn remove_peer_count(&mut self, peer: &str) {
         if let Some(count) = self.peer_counts.get_mut(peer) {
             *count = count.saturating_sub(1);
-            if *count == 0 { self.peer_counts.remove(peer); }
+            if *count == 0 {
+                self.peer_counts.remove(peer);
+            }
         }
     }
 
     fn rebuild_peer_counts(&mut self) {
         self.peer_counts.clear();
-        for key in self.flows.keys().chain(self.pending.keys()) { *self.peer_counts.entry(key.peer.clone()).or_default() += 1; }
+        for key in self.flows.keys().chain(self.pending.keys()) {
+            *self.peer_counts.entry(key.peer.clone()).or_default() += 1;
+        }
     }
 
     fn note_expiry(&mut self, deadline: Instant) {
-        self.earliest_expiry = Some(self.earliest_expiry.map_or(deadline, |current| current.min(deadline)));
+        self.earliest_expiry = Some(
+            self.earliest_expiry
+                .map_or(deadline, |current| current.min(deadline)),
+        );
     }
 
     fn allocate_generation(&mut self) -> Option<u64> {
@@ -281,50 +594,126 @@ impl Flows {
     }
 
     fn recompute_earliest_expiry(&mut self) {
-        self.earliest_expiry = self.flows.iter().chain(self.pending.iter())
-            .map(|(_, flow)| flow.deadline()).min();
+        self.earliest_expiry = self
+            .flows
+            .iter()
+            .chain(self.pending.iter())
+            .map(|(_, flow)| flow.deadline())
+            .min();
     }
 
     /// Resolve both transport replies and related ICMP errors through the same
     /// committed reverse index. Related errors never create or refresh state.
-    pub(crate) fn lookup_reply(&mut self, packet: &ValidatedPacket, peer: &impl PeerConfigView, now: Instant) -> Option<(String, RewritePlan, Option<Reservation>)> {
+    pub(crate) fn lookup_reply(
+        &mut self,
+        packet: &ValidatedPacket,
+        peer: &impl PeerConfigView,
+        now: Instant,
+    ) -> Option<(String, RewritePlan, Option<Reservation>)> {
         let key = self.reply_key(packet, peer)?.clone();
         let flow = self.flows.get(&key)?.clone();
-        if flow.deadline() <= now { self.remove_active(&key); return None; }
+        if flow.deadline() <= now {
+            self.remove_active(&key);
+            return None;
+        }
         let plan = match packet.association() {
-            FlowAssociation::Connection { .. } => RewritePlan::Transport(PacketTuple { src: key.frontend_ip, src_port: key.frontend_port, dst: key.ip, dst_port: key.port }),
-            FlowAssociation::Related { .. } => RewritePlan::Related { original: PacketTuple { src: key.ip, src_port: key.port, dst: key.frontend_ip, dst_port: key.frontend_port }, sender: key.frontend_ip, recipient: key.ip },
+            FlowAssociation::Connection(_) => RewritePlan::Transport(PacketTuple {
+                src: key.frontend_ip,
+                src_port: key.frontend_port,
+                dst: key.ip,
+                dst_port: key.port,
+            }),
+            FlowAssociation::Related { .. } => RewritePlan::Related {
+                original: PacketTuple {
+                    src: key.ip,
+                    src_port: key.port,
+                    dst: key.frontend_ip,
+                    dst_port: key.frontend_port,
+                },
+                sender: key.frontend_ip,
+                recipient: key.ip,
+            },
             FlowAssociation::Stateless => return None,
         };
-        let target=key.peer.clone();
-        let reservation = if matches!(packet.association(), FlowAssociation::Related { .. }) { None } else { Some(Reservation { key, generation:flow.generation, is_new: false, from_initiator: false, event: packet.association().event() }) };
+        let target = key.peer.clone();
+        let reservation = if matches!(packet.association(), FlowAssociation::Related { .. }) {
+            None
+        } else if let FlowAssociation::Connection(connection) = packet.association() {
+            Some(Reservation {
+                key,
+                generation: flow.generation,
+                is_new: false,
+                from_initiator: false,
+                event: connection.event,
+            })
+        } else {
+            None
+        };
         Some((target, plan, reservation))
     }
 
     fn reply_key(&self, packet: &ValidatedPacket, peer: &impl PeerConfigView) -> Option<&Tuple> {
         let (reverse, related) = match packet.association() {
-            FlowAssociation::Connection { protocol, tuple, event } => {
-                if event.starts_new_tcp() { return None; }
-                (Reverse { peer: peer.id().to_owned(), proto: protocol, src: tuple.src, sport: tuple.src_port, dst: tuple.dst, dport: tuple.dst_port }, false)
+            FlowAssociation::Connection(connection) => {
+                if connection.event.starts_new_tcp() {
+                    return None;
+                }
+                let tuple = connection.tuple;
+                (
+                    Reverse {
+                        peer: peer.id().to_owned(),
+                        proto: connection.event.protocol().number(),
+                        src: tuple.src,
+                        sport: tuple.src_port,
+                        dst: tuple.dst,
+                        dport: tuple.dst_port,
+                    },
+                    false,
+                )
             }
-            FlowAssociation::Related { protocol, tuple } => {
-                if packet.dst() != tuple.src { return None; }
-                (Reverse { peer: peer.id().to_owned(), proto: protocol, src: tuple.dst, sport: tuple.dst_port, dst: tuple.src, dport: tuple.src_port }, true)
+            FlowAssociation::Related { protocol, quoted } => {
+                if packet.dst() != quoted.src {
+                    return None;
+                }
+                (
+                    Reverse {
+                        peer: peer.id().to_owned(),
+                        proto: protocol.number(),
+                        src: quoted.dst,
+                        sport: quoted.dst_port,
+                        dst: quoted.src,
+                        dport: quoted.src_port,
+                    },
+                    true,
+                )
             }
             FlowAssociation::Stateless => return None,
         };
         let key = self.reverse.get(&reverse)?;
         let flow = self.flows.get(key)?;
-        if flow.backend_key != peer.key_identity() || (related && packet.src() != peer.ip()) { return None; }
+        if flow.backend_key != peer.key_identity() || (related && packet.src() != peer.ip()) {
+            return None;
+        }
         Some(key)
     }
 
-    pub(crate) fn has_reply_mapping(&self, packet: &ValidatedPacket, peer: &impl PeerConfigView, now: Instant) -> bool {
-        self.reply_key(packet, peer).and_then(|key| self.flows.get(key).map(|flow| flow.deadline() > now)).unwrap_or(false)
+    pub(crate) fn has_reply_mapping(
+        &self,
+        packet: &ValidatedPacket,
+        peer: &impl PeerConfigView,
+        now: Instant,
+    ) -> bool {
+        self.reply_key(packet, peer)
+            .and_then(|key| self.flows.get(key).map(|flow| flow.deadline() > now))
+            .unwrap_or(false)
     }
 }
 
-impl Flow { fn deadline(&self) -> Instant { self.state.deadline(self.last) } }
+impl Flow {
+    fn deadline(&self) -> Instant {
+        self.state.deadline(self.last)
+    }
+}
 
 #[cfg(test)]
 mod tests;

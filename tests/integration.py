@@ -5,6 +5,7 @@ import contextlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import secrets
 import shutil
 import signal
@@ -351,7 +352,77 @@ def stop_processes(processes):
             process.wait()
 
 
+def initial_invalid_snapshot_fails_before_http(directory):
+    """Exercise the real binary's startup ordering with a persisted bad snapshot."""
+    database = directory / "invalid-startup.sqlite3"
+    key = directory / "invalid-startup.key"
+    token = secrets.token_urlsafe(32)
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith("WIREHUB_")}
+    with reserve_hub_port() as port:
+        environment.update(WIREHUB_PORT=str(port), WIREHUB_HTTP_BIND="127.0.0.1",
+                            WIREHUB_ADMIN_TOKEN=token, WIREHUB_DB=str(database),
+                            WIREHUB_HUB_KEY=str(key))
+
+    seed_log_path = directory / "invalid-startup-seed.log"
+    with seed_log_path.open("wb") as seed_log:
+        seed = subprocess.Popen([str(ROOT / "target/debug/wirehub")], cwd=directory,
+                                env=environment, stdin=subprocess.DEVNULL,
+                                stdout=seed_log, stderr=seed_log)
+        try:
+            base = wait_ready(seed, "invalid-snapshot database seeder",
+                              url=f"http://127.0.0.1:{port}/api/health")
+            request(base + "/setup", token, "POST", {
+                "subnet": "172.23.45.0/24", "endpoint": f"127.0.0.1:{port}",
+                "persistent_keepalive": 5,
+            })
+            group = request(base + "/groups", token, "POST", {"name": "invalid-startup"},
+                            expected=201)
+            request(base + "/peers", token, "POST", {
+                "name": "invalid-key", "group_id": group["id"],
+            }, expected=201)
+        finally:
+            stop_processes([seed])
+
+    # Store::open intentionally rejects malformed persisted settings. A peer key
+    # value is accepted by the current SQL schema/open validation, but rejected
+    # while compiling the initial runtime snapshot.
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE peers SET public_key = ? WHERE id = (SELECT id FROM peers LIMIT 1)",
+                   ("not-base64!",))
+        check(db.execute("SELECT public_key FROM peers LIMIT 1").fetchone()[0]
+              == "not-base64!", "failed to persist invalid runtime peer key")
+
+    process_log_path = directory / "invalid-startup.log"
+    with process_log_path.open("wb") as process_log:
+        process = subprocess.Popen([str(ROOT / "target/debug/wirehub")], cwd=directory,
+                                   env=environment, stdin=subprocess.DEVNULL,
+                                   stdout=process_log, stderr=process_log)
+        try:
+            deadline = time.monotonic() + 10
+            while process.poll() is None and time.monotonic() < deadline:
+                time.sleep(.05)
+            check(process.poll() is not None, "invalid initial snapshot process did not exit")
+            check(process.returncode != 0, "invalid initial snapshot process exited successfully")
+            with process_log_path.open("rb") as log:
+                output = log.read().decode("utf-8", errors="replace")
+            check("Snapshot(SnapshotLoadError)" in output,
+                  f"startup did not report initial snapshot failure: {output.strip()}")
+            try:
+                with HTTP.open(f"http://127.0.0.1:{port}/api/health", timeout=1) as response:
+                    check(response.status != 200,
+                          "invalid initial snapshot process served HTTP 200")
+            except (OSError, urllib.error.URLError):
+                pass
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                check(probe.connect_ex(("127.0.0.1", port)) != 0,
+                      "HTTP port remained listening after initial snapshot failure")
+        finally:
+            stop_processes([process])
+
+
 def run_scenario(directory, client_binary):
+    initial_invalid_snapshot_fails_before_http(directory)
     processes = []
     with contextlib.ExitStack() as resources:
         def launch(label, command, environment):

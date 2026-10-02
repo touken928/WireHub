@@ -1,8 +1,11 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-use axum::{http::{HeaderMap, StatusCode}, response::IntoResponse};
+use crate::{kernel::KernelHandle, model::*, storage::Store};
+use axum::{
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+};
 use rand::RngCore;
-use crate::{model::*, storage::Store, kernel::{Readiness, ReloadCommand, RuntimeStats}};
 
 mod forwards;
 mod groups;
@@ -19,17 +22,20 @@ pub struct AppState {
     pub store: Arc<Store>,
     pub token: Option<String>,
     pub hub_public: String,
-    pub reload_tx: tokio::sync::mpsc::Sender<ReloadCommand>,
-    pub runtime_stats: RuntimeStats,
-    pub readiness: Readiness,
+    pub kernel: KernelHandle,
 }
 
 pub(crate) fn auth(headers: &HeaderMap, state: &AppState) -> bool {
-    state.token.as_ref()
+    state
+        .token
+        .as_ref()
         .filter(|token| !token.trim().is_empty())
-        .is_some_and(|token| headers.get("authorization")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value == format!("Bearer {token}")))
+        .is_some_and(|token| {
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value == format!("Bearer {token}"))
+        })
 }
 
 pub(crate) fn err(status: StatusCode, message: &str) -> impl IntoResponse {
@@ -37,13 +43,7 @@ pub(crate) fn err(status: StatusCode, message: &str) -> impl IntoResponse {
 }
 
 pub(crate) async fn reload(state: &AppState) -> bool {
-    let (ack, wait) = tokio::sync::oneshot::channel();
-    if tokio::time::timeout(Duration::from_secs(3), state.reload_tx.send(ReloadCommand { ack }))
-        .await.is_err()
-    {
-        return false;
-    }
-    matches!(tokio::time::timeout(Duration::from_secs(3), wait).await, Ok(Ok(Ok(()))))
+    state.kernel.reload().await.is_ok()
 }
 
 pub(crate) fn is_input_error(error: &rusqlite::Error) -> bool {
@@ -57,13 +57,16 @@ pub(crate) fn creation_error(error: rusqlite::Error, duplicate: &str) -> axum::r
     let detail = error.to_string();
     let response = if detail.contains("network setup is required") {
         err(StatusCode::CONFLICT, "setup required")
-    } else if detail.contains("invalid group reference") || detail.contains("invalid target peer reference") {
+    } else if detail.contains("invalid group reference")
+        || detail.contains("invalid target peer reference")
+    {
         err(StatusCode::BAD_REQUEST, "invalid reference")
     } else if detail.contains("name must not be empty") {
         err(StatusCode::BAD_REQUEST, "name must not be empty")
     } else if is_input_error(&error) {
         err(StatusCode::BAD_REQUEST, "invalid name")
-    } else if matches!(error, Error::SqliteFailure(ref failure, _) if failure.code == ErrorCode::ConstraintViolation) {
+    } else if matches!(error, Error::SqliteFailure(ref failure, _) if failure.code == ErrorCode::ConstraintViolation)
+    {
         err(StatusCode::CONFLICT, duplicate)
     } else {
         err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
@@ -100,16 +103,25 @@ pub async fn health() -> axum::Json<Status> {
 }
 
 #[utoipa::path(get, path = "/api/ready", responses((status = 200, body = Status), (status = 503, body = Status)))]
-pub async fn ready(axum::extract::State(state): axum::extract::State<AppState>) -> impl IntoResponse {
-    if state.readiness.is_ready() {
+pub async fn ready(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> impl IntoResponse {
+    if state.kernel.is_ready() {
         (StatusCode::OK, axum::Json(Status { ok: true })).into_response()
     } else {
-        (StatusCode::SERVICE_UNAVAILABLE, axum::Json(Status { ok: false })).into_response()
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(Status { ok: false }),
+        )
+            .into_response()
     }
 }
 
 pub fn router(state: AppState) -> axum::Router {
-    use axum::{routing::{delete, get, put}, Router};
+    use axum::{
+        routing::{delete, get, put},
+        Router,
+    };
     Router::new()
         .route("/api/health", get(health))
         .route("/api/ready", get(ready))
@@ -137,14 +149,41 @@ pub fn openapi() -> String {
     use utoipa::OpenApi;
     #[derive(OpenApi)]
     #[openapi(
-        paths(health, ready,
-            settings::get_setup, settings::post_setup, settings::put_settings,
-            groups::list_groups, groups::create_group, groups::delete_group, groups::set_acl,
-            peers::list_peers, peers::create_peer, peers::delete_peer, peers::move_peer,
-            forwards::list_forwards, forwards::create_forward, forwards::delete_forward),
-        components(schemas(NetworkSettings, SetupStatus, SetupRequest, SettingsRequest,
-            Group, Peer, PeerStatus, NewGroup, NewPeer, PeerProvision, MovePeer, SetAcl,
-            Status, Forward, NewForward))
+        paths(
+            health,
+            ready,
+            settings::get_setup,
+            settings::post_setup,
+            settings::put_settings,
+            groups::list_groups,
+            groups::create_group,
+            groups::delete_group,
+            groups::set_acl,
+            peers::list_peers,
+            peers::create_peer,
+            peers::delete_peer,
+            peers::move_peer,
+            forwards::list_forwards,
+            forwards::create_forward,
+            forwards::delete_forward
+        ),
+        components(schemas(
+            NetworkSettings,
+            SetupStatus,
+            SetupRequest,
+            SettingsRequest,
+            Group,
+            Peer,
+            PeerStatus,
+            NewGroup,
+            NewPeer,
+            PeerProvision,
+            MovePeer,
+            SetAcl,
+            Status,
+            Forward,
+            NewForward
+        ))
     )]
     struct Doc;
     Doc::openapi().to_pretty_json().unwrap()

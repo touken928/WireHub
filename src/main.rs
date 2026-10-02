@@ -1,11 +1,11 @@
 mod api;
+mod hub_key;
+mod kernel;
 mod model;
 mod network;
-mod kernel;
-mod storage;
-mod static_assets;
 mod startup;
-mod hub_key;
+mod static_assets;
+mod storage;
 
 #[tokio::main]
 async fn main() -> startup::Result<()> {

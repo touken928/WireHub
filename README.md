@@ -149,3 +149,12 @@ Peer provisioning records its pending state without storing the private key. Pen
 Hub-key files are created exclusively with mode `0600`. Startup rejects symlinks, non-regular files, files with permissions other than `0600`, and keys that are not exactly 32 bytes. It checks the opened file's device and inode against the inspected path and validates permissions again before reading. Existing keys are never silently repaired or replaced.
 
 Publication syncs an exclusive temporary file, creates a non-overwriting hard link, removes the temporary file, and syncs the parent directory. Store the key in a directory controlled by the account running WireHub on a filesystem that supports hard links and directory syncing. Back up `wirehub.sqlite3` and `wirehub.key` together, preserving mode `0600` when restoring the key.
+# Runtime startup
+
+The network kernel loads, validates, installs, and publishes the initial
+persisted snapshot before HTTP is constructed or served. `Kernel::initialize`
+returns an initialized kernel and a cloneable, read-only control handle;
+readiness, acknowledged configuration reload, and per-peer runtime statistics
+are exposed through that handle. The kernel is running while its `run` future is
+being polled. If that future stops or is cancelled, readiness is cleared
+automatically.

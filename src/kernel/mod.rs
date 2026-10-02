@@ -1,12 +1,28 @@
 //! Network kernel: packet protocols, flow state, policy, and WireGuard routing.
 mod checksum;
-mod flows;
+pub(crate) mod control;
 pub(crate) mod dataplane;
+mod flows;
 mod ipv4;
 mod policy;
 mod protocol;
 mod runtime;
-mod wireguard;
 pub(crate) mod snapshot;
+mod wireguard;
 
-pub use runtime::{run_udp, Readiness, ReloadCommand, RuntimeStats, SnapshotLoader};
+pub use control::KernelHandle;
+#[expect(
+    unused_imports,
+    reason = "public kernel API facade re-exports statistics and reload error types"
+)]
+pub use control::{PeerRuntimeStats, ReloadError};
+#[cfg_attr(
+    not(test),
+    expect(
+        unused_imports,
+        reason = "public kernel API facade re-exports initialization error type"
+    )
+)]
+pub use runtime::StartError;
+pub use runtime::{Kernel, RunError, SnapshotLoadError};
+pub use snapshot::CompiledSnapshot;
