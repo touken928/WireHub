@@ -16,7 +16,7 @@ pub(super) fn retain_pending(queue:&mut VecDeque<PendingDelivery>, bytes:&mut us
     queue.retain(|item| {
         let source=peers.get(&item.source_id);let target=peers.get(&item.target_id);
         let identities=item.packet.src()==item.source_ip && source.is_some_and(|p|p.peer.public_key==item.source_key && p.peer.ipv4.parse::<Ipv4Addr>().ok()==Some(item.source_ip)) && target.is_some_and(|p|p.peer.public_key==item.target_key && p.peer.ipv4.parse::<Ipv4Addr>().ok()==Some(item.target_ip));
-        let route_allowed=if item.reply_only { source.is_some_and(|p|nat.has_reply_mapping(&item.packet,&p.peer,Instant::now())) } else if let Some(id)=&item.forward_id { source.zip(target).is_some_and(|(s,t)|forwards.iter().any(|f|&f.id==id && Some(f.protocol.as_str())==item.forward_protocol.as_deref() && Some(f.target_port)==item.forward_target_port && Some(item.packet.dst())==hub && f.target_peer_id==item.target_id && policy::forward_allowed(f,&s.peer.group_id,s.group.as_ref(),&t.peer.group_id))) } else { source.zip(target).is_some_and(|(s,t)|ipv4::group_route_allowed(s.group.as_ref(),t.group.as_ref())) };
+        let route_allowed=if item.reply_only { source.is_some_and(|p|nat.has_reply_mapping(&item.packet,&p.peer,Instant::now())) } else if let Some(id)=&item.forward_id { source.zip(target).is_some_and(|(s,t)|forwards.iter().any(|f|&f.id==id && Some(f.protocol.as_str())==item.forward_protocol.as_deref() && Some(f.target_port)==item.forward_target_port && Some(item.packet.dst())==hub && f.target_peer_id==item.target_id && policy::forward_allowed(f,&s.peer.group_id,s.group.as_ref(),&t.peer.group_id))) } else { source.zip(target).is_some_and(|(s,t)|policy::route_allowed(s.group.as_ref(),t.group.as_ref())) };
         let valid=identities && route_allowed;
         if !valid { *bytes=bytes.saturating_sub(item.packet.bytes().len()); }
         valid
@@ -28,7 +28,7 @@ pub(super) fn resolve_packet(packet: &ipv4::ValidatedPacket, source: &Peer, sour
         return (Some(DeliveryPlan { source_id: source_id.into(), target_id, bytes, reservation: Some(reservation), forward_id:None }), true);
     }
     // An unassociated error must never fall back to an ACL route or a new flow.
-    if packet.is_icmp_error() { return (None, true); }
+    if matches!(packet.association(), FlowAssociation::Related { .. }) { return (None, true); }
     let mut terminal = false;
     let mut plan = None;
     if packet.dst() == hub_ip.unwrap_or(Ipv4Addr::UNSPECIFIED) {
@@ -44,8 +44,8 @@ pub(super) fn resolve_packet(packet: &ipv4::ValidatedPacket, source: &Peer, sour
     }
     if !terminal {
         if let Some(target) = peers.values().find(|p| p.peer.ipv4.parse().ok() == Some(packet.dst())) {
-            if ipv4::group_route_allowed(Some(source_group), target.group.as_ref()) {
-                if !matches!(packet.protocol(), 6 | 17) {
+            if policy::route_allowed(Some(source_group), target.group.as_ref()) {
+                if matches!(packet.association(), FlowAssociation::Stateless) {
                     plan = Some(DeliveryPlan { source_id: source_id.into(), target_id: target.peer.id.clone(), bytes: packet.bytes().to_vec(), reservation: None, forward_id:None });
                 } else if let Some((bytes, reservation)) = nat.prepare_direct(packet, source, &target.peer, now) {
                     plan = Some(DeliveryPlan { source_id: source_id.into(), target_id: target.peer.id.clone(), bytes, reservation: Some(reservation), forward_id:None });

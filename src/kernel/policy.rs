@@ -1,6 +1,14 @@
 use std::net::Ipv4Addr;
 use crate::model::{Forward, Group, Peer};
 
+/// Borrowed authorization context, independent of WireGuard tunnel state.
+#[derive(Clone, Copy)]
+pub(super) struct PeerPolicy<'a> { pub peer: &'a Peer, pub group: Option<&'a Group> }
+
+pub(super) fn route_allowed(source: Option<&Group>, destination: Option<&Group>) -> bool {
+    matches!((source, destination), (Some(s), Some(d)) if allows(s, d))
+}
+
 /// Directed, default-deny group policy. Same-group traffic is denied unless explicitly allowed.
 pub fn allows(source: &Group, destination: &Group) -> bool {
     source.allowed_groups.iter().any(|id| id == &destination.id)

@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use axum::{http::{HeaderMap, StatusCode}, response::IntoResponse};
 use rand::RngCore;
-use crate::{model::*, storage::Store, transport::{Readiness, ReloadCommand, RuntimeStats}};
+use crate::{model::*, storage::Store, kernel::{Readiness, ReloadCommand, RuntimeStats}};
 
 mod forwards;
 mod groups;

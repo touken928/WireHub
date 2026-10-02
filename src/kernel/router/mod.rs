@@ -6,10 +6,9 @@ use boringtun::{noise::{handshake::parse_handshake_anon, rate_limiter::RateLimit
 use std::sync::atomic::AtomicUsize;
 use tokio::{net::UdpSocket, sync::{mpsc, oneshot, RwLock}, time};
 
-#[path = "ipv4.rs"]
-pub(crate) mod ipv4;
+use super::{ipv4, protocol::FlowAssociation};
 
-use crate::{model::{Forward, Group, Peer}, flows::{Flows, Reservation}, network::Subnet24, storage::Store, policy};
+use crate::{model::{Forward, Group, Peer}, kernel::{flows::{Flows, Reservation}, config::Subnet24, policy}, storage::Store};
 
 const TIMER: Duration = Duration::from_secs(1);
 const PENDING_LIMIT: usize = 256;
@@ -95,6 +94,10 @@ pub(crate) struct RuntimePeer {
     pub(crate) last_data_unix: Option<i64>,
     receiver_index: u32,
 }
+impl RuntimePeer {
+    fn policy(&self) -> policy::PeerPolicy<'_> { policy::PeerPolicy { peer: &self.peer, group: self.group.as_ref() } }
+}
+
 
 /// Mutable routing state installed by a single validated snapshot.
 #[derive(Default)]
@@ -128,7 +131,6 @@ mod snapshot;
 mod delivery;
 
 #[cfg(test)]
-#[path = "transport/tests.rs"]
 mod tests;
 
 pub async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [u8; 32], commands: mpsc::Receiver<ReloadCommand>, stats: RuntimeStats, readiness: Readiness, startup: Option<oneshot::Sender<Result<(), ()>>>) -> Result<(), ()> {

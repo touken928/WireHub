@@ -133,6 +133,8 @@ TCP flows that have completed the three-way handshake have an idle timeout of **
 
 Related ICMP destination-unreachable, time-exceeded, and parameter-problem errors from the authenticated backend are returned through existing live TCP/UDP mappings, with the quoted original packet restored. ICMP errors do not extend flow lifetimes or create new mappings.
 
+The backend's network kernel is organized under [`src/kernel/`](src/kernel/README.md), with shared protocol interfaces for TCP, UDP and ICMP, common flow management, and WireGuard routing.
+
 ---
 
 Each version tag publishes **Linux amd64 / arm64** binaries to GitHub Releases, along with **amd64 / arm64** Docker images. See [`v0`](https://github.com/touken928/WireHub/tree/v0) for the previous version.

@@ -1,6 +1,6 @@
 use std::{env, net::{Ipv4Addr, SocketAddr}, path::Path, sync::Arc};
 use boringtun::x25519::{PublicKey, StaticSecret};
-use crate::{api, hub_key, storage::Store, transport};
+use crate::{api, hub_key, storage::Store, kernel};
 use tokio::sync::mpsc;
 
 pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -21,14 +21,14 @@ pub(crate) async fn run() -> Result<()> {
     store.recover_pending_provisions()?;
     let public=PublicKey::from(&StaticSecret::from(private));
     let (reload_tx, reload_rx) = mpsc::channel(16);
-    let runtime_stats = transport::RuntimeStats::default();
-    let readiness=transport::Readiness::default();
+    let runtime_stats = kernel::RuntimeStats::default();
+    let readiness=kernel::Readiness::default();
     let state = api::AppState { store: store.clone(), token:Some(token), hub_public:base64::Engine::encode(&base64::engine::general_purpose::STANDARD,public.as_bytes()), reload_tx, runtime_stats: runtime_stats.clone(), readiness:readiness.clone() };
     let app = api::router(state);
     let tcp = tokio::net::TcpListener::bind(SocketAddr::from((bind, port))).await?;
     let udp = tokio::net::UdpSocket::bind(SocketAddr::from(([0,0,0,0], port))).await?;
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let udp_task=tokio::spawn(transport::run_udp(udp, store, private, reload_rx, runtime_stats, readiness.clone(), Some(ready_tx)));
+    let udp_task=tokio::spawn(kernel::run_udp(udp, store, private, reload_rx, runtime_stats, readiness.clone(), Some(ready_tx)));
     match ready_rx.await {
         Err(_) => return Err("UDP router failed during startup".into()),
         Ok(Err(())) => return Err("failed to load persisted peers; refusing to start".into()),
@@ -40,7 +40,7 @@ pub(crate) async fn run() -> Result<()> {
 async fn supervise_udp_and_http<F>(
     mut udp_task: tokio::task::JoinHandle<std::result::Result<(), ()>>,
     http: F,
-    readiness: transport::Readiness,
+    readiness: kernel::Readiness,
 ) -> Result<()>
 where
     F: std::future::Future<Output = std::io::Result<()>>,
@@ -86,7 +86,7 @@ mod supervision_tests {
     }
 
     async fn assert_udp_exit(task: tokio::task::JoinHandle<std::result::Result<(), ()>>, expected: &str) {
-        let readiness = transport::Readiness::default();
+        let readiness = kernel::Readiness::default();
         readiness.set(true);
         let (http_dropped_tx, http_dropped_rx) = oneshot::channel();
         let result = tokio::time::timeout(
@@ -111,7 +111,7 @@ mod supervision_tests {
     }
 
     async fn assert_http_completion(result: io::Result<()>, should_succeed: bool) {
-        let readiness = transport::Readiness::default();
+        let readiness = kernel::Readiness::default();
         readiness.set(true);
         let (udp_dropped_tx, udp_dropped_rx) = oneshot::channel();
         let (udp_started_tx, udp_started_rx) = oneshot::channel();

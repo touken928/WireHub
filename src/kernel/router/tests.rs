@@ -1,4 +1,5 @@
 use super::*;
+use crate::kernel::checksum::checksum;
 use super::delivery::*;
 use super::snapshot::*;
     use crate::model::Group;
@@ -145,7 +146,7 @@ use super::snapshot::*;
         }
         let source_group=Group{id:"source".into(),name:"source".into(),allowed_groups:vec!["backend".into()]};
         let backend_group=Group{id:"backend".into(),name:"backend".into(),allowed_groups:vec![]};
-        let mut peers=HashMap::new();
+        let mut peers: HashMap<String, RuntimePeer> = HashMap::new();
         peers.insert("source".into(),runtime_peer("source","10.77.0.2",source_group.clone(),[91;32],0x100));
         peers.insert("backend".into(),runtime_peer("backend","10.77.0.3",backend_group,[92;32],0x200));
         let source=peers["source"].peer.clone();let backend=peers["backend"].peer.clone();
@@ -159,7 +160,7 @@ use super::snapshot::*;
 
         // A newly configured UDP service claims the old UDP mapping's SNAT port.
         let mut new_forwards=old_forwards.clone();new_forwards.push(forward("udp-40000","udp",40000));
-        flows.reconcile(Some("10.77.0.1".parse().unwrap()),Some("10.77.0.1".parse().unwrap()),&old_forwards,&new_forwards,&peers);
+        flows.reconcile(Some("10.77.0.1".parse().unwrap()),Some("10.77.0.1".parse().unwrap()),&old_forwards,&new_forwards,|id| peers.get(id).map(RuntimePeer::policy));
 
         let reply=|protocol,source_port,destination_port|ipv4::validate_forwarded(&service_packet(protocol,[10,77,0,3],[10,77,0,1],source_port,destination_port,0,b"reply")).unwrap();
         assert!(flows.lookup_reply(&reply(17,9000,40000),&backend,Instant::now()).is_none(),"stale UDP reply must not shadow the newly configured UDP service");
@@ -552,7 +553,7 @@ use super::snapshot::*;
         assert_eq!(&restored[40..48],&[192,168,44,2,192,168,44,1]);
         assert_eq!(u16::from_be_bytes([restored[48],restored[49]]),12345);
         assert_eq!(u16::from_be_bytes([restored[26],restored[27]]),1280);
-        assert_eq!(ipv4::checksum(&restored[..20]),0);assert_eq!(ipv4::checksum(&restored[20..]),0);assert_eq!(ipv4::checksum(&restored[28..48]),0);
+        assert_eq!(checksum(&restored[..20]),0);assert_eq!(checksum(&restored[20..]),0);assert_eq!(checksum(&restored[28..48]),0);
         let wrong_peer_error=ipv4::test_icmp_error(Ipv4Addr::new(192,168,44,5),Ipv4Addr::new(192,168,44,1),3,4,&udp_quote[..28]);
         send_inner(&sockets[3],address,&mut clients[3],&wrong_peer_error,&mut tx).await;
         assert_no_inner(&sockets[0],address,&mut clients[0],&mut rx,&mut tx).await;
@@ -1221,7 +1222,7 @@ use super::snapshot::*;
         // Model an ACL revocation in the acknowledged snapshot. The cold queue
         // is discarded before a later target handshake can drain it.
         peers.get_mut("a").unwrap().group.as_mut().unwrap().allowed_groups.clear();
-        nat.reconcile(Some(Ipv4Addr::new(10,88,0,1)),Some(Ipv4Addr::new(10,88,0,1)),&[forward.clone()],&[forward.clone()],&peers);
+        nat.reconcile(Some(Ipv4Addr::new(10,88,0,1)),Some(Ipv4Addr::new(10,88,0,1)),&[forward.clone()],&[forward.clone()],|id| peers.get(id).map(RuntimePeer::policy));
         retain_pending(&mut queue,&mut queued_bytes,&peers,&[forward],Some(Ipv4Addr::new(10,88,0,1)),&nat);
         assert!(queue.is_empty(),"revoked queued SYN must be purged before target handshake");
         assert_eq!(queued_bytes,0);
@@ -1479,9 +1480,9 @@ use super::snapshot::*;
             packet[20] = kind;
             packet[24..26].copy_from_slice(&0x1234u16.to_be_bytes());
             packet[26..28].copy_from_slice(&1u16.to_be_bytes());
-            let icmp_checksum = ipv4::checksum(&packet[20..]);
+            let icmp_checksum = checksum(&packet[20..]);
             packet[22..24].copy_from_slice(&icmp_checksum.to_be_bytes());
-            let ip_checksum = ipv4::checksum(&packet[..20]);
+            let ip_checksum = checksum(&packet[..20]);
             packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
             packet
         };
@@ -1505,7 +1506,7 @@ use super::snapshot::*;
         let mut expected_request = request_raw.clone();
         expected_request[8] = 63;
         expected_request[10..12].fill(0);
-        let expected_ip_checksum = ipv4::checksum(&expected_request[..20]);
+        let expected_ip_checksum = checksum(&expected_request[..20]);
         expected_request[10..12].copy_from_slice(&expected_ip_checksum.to_be_bytes());
         assert_eq!(plan.bytes, expected_request, "only IPv4 TTL/checksum change, exactly once");
 
@@ -1538,7 +1539,7 @@ fn established_tcp_survives_reload_but_acl_revocation_removes_flow_and_queued_ic
     // Later ACK/data also confirms establishment when the original final ACK was lost.
     let ack=tcp_packet([10,88,0,2],hub.octets(),1234,443,0x10,110,201);
     let (_,r)=nat.prepare_forward_packet(&ack,a,&forward,b,now).unwrap();nat.complete(r,true,now);
-    nat.reconcile(Some(hub),Some(hub),&[forward.clone()],&[forward.clone()],&peers);
+    nat.reconcile(Some(hub),Some(hub),&[forward.clone()],&[forward.clone()],|id| peers.get(id).map(RuntimePeer::policy));
     nat.expire(now+Duration::from_secs(301));assert_eq!(nat.test_state_counts(),(1,0));
     let raw=ipv4::test_icmp_error(b.ipv4.parse().unwrap(),hub,3,4,&translated[..28]);
     let error=ipv4::validate(&raw,b,peers["b"].group.as_ref()).unwrap();
@@ -1549,7 +1550,7 @@ fn established_tcp_survives_reload_but_acl_revocation_removes_flow_and_queued_ic
     let mut queue=VecDeque::from([pending]);let mut bytes=raw.len();
     retain_pending(&mut queue,&mut bytes,&peers,&[forward.clone()],Some(hub),&nat);assert_eq!(queue.len(),1);
     peers.get_mut("a").unwrap().group.as_mut().unwrap().allowed_groups.clear();
-    nat.reconcile(Some(hub),Some(hub),&[forward.clone()],&[forward.clone()],&peers);
+    nat.reconcile(Some(hub),Some(hub),&[forward.clone()],&[forward.clone()],|id| peers.get(id).map(RuntimePeer::policy));
     retain_pending(&mut queue,&mut bytes,&peers,&[forward.clone()],Some(hub),&nat);
     assert_eq!(nat.test_state_counts(),(0,0));assert!(queue.is_empty());assert_eq!(bytes,0);
     let (plan,_)=resolve_packet(&error,&peers["b"].peer,peers["b"].group.as_ref().unwrap(),"b",&peers,&[forward],Some(hub),&mut nat,now);

@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::Arc;
 use axum::{extract::{Path, State}, http::{header, HeaderMap, StatusCode}, response::IntoResponse, Json};
-use crate::{storage::Store, transport::{Readiness, ReloadCommand, RuntimeStats}};
+use crate::{storage::Store, kernel::{Readiness, ReloadCommand, RuntimeStats}};
     fn test_state(configured:bool)->(AppState,tokio::sync::mpsc::Receiver<ReloadCommand>,HeaderMap){
         let store=Arc::new(Store::open(":memory:").unwrap());store.bind_test_identity();if configured{store.setup("10.88.0.0/24","hub.example:51820",25).unwrap();}
         let (reload_tx,reload_rx)=tokio::sync::mpsc::channel(8);let state=AppState{store,token:Some("secret".into()),hub_public:String::new(),reload_tx,runtime_stats:RuntimeStats::default(),readiness:Readiness::default()};let mut headers=HeaderMap::new();headers.insert("authorization","Bearer secret".parse().unwrap());(state,reload_rx,headers)

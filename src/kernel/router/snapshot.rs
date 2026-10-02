@@ -7,7 +7,7 @@ pub(super) async fn apply_snapshot(store:&Store,key:[u8;32],limiter:Arc<RateLimi
     let updated_hub_ip=snapshot.settings.as_ref().map(|settings|Subnet24::parse(&settings.subnet).map_err(|_|())?.hub_ip().parse::<Ipv4Addr>().map_err(|_|())).transpose()?;
     let updated_forwards=snapshot.forwards;
     install_peers(&snapshot.groups,snapshot.peers,key,limiter,state,old)?;
-    state.flows.reconcile(state.hub_ip,updated_hub_ip,&state.forwards,&updated_forwards,&state.peers);
+    state.flows.reconcile(state.hub_ip,updated_hub_ip,&state.forwards,&updated_forwards,|id| state.peers.get(id).map(RuntimePeer::policy));
     retain_pending(&mut state.pending,&mut state.pending_bytes,&state.peers,&updated_forwards,updated_hub_ip,&state.flows);
     state.forwards=updated_forwards;state.hub_ip=updated_hub_ip;
     publish_stats(&state.peers,stats).await;

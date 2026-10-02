@@ -1,11 +1,8 @@
 mod api;
 mod model;
-mod flows;
-mod network;
-mod policy;
+mod kernel;
 mod storage;
 mod static_assets;
-mod transport;
 mod startup;
 mod hub_key;
 

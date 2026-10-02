@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
-use crate::{model::{Forward, Group, Peer}, network::{self, NetworkSettings, Subnet24}};
+use crate::{model::{Forward, Group, Peer}, kernel::config::{self as network, NetworkSettings, Subnet24}};
 mod schema;
 mod identity;
 #[cfg(test)]
