@@ -38,7 +38,11 @@ export default function App() {
   const [forwards, setForwards] = useState<Forward[]>([])
   const [busy, setBusy] = useState(false)
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null)
-  const [pendingPeer, setPendingPeer] = useState<string | null>(null)
+  const [pendingPeers, setPendingPeers] = useState<Set<string>>(() => new Set())
+  const pendingPeersRef = useRef(new Set<string>())
+  const [settingsSaving, setSettingsSaving] = useState(false)
+  const [settingsError, setSettingsError] = useState('')
+  const settingsPendingRef = useRef(false)
   const [error, setError] = useState('')
   const [forwardsError, setForwardsError] = useState('')
   const [query, setQuery] = useState('')
@@ -50,14 +54,25 @@ export default function App() {
   const [loginBusy, setLoginBusy] = useState(false)
   const [setup, setSetup] = useState<SetupStatus | null>(null)
   const sessionRef = useRef(0)
-  // Confirmed writes invalidate every read begun before them, including cascade data.
+  // Reads share one freshness boundary, including policy recovery. ACL writes
+  // invalidate at both start and settlement: a failed response may still commit,
+  // and reads begun during a write cannot be trusted after it settles.
   const mutationEpochRef = useRef(0)
   const loadRef = useRef(0)
   const invalidateLoads = () => { ++mutationEpochRef.current }
+  const beginPeerMutation = (id: string) => {
+    if (pendingPeersRef.current.has(id)) return false
+    pendingPeersRef.current.add(id); setPendingPeers(new Set(pendingPeersRef.current))
+    return true
+  }
+  const finishPeerMutation = (id: string) => {
+    pendingPeersRef.current.delete(id); setPendingPeers(new Set(pendingPeersRef.current))
+  }
 
   const load = useCallback(async () => {
     if (!connected || !setup?.configured) return
     const session = sessionRef.current
+    invalidateLoads()
     const epoch = mutationEpochRef.current, request = ++loadRef.current
     const isCurrent = () => session === sessionRef.current && epoch === mutationEpochRef.current && request === loadRef.current
     setBusy(true); setError('')
@@ -101,7 +116,7 @@ export default function App() {
       setLoginError(e instanceof Error ? e.message : 'Connection failed. Check the server and token.')
     } finally { if (session === sessionRef.current) setLoginBusy(false) }
   }
-  const signOut = () => { if (policyDirty && !confirm('Sign out and discard unsaved policy changes?')) return; ++sessionRef.current; setConnected(false); setToken(''); rememberToken(''); setPeers([]); setGroups([]); setForwards([]); setSetup(null); setModal(null); setProvision(null); setError(''); setForwardsError(''); setToast(''); setLoginError(''); setMobileNav(false); setQuery(''); setBusy(false); setUpdatedAt(null); setPendingPeer(null); setPolicyDirty(false); setPage('overview') }
+  const signOut = () => { if (policyDirty && !confirm('Sign out and discard unsaved policy changes?')) return; ++sessionRef.current; setConnected(false); setToken(''); rememberToken(''); setPeers([]); setGroups([]); setForwards([]); setSetup(null); setModal(null); setProvision(null); setError(''); setForwardsError(''); setToast(''); setLoginError(''); setMobileNav(false); setQuery(''); setBusy(false); setUpdatedAt(null); pendingPeersRef.current.clear(); setPendingPeers(new Set()); settingsPendingRef.current = false; setSettingsSaving(false); setSettingsError(''); setPolicyDirty(false); setPage('overview') }
   const activeSession = sessionRef.current
   const filteredPeers = peers.filter(p => `${p.name} ${p.ipv4} ${groupName(groups, p.group_id)}`.toLowerCase().includes(query.toLowerCase()))
   const stats = useMemo(() => ({ online: peers.filter(p => Date.now() / 1000 - (p.last_handshake_unix ?? 0) < 180).length, sent: peers.reduce((s, p) => s + p.sent_bytes, 0), received: peers.reduce((s, p) => s + p.received_bytes, 0) }), [peers])
@@ -129,29 +144,59 @@ export default function App() {
       <div className="content-wrap" id="main-content" tabIndex={-1}>
         {error && <div className="error-banner" role="alert"><CircleHelp size={18} /><span>{error}</span><button onClick={() => void load()}>Retry</button></div>}
         {page === 'overview' && <Overview peers={peers} groups={groups} forwards={forwards} stats={stats} busy={busy} settings={setup?.settings ?? null} updatedAt={updatedAt} setPage={navigate} />}
-        {page === 'peers' && <PeersPage peers={filteredPeers} allCount={peers.length} groups={groups} query={query} setQuery={setQuery} onCreate={() => setModal('peer')} pendingPeer={pendingPeer} onCopied={() => setToast('IP copied')} onCopyError={() => setToast('Copy failed. Select the IP to copy it.')} onMove={async (peer, groupId) => {
-          const session = sessionRef.current; setPendingPeer(peer.id); setError('')
+        {page === 'peers' && <PeersPage peers={filteredPeers} allCount={peers.length} groups={groups} query={query} setQuery={setQuery} onCreate={() => setModal('peer')} pendingPeers={pendingPeers} onCopied={() => setToast('IP copied')} onCopyError={() => setToast('Copy failed. Select the IP to copy it.')} onMove={async (peer, groupId) => {
+          if (!beginPeerMutation(peer.id)) return
+          const session = sessionRef.current; setError('')
           try {
             const r = await client.PUT('/api/peers/{id}/group', { params: { path: { id: peer.id } }, body: { group_id: groupId } })
             if (session !== sessionRef.current) return
             if (r.error || !r.data) throw new Error('Move unconfirmed. Refresh to check the group.')
             invalidateLoads(); setPeers(v => v.map(x => x.id === peer.id ? r.data! : x)); setToast('Group updated')
           } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Unable to move peer.')) }
-          finally { if (session === sessionRef.current) setPendingPeer(null) }
+          finally { if (session === sessionRef.current) finishPeerMutation(peer.id) }
         }} onDelete={async peer => {
+          if (pendingPeersRef.current.has(peer.id)) return
           if (!confirm(`Remove peer "${peer.name}"? Its configuration will stop working.`)) return
-          const session = sessionRef.current; setPendingPeer(peer.id); setError('')
+          if (!beginPeerMutation(peer.id)) return
+          const session = sessionRef.current; setError('')
           try {
             const r = await client.DELETE('/api/peers/{id}', { params: { path: { id: peer.id } } })
             if (session !== sessionRef.current) return
             if (r.error) throw new Error('Deletion unconfirmed. Refresh to check the current state.')
             invalidateLoads(); setPeers(v => v.filter(x => x.id !== peer.id)); setForwards(v => v.filter(x => x.target_peer_id !== peer.id)); setToast('Peer removed')
           } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Unable to delete peer.')) }
-          finally { if (session === sessionRef.current) setPendingPeer(null) }
+          finally { if (session === sessionRef.current) finishPeerMutation(peer.id) }
         }} />}
-         {page === 'groups' && <GroupsPage onDirtyChange={setPolicyDirty} groups={groups} peers={peers} onCreate={() => setModal('group')} onSaved={() => { if (activeSession === sessionRef.current) setToast('Policy saved') }} onDelete={async g => { if (!confirm(`Delete group "${g.name}"?`)) return; try { const r = await client.DELETE('/api/groups/{id}', { params: { path: { id: g.id } } }); if (activeSession !== sessionRef.current) return; if (!r.error) { invalidateLoads(); setGroups(v => v.filter(x => x.id !== g.id).map(x => ({ ...x, allowed_groups: (x.allowed_groups ?? []).filter(id => id !== g.id) }))); setForwards(v => v.map(f => ({ ...f, allowed_group_ids: f.allowed_group_ids.filter(id => id !== g.id) }))); setToast('Group deleted') } else setError('Deletion unconfirmed. Refresh before retrying.') } catch (e) { if (activeSession === sessionRef.current) setError(mutationFailure(e, 'Unable to delete group.')) } }} onSaveAcl={async (id, allowed) => { const r = await client.PUT('/api/groups/{id}/acl', { params: { path: { id } }, body: { allowed_groups: allowed } }); if (activeSession !== sessionRef.current) throw new Error('Session ended.'); if (r.error || !r.data) throw new Error('Save unconfirmed. Reload the policy before retrying.'); invalidateLoads(); setGroups(v => v.map(g => g.id === id ? r.data! : g)) }} onReload={async () => { const epoch = mutationEpochRef.current; const r = await client.GET('/api/groups'); if (activeSession !== sessionRef.current) throw new Error('Session ended.'); if (epoch !== mutationEpochRef.current) throw new Error('Policy changed while reloading. Reload again.'); if (r.error || !r.data) throw new Error('Unable to reload policy.'); setGroups(r.data) }} />}
+         {page === 'groups' && <GroupsPage onDirtyChange={setPolicyDirty} groups={groups} peers={peers} onCreate={() => setModal('group')} onSaved={() => { if (activeSession === sessionRef.current) setToast('Policy saved') }} onDelete={async g => { if (!confirm(`Delete group "${g.name}"?`)) return; try { const r = await client.DELETE('/api/groups/{id}', { params: { path: { id: g.id } } }); if (activeSession !== sessionRef.current) return; if (!r.error) { invalidateLoads(); setGroups(v => v.filter(x => x.id !== g.id).map(x => ({ ...x, allowed_groups: (x.allowed_groups ?? []).filter(id => id !== g.id) }))); setForwards(v => v.map(f => ({ ...f, allowed_group_ids: f.allowed_group_ids.filter(id => id !== g.id) }))); setToast('Group deleted') } else setError('Deletion unconfirmed. Refresh before retrying.') } catch (e) { if (activeSession === sessionRef.current) setError(mutationFailure(e, 'Unable to delete group.')) } }} onSaveAcl={async (id, allowed) => {
+           if (activeSession !== sessionRef.current) throw new Error('Session ended.')
+           invalidateLoads()
+           try {
+             const r = await client.PUT('/api/groups/{id}/acl', { params: { path: { id } }, body: { allowed_groups: allowed } })
+             if (activeSession !== sessionRef.current) throw new Error('Session ended.')
+             if (r.error || !r.data) throw new Error('Save unconfirmed. Reload the policy before retrying.')
+             setGroups(v => v.map(g => g.id === id ? r.data! : g))
+           } finally { if (activeSession === sessionRef.current) invalidateLoads() }
+         }} onReload={async () => {
+           if (activeSession !== sessionRef.current) throw new Error('Session ended.')
+           invalidateLoads()
+           const epoch = mutationEpochRef.current
+           const r = await client.GET('/api/groups')
+           if (activeSession !== sessionRef.current) throw new Error('Session ended.')
+           if (epoch !== mutationEpochRef.current) throw new Error('Policy changed while reloading. Reload again.')
+           if (r.error || !r.data) throw new Error('Unable to reload policy.')
+           setGroups(r.data)
+         }} />}
           {page === 'forwards' && <ForwardsPage forwards={forwards} subnet={setup?.settings?.subnet ?? ''} loadError={forwardsError} onRetry={() => void load()} peers={peers} groups={groups} onCreate={() => setModal('forward')} onDelete={async f => { if (!confirm(`Delete forward "${f.name}"?`)) return; const session = sessionRef.current; try { await forwardsApi.remove(f.id); if (session !== sessionRef.current) return; invalidateLoads(); setForwards(v => v.filter(x => x.id !== f.id)); setToast('Forward deleted') } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Deletion unconfirmed. Refresh before retrying.')) } }} />}
-         {page === 'settings' && setup?.settings && <SettingsPage settings={setup.settings} onSaved={settings => { if (activeSession !== sessionRef.current) return; setSetup({ configured: true, settings }); setToast('Settings saved') }} />}
+          {page === 'settings' && setup?.settings && <SettingsPage settings={setup.settings} saving={settingsSaving} error={settingsError} onSave={async defaults => {
+            if (activeSession !== sessionRef.current || settingsPendingRef.current) return
+            settingsPendingRef.current = true; setSettingsSaving(true); setSettingsError('')
+            try {
+              const settings = await setupApi.update(defaults)
+              if (activeSession !== sessionRef.current) return
+              setSetup({ configured: true, settings }); setToast('Settings saved')
+            } catch (e) { if (activeSession === sessionRef.current) setSettingsError(mutationFailure(e, 'Unable to save settings.')) }
+            finally { if (activeSession === sessionRef.current) { settingsPendingRef.current = false; setSettingsSaving(false) } }
+          }} />}
       </div>
     </main>
     {modal && <Modal kind={modal} session={sessionRef.current} isSessionCurrent={session => session === sessionRef.current} groups={groups} peers={peers} forwards={forwards} subnet={setup?.settings?.subnet ?? ''} onClose={() => setModal(null)} onCreated={async value => {
@@ -220,21 +265,19 @@ function SetupWizard({ onConfigured }: { onConfigured: (settings: NetworkSetting
     <button className="button button-primary auth-submit" disabled={saving}>{saving ? <LoaderCircle size={16} className="spin" /> : <Plus size={16} />}{saving ? 'Creating…' : 'Create network'}</button>
   </form></div></main>
 }
-function SettingsPage({ settings, onSaved }: { settings: NetworkSettings; onSaved: (settings: NetworkSettings) => void }) {
+function SettingsPage({ settings, saving, error, onSave }: { settings: NetworkSettings; saving: boolean; error: string; onSave: (defaults: Pick<NetworkSettings, 'endpoint' | 'persistent_keepalive'>) => Promise<void> }) {
   const [endpoint, setEndpoint] = useState(settings.endpoint)
   const [keepalive, setKeepalive] = useState(String(settings.persistent_keepalive))
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
+  const [validationError, setValidationError] = useState('')
   useEffect(() => { setEndpoint(settings.endpoint); setKeepalive(String(settings.persistent_keepalive)) }, [settings])
   const submit = async (e: React.FormEvent) => {
     e.preventDefault(); const invalid = validateDefaults(endpoint, keepalive)
-    if (invalid) { setError(invalid); return }
-    setSaving(true); setError('')
-    try { onSaved(await setupApi.update({ endpoint: endpoint.trim(), persistent_keepalive: Number(keepalive) })) }
-    catch (err) { setError(mutationFailure(err, 'Unable to save settings.')) }
-    finally { setSaving(false) }
+    if (saving) return
+    if (invalid) { setValidationError(invalid); return }
+    setValidationError('')
+    await onSave({ endpoint: endpoint.trim(), persistent_keepalive: Number(keepalive) })
   }
-  return <div className="page-enter"><PageHeading title="Settings" /><section className="panel settings-panel"><div className="panel-head"><h2>Network</h2><span className="badge">Read only</span></div><label className="form-label">Subnet<input value={settings.subnet} readOnly /></label><div className="address-map"><span>Hub <code>{settings.subnet.replace(/\.0\/24$/, '.1')}</code></span><span>Peers <code>.2–.254</code></span></div><form className="stack-form settings-form" onSubmit={e => void submit(e)}><h2>Client defaults</h2><DefaultsFields {...{ endpoint, setEndpoint, keepalive, setKeepalive }} /><p className="field-note">Applies to new configurations. Update existing clients manually.</p>{error && <div className="form-error" role="alert">{error}</div>}<div className="dialog-actions"><button className="button button-primary" disabled={saving || (endpoint === settings.endpoint && keepalive === String(settings.persistent_keepalive))}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />}{saving ? 'Saving…' : 'Save changes'}</button></div></form></section></div>
+  return <div className="page-enter"><PageHeading title="Settings" /><section className="panel settings-panel"><div className="panel-head"><h2>Network</h2><span className="badge">Read only</span></div><label className="form-label">Subnet<input value={settings.subnet} readOnly /></label><div className="address-map"><span>Hub <code>{settings.subnet.replace(/\.0\/24$/, '.1')}</code></span><span>Peers <code>.2–.254</code></span></div><form className="stack-form settings-form" onSubmit={e => void submit(e)}><h2>Client defaults</h2><DefaultsFields {...{ endpoint, setEndpoint, keepalive, setKeepalive }} /><p className="field-note">Applies to new configurations. Update existing clients manually.</p>{(validationError || error) && <div className="form-error" role="alert">{validationError || error}</div>}<div className="dialog-actions"><button className="button button-primary" disabled={saving || (endpoint === settings.endpoint && keepalive === String(settings.persistent_keepalive))}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />}{saving ? 'Saving…' : 'Save changes'}</button></div></form></section></div>
 }
 function Login({ token, setToken, onSubmit, error, busy }: { token: string; setToken: (v: string) => void; onSubmit: (e: React.FormEvent) => void; error: string; busy: boolean }) {
   return <main className="auth-screen"><div className="auth-card"><Brand /><div className="auth-heading"><span className="eyebrow">NETWORK CONTROL</span><h1>Your network.<br /><span>Your rules.</span></h1></div><form onSubmit={onSubmit}><label className="form-label" htmlFor="token">Access token</label><div className="token-field"><KeyRound size={17} /><input id="token" type="password" autoComplete="off" placeholder="Enter admin token" value={token} onChange={e => setToken(e.target.value)} required aria-invalid={!!error} aria-describedby={error ? 'login-error' : 'token-note'} /></div>{error && <div className="form-error" id="login-error" role="alert">{error}</div>}<button className="button button-primary auth-submit" disabled={busy || !token.trim()}>{busy ? <LoaderCircle size={16} className="spin" /> : <ArrowUpRight size={16} />}{busy ? 'Connecting…' : 'Connect'}</button></form><p className="auth-note" id="token-note"><Shield size={13} /> Token stays in this session.</p></div><span className="auth-footer">WIREGUARD / PRIVATE NETWORK</span></main>
@@ -255,7 +298,7 @@ function Overview({ peers, groups, forwards, stats, busy, settings, updatedAt, s
 function Metric({ icon, label, value, foot }: { icon: ReactNode; label: string; value: string; foot?: string }) { return <div className="metric-card"><div className="metric-label">{label}{icon}</div><div className="metric-value mono">{value}</div>{foot && <div className="metric-foot">{foot}</div>}</div> }
 function Empty({ title, action }: { title: string; action?: ReactNode }) { return <div className="empty-state"><div className="empty-mark"><Network size={23} /></div><b>{title}</b>{action}</div> }
 function Loading() { return <div className="loading-state"><LoaderCircle size={18} className="spin" /> Loading…</div> }
-function PeersPage({ peers, allCount, groups, query, setQuery, onCreate, onMove, onDelete, pendingPeer, onCopied, onCopyError }: { peers: Peer[]; allCount: number; groups: Group[]; query: string; setQuery: (v: string) => void; onCreate: () => void; onMove: (p: Peer, groupId: string) => void; onDelete: (p: Peer) => void; pendingPeer: string | null; onCopied: () => void; onCopyError: () => void }) {
+function PeersPage({ peers, allCount, groups, query, setQuery, onCreate, onMove, onDelete, pendingPeers, onCopied, onCopyError }: { peers: Peer[]; allCount: number; groups: Group[]; query: string; setQuery: (v: string) => void; onCreate: () => void; onMove: (p: Peer, groupId: string) => void; onDelete: (p: Peer) => void; pendingPeers: ReadonlySet<string>; onCopied: () => void; onCopyError: () => void }) {
   return <div className="page-enter"><PageHeading title="Peers" count={`${allCount} peers`} action={<button className="button button-primary" onClick={onCreate}><Plus size={16} />New peer</button>} /><div className="list-toolbar"><div className="search-box"><Search size={16} /><input aria-label="Search peers" value={query} onChange={e => setQuery(e.target.value)} placeholder="Search name, IP, or group" />{query && <button className="icon-button tiny" aria-label="Clear search" onClick={() => setQuery('')}><X size={14} /></button>}</div><span className="result-count mono">{peers.length} / {allCount}</span></div>
     {peers.length ? <div className="peer-list">{peers.map(p => {
       const recent = Date.now() / 1000 - (p.last_handshake_unix ?? 0) < 180
@@ -265,10 +308,10 @@ function PeersPage({ peers, allCount, groups, query, setQuery, onCreate, onMove,
           <div className="peer-address mono">{p.ipv4}<button className="icon-button tiny" aria-label={`Copy IP for ${p.name}`} onClick={async () => { try { await navigator.clipboard.writeText(p.ipv4); onCopied() } catch { onCopyError() } }}><Copy size={13} /></button></div>
           <div className="peer-card-state"><span className={`connection-dot ${recent ? 'is-online' : ''}`} />{recent ? 'Recent handshake' : 'No recent handshake'}<span>{timeAgo(p.last_handshake_unix)}</span></div>
         </div>
-        <div className="peer-row-details"><label className="peer-meta-row"><span>Group</span><select disabled={pendingPeer === p.id} aria-label={`Group for ${p.name}`} value={p.group_id} onChange={e => onMove(p, e.target.value)}>{groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label>
+        <div className="peer-row-details"><label className="peer-meta-row"><span>Group</span><select disabled={pendingPeers.has(p.id)} aria-label={`Group for ${p.name}`} value={p.group_id} onChange={e => onMove(p, e.target.value)}>{groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label>
           <div className="peer-traffic mono"><span><ArrowUpRight size={13} />{formatBytes(p.sent_bytes)}</span><span><ArrowDownLeft size={13} />{formatBytes(p.received_bytes)}</span></div>
         </div>
-        <button className="icon-button danger-on-hover peer-delete" disabled={pendingPeer === p.id} aria-label={`Delete peer ${p.name}`} onClick={() => onDelete(p)}><Trash2 size={15} /></button>
+        <button className="icon-button danger-on-hover peer-delete" disabled={pendingPeers.has(p.id)} aria-label={`Delete peer ${p.name}`} onClick={() => onDelete(p)}><Trash2 size={15} /></button>
       </article>
     })}</div> : <div className="panel empty-panel"><Empty title={query ? 'No matching peers' : 'No peers yet'} action={query ? <button className="text-action" onClick={() => setQuery('')}>Clear search</button> : <button className="button button-primary" onClick={onCreate}><Plus size={15} />New peer</button>} /></div>}
   </div>

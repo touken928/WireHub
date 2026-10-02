@@ -53,6 +53,20 @@ fn classify_udp_receive<T>(received: std::io::Result<T>, readiness: &Readiness) 
 thread_local! { static ANON_PARSE_COUNT: AtomicUsize = AtomicUsize::new(0); }
 
 #[cfg(test)]
+tokio::task_local! { static STATS_PUBLISH_COUNT: std::cell::Cell<usize>; }
+#[cfg(test)]
+tokio::task_local! { static STATS_PUBLISH_OBSERVER: mpsc::UnboundedSender<usize>; }
+#[cfg(test)]
+tokio::task_local! { static PACKET_RESULT_OBSERVER: mpsc::UnboundedSender<bool>; }
+#[cfg(test)]
+tokio::task_local! { static DISABLE_TIMERS_FOR_TEST: bool; }
+
+#[cfg(test)]
+fn timers_enabled() -> bool { !DISABLE_TIMERS_FOR_TEST.try_with(|disabled| *disabled).unwrap_or(false) }
+#[cfg(not(test))]
+fn timers_enabled() -> bool { true }
+
+#[cfg(test)]
 #[derive(Debug)]
 struct QueueObservation {
     queued: Vec<(String, String, Option<String>, Ipv4Addr, Ipv4Addr, Ipv4Addr, u16, u8)>,
@@ -125,7 +139,7 @@ pub async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [u8; 32]
                 publish_stats(&peers, &stats).await;
                 let _ = command.ack.send(result);
             }
-            _ = timers.tick() => {
+            _ = timers.tick(), if timers_enabled() => {
                 rate_limiter.reset_count();
                 nat.expire(Instant::now());
                 for runtime in peers.values_mut() {
@@ -249,7 +263,9 @@ pub async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [u8; 32]
                     }
                 }
                 if authenticated { drain_pending(&socket, &mut queued_deliveries, &mut pending_bytes, &mut peers, &forwards, hub_ip, &mut nat, &mut out).await; }
-                publish_stats(&peers, &stats).await;
+                publish_packet_stats(&peers, &stats, authenticated).await;
+                #[cfg(test)]
+                PACKET_RESULT_OBSERVER.try_with(|observer| { let _ = observer.send(authenticated); }).ok();
             }
         }
     }
@@ -350,9 +366,20 @@ fn complete_delivery(nat: &mut Flows, peers: &mut HashMap<String, RuntimePeer>, 
 pub(crate) enum EgressOutcome { Delivered, Failed, NotReady }
 
 async fn publish_stats(peers: &HashMap<String, RuntimePeer>, stats: &RuntimeStats) {
+    #[cfg(test)]
+    STATS_PUBLISH_COUNT.try_with(|count| {
+        count.set(count.get() + 1);
+        STATS_PUBLISH_OBSERVER.try_with(|observer| { let _ = observer.send(count.get()); }).ok();
+    }).ok();
     let mut snapshot = stats.write().await;
     snapshot.clear();
     snapshot.extend(peers.iter().map(|(id, p)| (id.clone(), (p.peer.received_bytes, p.peer.sent_bytes, p.peer.last_handshake_unix, p.last_data_unix))));
+}
+
+async fn publish_packet_stats(peers: &HashMap<String, RuntimePeer>, stats: &RuntimeStats, authenticated: bool) {
+    if authenticated {
+        publish_stats(peers, stats).await;
+    }
 }
 
 async fn deliver_plan(socket:&UdpSocket, peers:&mut HashMap<String,RuntimePeer>, plan:&DeliveryPlan, out:&mut [u8]) -> EgressOutcome {
@@ -1074,12 +1101,10 @@ mod tests {
         establish_client(&original,address,&mut a,&mut tx,&mut rx).await;
         establish_client(&b_socket,address,&mut b,&mut tx,&mut rx).await;
 
-        // A valid encrypted empty transport packet is an authenticated keepalive.
         let TunnResult::WriteToNetwork(keepalive)=a.encapsulate(&[],&mut tx) else {panic!("expected encrypted keepalive")};
         let keepalive=keepalive.to_vec();
         migrated.send_to(&keepalive,address).await.unwrap();
         time::sleep(Duration::from_millis(50)).await;
-
         let route_to_a=ipv4::test_packet([10,1,0,3],[10,1,0,2],false,false);
         let TunnResult::WriteToNetwork(wire)=b.encapsulate(&route_to_a,&mut tx) else {panic!("expected encrypted routed packet")};
         b_socket.send_to(wire,address).await.unwrap();
@@ -1087,7 +1112,6 @@ mod tests {
         assert!(matches!(a.decapsulate(None,&rx[..n],&mut tx),TunnResult::WriteToTunnelV4(_, _)),"hub uses the new endpoint after authenticated keepalive");
         assert!(timeout(Duration::from_millis(100),original.recv_from(&mut rx)).await.is_err(),"hub stopped using the old endpoint");
 
-        // An invalid tag and an exact replay must not change the learned endpoint.
         let TunnResult::WriteToNetwork(forged)=a.encapsulate(&[],&mut tx) else {panic!("expected keepalive for forgery")};
         let mut forged=forged.to_vec(); *forged.last_mut().unwrap()^=1;
         attacker.send_to(&forged,address).await.unwrap();
@@ -1099,6 +1123,84 @@ mod tests {
         let (n,_) = timeout(Duration::from_secs(3),migrated.recv_from(&mut rx)).await.unwrap().unwrap();
         assert!(matches!(a.decapsulate(None,&rx[..n],&mut tx),TunnResult::WriteToTunnelV4(_, _)),"invalid and replayed packets cannot hijack the endpoint");
         assert!(timeout(Duration::from_millis(100),attacker.recv_from(&mut rx)).await.is_err(),"forged/replayed sender receives no routed packet");
+        drop(commands_tx);
+    }
+
+    #[tokio::test]
+    async fn router_publishes_stats_only_for_authenticated_udp_packets() {
+        let dir=tempfile::tempdir().unwrap();
+        let store=Arc::new(Store::open(dir.path().join("endpoint.sqlite").to_str().unwrap()).unwrap());
+        store.bind_test_identity();store.setup("10.1.0.0/24","hub.example:51820",25).unwrap();
+        store.add_group(&Group{id:"a".into(),name:"A".into(),allowed_groups:vec![]}).unwrap();
+        let a_secret=StaticSecret::from([17u8;32]);
+        store.add_peer(&Peer{id:"a".into(),name:"a".into(),public_key:base64::engine::general_purpose::STANDARD.encode(PublicKey::from(&a_secret).as_bytes()),ipv4:"10.1.0.2".into(),group_id:"a".into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None}).unwrap();
+        let hub_private=[19u8;32];
+        let server=UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address=server.local_addr().unwrap();
+        let (commands_tx,commands_rx)=mpsc::channel(1);
+        let (ready,ready_rx)=oneshot::channel();
+        let stats=RuntimeStats::default();
+        let (publish_tx,mut publish_rx)=mpsc::unbounded_channel();
+        let (packet_tx,mut packet_rx)=mpsc::unbounded_channel();
+        let router=run_udp(server,store,hub_private,commands_rx,stats.clone(),Readiness::default(),Some(ready));
+        tokio::spawn(STATS_PUBLISH_COUNT.scope(std::cell::Cell::new(0),DISABLE_TIMERS_FOR_TEST.scope(true,PACKET_RESULT_OBSERVER.scope(packet_tx,STATS_PUBLISH_OBSERVER.scope(publish_tx,router)))));
+        ready_rx.await.unwrap().unwrap();
+        // Startup snapshot is expected; drain it before measuring packet-triggered publications.
+        let startup_publications=timeout(Duration::from_secs(1),publish_rx.recv()).await.unwrap().unwrap();
+        assert_eq!(startup_publications,1);
+        let hub_public=PublicKey::from(&StaticSecret::from(hub_private));
+        let original=UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let migrated=UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let attacker=UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut a=Tunn::new(a_secret,hub_public,None,None,51,None);
+        let mut tx=vec![0u8;65535]; let mut rx=vec![0u8;65535];
+
+        // One installed peer receives index 0x200 (allocate_index starts at 2). This is a
+        // syntactically valid Data packet whose receiver index hits, but has no session yet.
+        let mut no_session=vec![0u8;32];
+        no_session[..4].copy_from_slice(&4u32.to_le_bytes());
+        no_session[4..8].copy_from_slice(&0x200u32.to_le_bytes());
+        attacker.send_to(&no_session,address).await.unwrap();
+        assert!(!timeout(Duration::from_secs(1),packet_rx.recv()).await.unwrap().unwrap(),"index-hit NoCurrentSession Data must be rejected");
+        assert!(publish_rx.try_recv().is_err(),"NoCurrentSession Data must not publish stats");
+
+        establish_client(&original,address,&mut a,&mut tx,&mut rx).await;
+        assert!(timeout(Duration::from_secs(1),packet_rx.recv()).await.unwrap().unwrap(),"authenticated initiation must be accepted");
+        assert_eq!(timeout(Duration::from_secs(1),publish_rx.recv()).await.unwrap().unwrap(),startup_publications+1);
+        assert!(timeout(Duration::from_secs(1),packet_rx.recv()).await.unwrap().unwrap(),"authenticated client keepalive completing the handshake must be accepted");
+        assert_eq!(timeout(Duration::from_secs(1),publish_rx.recv()).await.unwrap().unwrap(),startup_publications+2);
+        assert!(stats.read().await["a"].2.is_some(),"valid handshake updates published handshake stats");
+
+        // Valid keepalive from a different endpoint is authenticated, published and migrates endpoint.
+        let TunnResult::WriteToNetwork(keepalive)=a.encapsulate(&[],&mut tx) else {panic!("expected encrypted keepalive")};
+        let keepalive=keepalive.to_vec();
+        migrated.send_to(&keepalive,address).await.unwrap();
+        assert!(timeout(Duration::from_secs(1),packet_rx.recv()).await.unwrap().unwrap());
+        assert_eq!(timeout(Duration::from_secs(1),publish_rx.recv()).await.unwrap().unwrap(),startup_publications+3);
+        assert!(stats.read().await["a"].3.is_some(),"valid keepalive updates published data stats");
+
+        // Valid encrypted data also traverses the real router packet path and publishes.
+        let inner=ipv4::test_packet([10,1,0,2],[10,1,0,99],false,false);
+        let TunnResult::WriteToNetwork(data)=a.encapsulate(&inner,&mut tx) else {panic!("expected encrypted data")};
+        original.send_to(data,address).await.unwrap();
+        assert!(timeout(Duration::from_secs(1),packet_rx.recv()).await.unwrap().unwrap());
+        assert_eq!(timeout(Duration::from_secs(1),publish_rx.recv()).await.unwrap().unwrap(),startup_publications+4);
+
+        // Bad tag and exact replay both reach the indexed peer but must not publish.
+        let TunnResult::WriteToNetwork(forged)=a.encapsulate(&[],&mut tx) else {panic!("expected keepalive for forgery")};
+        let mut forged=forged.to_vec(); *forged.last_mut().unwrap()^=1;
+        attacker.send_to(&forged,address).await.unwrap();
+        assert!(!timeout(Duration::from_secs(1),packet_rx.recv()).await.unwrap().unwrap(),"bad authentication tag must be rejected");
+        assert!(publish_rx.try_recv().is_err(),"bad tag must not publish stats");
+
+        let TunnResult::WriteToNetwork(replay)=a.encapsulate(&[],&mut tx) else {panic!("expected replay packet")};
+        let replay=replay.to_vec();
+        original.send_to(&replay,address).await.unwrap();
+        assert!(timeout(Duration::from_secs(1),packet_rx.recv()).await.unwrap().unwrap());
+        assert_eq!(timeout(Duration::from_secs(1),publish_rx.recv()).await.unwrap().unwrap(),startup_publications+5);
+        original.send_to(&replay,address).await.unwrap();
+        assert!(!timeout(Duration::from_secs(1),packet_rx.recv()).await.unwrap().unwrap(),"exact replay must be rejected");
+        assert!(publish_rx.try_recv().is_err(),"exact replay must not publish stats");
         drop(commands_tx);
     }
 
