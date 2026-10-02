@@ -74,10 +74,21 @@ impl Store {
         Ok(removed)
     }
       pub fn set_acl(&self,id:&str,allowed:&[String])->rusqlite::Result<usize>{let encoded=serde_json::to_string(allowed).map_err(|_|rusqlite::Error::InvalidQuery)?;let mut db=self.db.lock().map_err(|_|rusqlite::Error::InvalidQuery)?;let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;after_begin_immediate();let source:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM groups WHERE id=?1)",[id],|r|r.get(0))?;if !source{return Ok(0)}validate_group_refs(&tx,allowed)?;let n=tx.execute("UPDATE groups SET allowed=?2 WHERE id=?1",params![id,encoded])?;tx.commit()?;Ok(n)}
-    pub fn peers(&self)->rusqlite::Result<Vec<Peer>> {let db=self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;read_peers(&db)}
+    pub fn peers(&self)->rusqlite::Result<Vec<Peer>> {
+        let db=self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let pending = db.prepare("SELECT peer_id FROM pending_provisions")?.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+        Ok(read_peers(&db)?.into_iter().filter(|p| !pending.contains(&p.id)).collect())
+    }
     #[cfg(test)]
     pub fn add_peer(&self,p:&Peer)->rusqlite::Result<()> {let name=normalized_name(&p.name)?;self.db.lock().map_err(|_|rusqlite::Error::InvalidQuery)?.execute("INSERT INTO peers(id,name,public_key,ipv4,group_id) VALUES(?1,?2,?3,?4,?5)",params![p.id,name,p.public_key,p.ipv4,p.group_id])?;Ok(())}
+    #[cfg(test)]
     pub fn create_peer_allocated(&self, p: &mut Peer) -> rusqlite::Result<bool> {
+        self.allocate_peer(p, false)
+    }
+    pub fn begin_peer_provision(&self, p: &mut Peer) -> rusqlite::Result<bool> {
+        self.allocate_peer(p, true)
+    }
+    fn allocate_peer(&self, p: &mut Peer, provisional: bool) -> rusqlite::Result<bool> {
         let mut db = self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let subnet = settings_subnet(&tx)?;
@@ -86,9 +97,18 @@ impl Store {
         let Some(ip) = find_free_peer_ip(&tx, subnet)? else { return Ok(false); };
         p.ipv4 = ip;
         tx.execute("INSERT INTO peers(id,name,public_key,ipv4,group_id) VALUES(?1,?2,?3,?4,?5)", params![p.id, name, p.public_key, p.ipv4, p.group_id])?;
+        if provisional { tx.execute("INSERT INTO pending_provisions(peer_id) VALUES(?1)", [&p.id])?; }
         tx.commit()?;
         p.name = name;
         Ok(true)
+    }
+    pub fn finish_peer_provision(&self, id: &str) -> rusqlite::Result<usize> {
+        self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?.execute("DELETE FROM pending_provisions WHERE peer_id=?1", [id])
+    }
+    /// Startup recovery removes public-only records whose private configuration
+    /// was never handed to the HTTP response. The journal never contains secrets.
+    pub fn recover_pending_provisions(&self) -> rusqlite::Result<usize> {
+        self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?.execute("DELETE FROM peers WHERE id IN (SELECT peer_id FROM pending_provisions)", [])
     }
      pub fn move_peer(&self,id:&str,g:&str)->rusqlite::Result<usize>{let mut db=self.db.lock().map_err(|_|rusqlite::Error::InvalidQuery)?;let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;validate_group_refs(&tx,&[g.to_string()])?;let n=tx.execute("UPDATE peers SET group_id=?2 WHERE id=?1",params![id,g])?;tx.commit()?;Ok(n)}
     pub fn remove_peer(&self,id:&str)->rusqlite::Result<usize>{Ok(self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?.execute("DELETE FROM peers WHERE id=?1",[id])?)}
@@ -131,7 +151,7 @@ fn read_forwards(db:&Connection)->rusqlite::Result<Vec<Forward>>{
 
 fn insert_forward(tx:&Transaction<'_>,f:&Forward,name:&str,allowed:&str)->rusqlite::Result<()> {tx.execute("INSERT INTO forwards(id,name,protocol,target_peer_id,target_port,allowed) VALUES(?1,?2,?3,?4,?5,?6)",params![f.id,name,f.protocol,f.target_peer_id,f.target_port,allowed])?;Ok(())}
 fn ensure_forward_target_exists(tx: &Transaction<'_>, peer_id: &str) -> rusqlite::Result<()> {
-    let target: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM peers WHERE id=?1)", [peer_id], |r| r.get(0))?;
+    let target: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM peers WHERE id=?1 AND id NOT IN (SELECT peer_id FROM pending_provisions))", [peer_id], |r| r.get(0))?;
     if !target { return Err(sql_error("invalid target peer reference")); }
     Ok(())
 }

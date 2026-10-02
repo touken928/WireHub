@@ -543,6 +543,20 @@ use super::snapshot::*;
         assert_eq!(b_tx,total_request_bytes,"B egress includes both delivered forward requests");
         drop(snapshot);
 
+        // A backend error is related traffic even without a reverse group ACL.
+        let udp_quote=service_packet(17,[192,168,44,1],[192,168,44,3],40000,8080,0,b"request");
+        let icmp_error=ipv4::test_icmp_error(Ipv4Addr::new(192,168,44,3),Ipv4Addr::new(192,168,44,1),3,4,&udp_quote[..28]);
+        send_inner(&sockets[1],address,&mut clients[1],&icmp_error,&mut tx).await;
+        let restored=recv_inner(&sockets[0],&mut clients[0],&mut rx,&mut tx).await;
+        assert_eq!(&restored[12..20],&[192,168,44,1,192,168,44,2]);
+        assert_eq!(&restored[40..48],&[192,168,44,2,192,168,44,1]);
+        assert_eq!(u16::from_be_bytes([restored[48],restored[49]]),12345);
+        assert_eq!(u16::from_be_bytes([restored[26],restored[27]]),1280);
+        assert_eq!(ipv4::checksum(&restored[..20]),0);assert_eq!(ipv4::checksum(&restored[20..]),0);assert_eq!(ipv4::checksum(&restored[28..48]),0);
+        let wrong_peer_error=ipv4::test_icmp_error(Ipv4Addr::new(192,168,44,5),Ipv4Addr::new(192,168,44,1),3,4,&udp_quote[..28]);
+        send_inner(&sockets[3],address,&mut clients[3],&wrong_peer_error,&mut tx).await;
+        assert_no_inner(&sockets[0],address,&mut clients[0],&mut rx,&mut tx).await;
+
         // A newly added TCP service is installed only after acknowledged reload;
         // existing authorized mappings remain live and the next TCP candidate is excluded.
         create_forward_for_test(&store,Forward{id:"reserved-next".into(),name:"next reserved tcp service".into(),protocol:"tcp".into(),target_peer_id:"b".into(),target_port:40001,allowed_group_ids:vec!["clients".into()]});
@@ -594,6 +608,8 @@ use super::snapshot::*;
         // The reload must clear established NAT mappings: a reply translated for
         // the previous flow cannot be delivered to A using its stale mapping.
         send_inner(&sockets[1],address,&mut clients[1],translated_reply.as_ref().unwrap(),&mut tx).await;
+        assert_no_inner(&sockets[0],address,&mut clients[0],&mut rx,&mut tx).await;
+        send_inner(&sockets[1],address,&mut clients[1],&icmp_error,&mut tx).await;
         assert_no_inner(&sockets[0],address,&mut clients[0],&mut rx,&mut tx).await;
         send_inner(&sockets[0],address,&mut clients[0],&service_packet(17,[192,168,44,2],[192,168,44,1],12345,8080,0,b"revoked"),&mut tx).await;
         assert_no_inner(&sockets[1],address,&mut clients[1],&mut rx,&mut tx).await;
@@ -1503,3 +1519,39 @@ use super::snapshot::*;
         assert!(reply_plan.reservation.is_none());
         assert_eq!(nat.test_state_counts(), (0, 0), "ICMP exchanges leave no active or pending flows");
     }
+
+#[test]
+fn established_tcp_survives_reload_but_acl_revocation_removes_flow_and_queued_icmp_immediately() {
+    let (mut peers,forward,_)=pending_forward_fixture();let hub=Ipv4Addr::new(10,88,0,1);let now=Instant::now();
+    let tcp_packet=|src:[u8;4],dst:[u8;4],sport,dport,flags,seq:u32,ack:u32| {
+        let mut raw=service_packet(6,src,dst,sport,dport,flags,b"");
+        raw[24..28].copy_from_slice(&seq.to_be_bytes());raw[28..32].copy_from_slice(&ack.to_be_bytes());raw[36..38].fill(0);
+        let sum=transport_checksum(src,dst,6,&raw[20..]);raw[36..38].copy_from_slice(&sum.to_be_bytes());
+        ipv4::validate_forwarded(&raw).unwrap()
+    };
+    let a=&peers["a"].peer;let b=&peers["b"].peer;let mut nat=Flows::new(hub,&[forward.clone()]);
+    let syn=tcp_packet([10,88,0,2],hub.octets(),1234,443,2,100,0);
+    let (translated,r)=nat.prepare_forward_packet(&syn,a,&forward,b,now).unwrap();nat.complete(r,true,now);
+    let snat=u16::from_be_bytes([translated[20],translated[21]]);
+    let syn_ack=tcp_packet([10,88,0,3],hub.octets(),443,snat,0x12,200,101);
+    let (_,_,r)=nat.lookup_reply(&syn_ack,b,now).unwrap();nat.complete(r,true,now);
+    // Later ACK/data also confirms establishment when the original final ACK was lost.
+    let ack=tcp_packet([10,88,0,2],hub.octets(),1234,443,0x10,110,201);
+    let (_,r)=nat.prepare_forward_packet(&ack,a,&forward,b,now).unwrap();nat.complete(r,true,now);
+    nat.reconcile(Some(hub),Some(hub),&[forward.clone()],&[forward.clone()],&peers);
+    nat.expire(now+Duration::from_secs(301));assert_eq!(nat.test_state_counts(),(1,0));
+    let raw=ipv4::test_icmp_error(b.ipv4.parse().unwrap(),hub,3,4,&translated[..28]);
+    let error=ipv4::validate(&raw,b,peers["b"].group.as_ref()).unwrap();
+    let (plan,reply_only)=resolve_packet(&error,b,peers["b"].group.as_ref().unwrap(),"b",&peers,&[forward.clone()],Some(hub),&mut nat,now);
+    assert!(reply_only);let mut plan=plan.unwrap();assert_eq!(plan.target_id,"a");
+    complete_delivery(&mut nat,&mut peers,&mut plan,EgressOutcome::NotReady);
+    let pending=PendingDelivery { source_id:"b".into(),source_key:peers["b"].peer.public_key.clone(),source_ip:peers["b"].peer.ipv4.parse().unwrap(),packet:error.clone(),reply_only:true,deadline:now+PENDING_TTL,target_id:"a".into(),target_key:peers["a"].peer.public_key.clone(),target_ip:peers["a"].peer.ipv4.parse().unwrap(),forward_id:None,forward_protocol:None,forward_target_port:None };
+    let mut queue=VecDeque::from([pending]);let mut bytes=raw.len();
+    retain_pending(&mut queue,&mut bytes,&peers,&[forward.clone()],Some(hub),&nat);assert_eq!(queue.len(),1);
+    peers.get_mut("a").unwrap().group.as_mut().unwrap().allowed_groups.clear();
+    nat.reconcile(Some(hub),Some(hub),&[forward.clone()],&[forward.clone()],&peers);
+    retain_pending(&mut queue,&mut bytes,&peers,&[forward.clone()],Some(hub),&nat);
+    assert_eq!(nat.test_state_counts(),(0,0));assert!(queue.is_empty());assert_eq!(bytes,0);
+    let (plan,_)=resolve_packet(&error,&peers["b"].peer,peers["b"].group.as_ref().unwrap(),"b",&peers,&[forward],Some(hub),&mut nat,now);
+    assert!(plan.is_none(),"ICMP errors cannot fall back to ACL routing after revocation");
+}

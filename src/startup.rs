@@ -18,6 +18,7 @@ pub(crate) async fn run() -> Result<()> {
     let key_path=env::var("WIREHUB_HUB_KEY").unwrap_or_else(|_| "wirehub.key".into());
     let store = Arc::new(Store::open(&path)?);
     let private=hub_key::load_or_bind_hub_key(&store,Path::new(&key_path))?;
+    store.recover_pending_provisions()?;
     let public=PublicKey::from(&StaticSecret::from(private));
     let (reload_tx, reload_rx) = mpsc::channel(16);
     let runtime_stats = transport::RuntimeStats::default();

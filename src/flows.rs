@@ -1,7 +1,7 @@
 //! Bounded bidirectional state. Pending reservations never grant reply access.
 use std::{collections::{HashMap, HashSet}, net::Ipv4Addr, time::{Duration, Instant}};
 
-use crate::{transport::ipv4::{PacketTuple, ValidatedPacket}, model::{Forward, Peer}};
+use crate::{transport::ipv4::{PacketTuple, TcpSegment, ValidatedPacket}, model::{Forward, Peer}};
 #[cfg(test)]
 use crate::transport::ipv4;
 
@@ -9,7 +9,8 @@ const CAPACITY: usize = 16_384;
 /// Maximum active and pending flows initiated by one peer, across TCP and UDP.
 const PEER_CAPACITY: usize = 256;
 const UDP_IDLE: Duration = Duration::from_secs(60);
-const TCP_IDLE: Duration = Duration::from_secs(300);
+const TCP_ESTABLISHED_IDLE: Duration = Duration::from_secs(2 * 60 * 60 + 4 * 60);
+const TCP_HANDSHAKE_IDLE: Duration = Duration::from_secs(60);
 const TCP_CLOSED_GRACE: Duration = Duration::from_secs(30);
 const SNAT_START: u16 = 40_000;
 const SNAT_END: u16 = 60_999;
@@ -40,11 +41,40 @@ struct Flow {
     fin_directions: u8,
     closed_until: Option<Instant>,
     generation: u64,
+    tcp_state: Option<TcpState>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TcpState {
+    SynSent { initiator_next: u32, initiator_end: u32 },
+    SynReceived { initiator_next: u32, responder_next: u32, responder_end: u32 },
+    Established,
+}
+
+impl TcpState {
+    fn initial(packet: &ValidatedPacket) -> Option<Self> {
+        packet.tcp_segment().map(|tcp| Self::SynSent { initiator_next: tcp.seq.wrapping_add(1), initiator_end: tcp.seq.wrapping_add(1).wrapping_add(tcp.payload_len) })
+    }
+    fn delivered(self, tcp: TcpSegment, from_initiator: bool) -> Self {
+        if tcp.flags & (0x01 | 0x04) != 0 { return self; }
+        match self {
+            // SYN payload (TCP Fast Open) may be accepted or declined. The
+            // acknowledgment must cover the SYN, within the offered bytes.
+            Self::SynSent { initiator_next, initiator_end } if !from_initiator && tcp.flags & 0x12 == 0x12 && sequence_between(tcp.ack, initiator_next, initiator_end) =>
+                Self::SynReceived { initiator_next: tcp.ack, responder_next: tcp.seq.wrapping_add(1), responder_end: tcp.seq.wrapping_add(1).wrapping_add(tcp.payload_len) },
+            // The first ACK may have been lost before reaching the hub. A
+            // later data/ACK can still acknowledge the responder's SYN.
+            Self::SynReceived { initiator_next, responder_next, responder_end } if from_initiator && tcp.flags & 0x12 == 0x10 && (tcp.seq.wrapping_sub(initiator_next) as i32) >= 0 && sequence_between(tcp.ack, responder_next, responder_end) => Self::Established,
+            _ => self,
+        }
+    }
+}
+
+fn sequence_between(value: u32, start: u32, end: u32) -> bool { value.wrapping_sub(start) <= end.wrapping_sub(start) }
 
 /// A delivery must call `complete` exactly once. Failed delivery releases a new
 /// reservation; only successful delivery installs or refreshes active state.
-pub(crate) struct Reservation { key: Tuple, flow: Flow, is_new: bool, from_initiator: bool, tcp_flags: Option<u8> }
+pub(crate) struct Reservation { key: Tuple, flow: Flow, is_new: bool, from_initiator: bool, tcp: Option<TcpSegment>, refresh: bool }
 
 pub(crate) struct Flows {
     flows: HashMap<Tuple, Flow>,
@@ -165,7 +195,7 @@ impl Flows {
             let snat = self.choose_snat(proto, backend, forward.target_port)?;
             let reply = Reverse { peer: backend.id.clone(), proto, src: backend_ip, sport: forward.target_port, dst: self.hub_ip, dport: snat };
             let generation = self.allocate_generation()?;
-            let flow = Flow { reply: reply.clone(), output: Some(PacketTuple { src: self.hub_ip, src_port: snat, dst: backend_ip, dst_port: forward.target_port }), backend: backend.id.clone(), backend_ip, initiator_key:source.public_key.clone(), backend_key:backend.public_key.clone(), forward_id:Some(forward.id.clone()), last: now, fin_directions: 0, closed_until: None, generation };
+            let flow = Flow { reply: reply.clone(), output: Some(PacketTuple { src: self.hub_ip, src_port: snat, dst: backend_ip, dst_port: forward.target_port }), backend: backend.id.clone(), backend_ip, initiator_key:source.public_key.clone(), backend_key:backend.public_key.clone(), forward_id:Some(forward.id.clone()), last: now, fin_directions: 0, closed_until: None, generation, tcp_state: TcpState::initial(packet) };
             self.pending_reverse.insert(reply, key.clone());
             self.pending.insert(key.clone(), flow.clone());
             self.note_expiry(expiry_deadline(&key, &flow));
@@ -174,7 +204,7 @@ impl Flows {
         };
         let is_new = !self.flows.contains_key(&key);
         let output = packet.clone().emit(flow.output);
-        Some((output, Reservation { key, flow, is_new, from_initiator: true, tcp_flags: packet.tcp_flags() }))
+        Some((output, Reservation { key, flow, is_new, from_initiator: true, tcp: packet.tcp_segment(), refresh: true }))
     }
 
     fn prepare_common(&mut self, packet: &ValidatedPacket, key: Tuple, destination: &Peer, output: Option<PacketTuple>, now: Instant, forward_id: Option<String>, initiator_key: String) -> Option<(Vec<u8>, Reservation)> {
@@ -191,7 +221,7 @@ impl Flows {
             self.reserve_capacity(&key.peer, now)?;
             let reply = Reverse { peer: destination.id.clone(), proto: key.protocol, src: key.frontend_ip, sport: key.frontend_port, dst: key.ip, dport: key.port };
             let generation = self.allocate_generation()?;
-            let flow = Flow { reply: reply.clone(), output, backend: destination.id.clone(), backend_ip: destination_ip, initiator_key, backend_key:destination.public_key.clone(), forward_id, last: now, fin_directions: 0, closed_until: None, generation };
+            let flow = Flow { reply: reply.clone(), output, backend: destination.id.clone(), backend_ip: destination_ip, initiator_key, backend_key:destination.public_key.clone(), forward_id, last: now, fin_directions: 0, closed_until: None, generation, tcp_state: TcpState::initial(packet) };
             self.pending_reverse.insert(reply, key.clone());
             self.pending.insert(key.clone(), flow.clone());
             self.note_expiry(expiry_deadline(&key, &flow));
@@ -199,7 +229,7 @@ impl Flows {
             flow
         };
         let is_new = !self.flows.contains_key(&key);
-        Some((packet.clone().emit(flow.output), Reservation { key, flow, is_new, from_initiator: true, tcp_flags: packet.tcp_flags() }))
+        Some((packet.clone().emit(flow.output), Reservation { key, flow, is_new, from_initiator: true, tcp: packet.tcp_segment(), refresh: true }))
     }
 
     fn reserve_capacity(&mut self, peer: &str, now: Instant) -> Option<()> {
@@ -246,21 +276,25 @@ impl Flows {
         let key = reservation.key.clone();
         let mut flow = reservation.flow;
         if let Some(current) = self.flows.get(&reservation.key) {
+            flow.tcp_state = current.tcp_state;
             flow.fin_directions |= current.fin_directions;
             flow.closed_until = min_instant(flow.closed_until, current.closed_until);
             flow.last = flow.last.max(current.last);
         }
         if reservation.key.protocol == 6 {
-            if reservation.tcp_flags.is_some_and(|flags| flags & 0x04 != 0) {
+            if let (Some(state), Some(tcp)) = (flow.tcp_state, reservation.tcp) {
+                flow.tcp_state = Some(state.delivered(tcp, reservation.from_initiator));
+            }
+            if reservation.tcp.is_some_and(|tcp| tcp.flags & 0x04 != 0) {
                 flow.closed_until = min_instant(flow.closed_until, Some(now + TCP_CLOSED_GRACE));
-            } else if reservation.tcp_flags.is_some_and(|flags| flags & 0x01 != 0) {
+            } else if reservation.tcp.is_some_and(|tcp| tcp.flags & 0x01 != 0) {
                 flow.fin_directions |= if reservation.from_initiator { 1 } else { 2 };
                 if flow.fin_directions == 3 {
                     flow.closed_until = min_instant(flow.closed_until, Some(now + TCP_CLOSED_GRACE));
                 }
             }
         }
-        flow.last = flow.last.max(now);
+        if reservation.refresh { flow.last = flow.last.max(now); }
         if reservation.is_new { self.detach_pending(&reservation.key); }
         self.reverse.insert(flow.reply.clone(), key.clone());
         let deadline = expiry_deadline(&key, &flow);
@@ -322,28 +356,52 @@ impl Flows {
     /// A live reverse hit is a normal delivery reservation and must be completed
     /// with its delivery result to refresh the flow's idle timer.
     pub(crate) fn lookup_reply(&mut self, packet: &ValidatedPacket, peer: &Peer, now: Instant) -> Option<(String, Vec<u8>, Reservation)> {
+        if packet.is_icmp_error() { return self.lookup_icmp_error(packet, peer, now); }
         if packet.protocol()==6 && packet.tcp_flags().is_some_and(initial_syn) { return None; }
         let tuple = Reverse { peer: peer.id.clone(), proto: packet.protocol(), src: packet.src(), sport: packet.src_port()?, dst: packet.dst(), dport: packet.dst_port()? };
         let key = self.reverse.get(&tuple)?.clone();
         let flow = self.flows.get(&key)?.clone();
         if expiry_deadline(&key, &flow) <= now { self.remove_active(&key); return None; }
         let output = PacketTuple { src: key.frontend_ip, src_port: key.frontend_port, dst: key.ip, dst_port: key.port };
-        let flags = packet.tcp_flags();
+        let tcp = packet.tcp_segment();
         let packet = packet.clone().emit(Some(output));
         let target_peer = key.peer.clone();
-        Some((target_peer, packet, Reservation { key, flow, is_new: false, from_initiator: false, tcp_flags: flags }))
+        Some((target_peer, packet, Reservation { key, flow, is_new: false, from_initiator: false, tcp, refresh: true }))
+    }
+
+    fn icmp_key(&self, packet: &ValidatedPacket, peer: &Peer) -> Option<Tuple> {
+        let error = packet.icmp_error()?;
+        if packet.dst() != error.tuple.src { return None; }
+        let reverse = Reverse { peer: peer.id.clone(), proto: error.protocol, src: error.tuple.dst, sport: error.tuple.dst_port, dst: error.tuple.src, dport: error.tuple.src_port };
+        let key = self.reverse.get(&reverse)?;
+        let flow = self.flows.get(key)?;
+        (flow.backend_key == peer.public_key && packet.src() == flow.backend_ip).then(|| key.clone())
+    }
+
+    fn lookup_icmp_error(&mut self, packet: &ValidatedPacket, peer: &Peer, now: Instant) -> Option<(String, Vec<u8>, Reservation)> {
+        let key = self.icmp_key(packet, peer)?;
+        let flow = self.flows.get(&key)?.clone();
+        if expiry_deadline(&key, &flow) <= now { self.remove_active(&key); return None; }
+        let original = PacketTuple { src: key.ip, src_port: key.port, dst: key.frontend_ip, dst_port: key.frontend_port };
+        let bytes = packet.clone().emit_icmp_error(original, key.frontend_ip, key.ip);
+        Some((key.peer.clone(), bytes, Reservation { key, flow, is_new: false, from_initiator: false, tcp: None, refresh: false }))
     }
 
     pub(crate) fn has_reply_mapping(&self, packet:&ValidatedPacket, peer:&Peer, now:Instant)->bool {
+        if packet.is_icmp_error() {
+            return self.icmp_key(packet, peer).and_then(|key| self.flows.get(&key).map(|flow| expiry_deadline(&key, flow) > now)).unwrap_or(false);
+        }
         let Some(sport)=packet.src_port() else{return false};let Some(dport)=packet.dst_port() else{return false};
         let tuple=Reverse{peer:peer.id.clone(),proto:packet.protocol(),src:packet.src(),sport,dst:packet.dst(),dport};
         self.reverse.get(&tuple).and_then(|key|self.flows.get(key).map(|flow| (key, flow))).is_some_and(|(key,flow)|expiry_deadline(key,flow)>now)
     }
 }
 
-fn idle(proto: u8) -> Duration { if proto == 17 { UDP_IDLE } else { TCP_IDLE } }
 fn initial_syn(flags: u8) -> bool { flags & 2 != 0 && flags & 16 == 0 }
-fn expiry_deadline(key: &Tuple, flow: &Flow) -> Instant { flow.closed_until.unwrap_or(flow.last + idle(key.protocol)) }
+fn expiry_deadline(key: &Tuple, flow: &Flow) -> Instant {
+    let idle = if key.protocol == 17 { UDP_IDLE } else if flow.tcp_state == Some(TcpState::Established) { TCP_ESTABLISHED_IDLE } else { TCP_HANDSHAKE_IDLE };
+    flow.closed_until.unwrap_or(flow.last + idle)
+}
 fn min_instant(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> { match (a,b) { (Some(a),Some(b)) => Some(a.min(b)), (Some(a),None) => Some(a), (None,Some(b)) => Some(b), (None,None) => None } }
 fn protocol(value: &str) -> Option<u8> { match value { "tcp" => Some(6), "udp" => Some(17), _ => None } }
 
@@ -391,6 +449,128 @@ mod tests {
         !(sum as u16)
     }
     fn t() -> Instant { Instant::now() }
+
+    fn tcp_numbers(packet: ValidatedPacket, seq: u32, ack: u32) -> ValidatedPacket {
+        let mut raw = packet.bytes().to_vec();
+        raw[24..28].copy_from_slice(&seq.to_be_bytes()); raw[28..32].copy_from_slice(&ack.to_be_bytes());
+        raw[36..38].fill(0);
+        let sum = tcp_checksum(packet.src().octets(), packet.dst().octets(), &raw[20..]);
+        raw[36..38].copy_from_slice(&sum.to_be_bytes());
+        ipv4::validate_forwarded(&raw).unwrap()
+    }
+
+    #[test]
+    fn tcp_handshake_completion_and_idle_boundaries_for_direct_and_forward_flows() {
+        let a = peer("a", "10.77.0.2"); let b = peer("b", "10.77.0.3"); let now = t();
+        for forwarded in [false, true] {
+            let mut flows = Flows::default(); let f = forward("tcp", 443);
+            let frontend = if forwarded { flows.hub_ip } else { b.ipv4.parse().unwrap() };
+            let syn = tcp_numbers(packet(6, a.ipv4.parse().unwrap(), 1234, frontend, 443, 2), u32::MAX, 0);
+            let (wire, r) = if forwarded { flows.prepare_forward_packet(&syn, &a, &f, &b, now) } else { flows.prepare_direct(&syn, &a, &b, now) }.unwrap();
+            flows.complete(r, true, now);
+            let return_ip = if forwarded { flows.hub_ip } else { a.ipv4.parse().unwrap() };
+            let return_port = u16::from_be_bytes([wire[20],wire[21]]);
+            let syn_ack = tcp_numbers(packet(6, b.ipv4.parse().unwrap(), 443, return_ip, return_port, 0x12), 200, 0);
+            let ack = tcp_numbers(packet(6, a.ipv4.parse().unwrap(), 1234, frontend, 443, 0x10), 0, 201);
+            let prepare = |flows: &mut Flows, packet: &ValidatedPacket, at| if forwarded { flows.prepare_forward_packet(packet, &a, &f, &b, at) } else { flows.prepare_direct(packet, &a, &b, at) };
+            // A stray ACK before SYN/ACK cannot establish the connection.
+            let (_, r) = prepare(&mut flows, &ack, now).unwrap(); flows.complete(r, true, now);
+            let key = flows.flows.keys().next().unwrap().clone();
+            assert!(matches!(flows.flows[&key].tcp_state, Some(TcpState::SynSent { .. })));
+            let (_, _, r) = flows.lookup_reply(&syn_ack, &b, now).unwrap(); flows.complete(r, false, now);
+            assert!(matches!(flows.flows[&key].tcp_state, Some(TcpState::SynSent { .. })));
+            let (_, _, r) = flows.lookup_reply(&syn_ack, &b, now).unwrap(); flows.complete(r, true, now);
+            assert!(matches!(flows.flows[&key].tcp_state, Some(TcpState::SynReceived { .. })));
+            assert_eq!(expiry_deadline(&key, &flows.flows[&key]), now + TCP_HANDSHAKE_IDLE);
+            let wrong_ack = tcp_numbers(ack.clone(), 0, 202);
+            let (_, r) = prepare(&mut flows, &wrong_ack, now).unwrap(); flows.complete(r, true, now);
+            assert!(matches!(flows.flows[&key].tcp_state, Some(TcpState::SynReceived { .. })));
+            let (_, r) = prepare(&mut flows, &ack, now).unwrap(); flows.complete(r, false, now);
+            assert!(matches!(flows.flows[&key].tcp_state, Some(TcpState::SynReceived { .. })));
+            let (_, r) = prepare(&mut flows, &ack, now).unwrap(); flows.complete(r, true, now);
+            assert_eq!(flows.flows[&key].tcp_state, Some(TcpState::Established));
+            assert!(prepare(&mut flows, &ack, now + Duration::from_secs(301)).is_some());
+            assert!(prepare(&mut flows, &ack, now + TCP_ESTABLISHED_IDLE - Duration::from_secs(1)).is_some());
+            assert!(prepare(&mut flows, &ack, now + TCP_ESTABLISHED_IDLE).is_none());
+            assert!(flows.reverse.is_empty()); assert!(flows.peer_counts.is_empty());
+        }
+    }
+
+    #[test]
+    fn incomplete_tcp_expires_at_sixty_seconds_and_successful_activity_refreshes_it() {
+        let a = peer("a", "10.77.0.2"); let b = peer("b", "10.77.0.3"); let now = t();
+        for syn_ack_seen in [false, true] {
+            let mut flows = Flows::default();
+            let syn = packet(6, a.ipv4.parse().unwrap(), 1234, b.ipv4.parse().unwrap(), 443, 2);
+            let (_, r) = flows.prepare_direct(&syn, &a, &b, now).unwrap(); flows.complete(r, true, now);
+            if syn_ack_seen {
+                let syn_ack = tcp_numbers(packet(6, b.ipv4.parse().unwrap(), 443, a.ipv4.parse().unwrap(), 1234, 0x12), 200, 1);
+                let (_, _, r) = flows.lookup_reply(&syn_ack, &b, now).unwrap(); flows.complete(r, true, now);
+            }
+            flows.expire(now + TCP_HANDSHAKE_IDLE - Duration::from_secs(1)); assert_eq!(flows.flows.len(), 1);
+            flows.expire(now + TCP_HANDSHAKE_IDLE); assert!(flows.flows.is_empty()); assert!(flows.peer_counts.is_empty());
+        }
+        let mut flows = Flows::default(); let syn = packet(6, a.ipv4.parse().unwrap(), 1234, b.ipv4.parse().unwrap(), 443, 2);
+        let (_, r) = flows.prepare_direct(&syn, &a, &b, now).unwrap(); flows.complete(r, true, now);
+        let (_, r) = flows.prepare_direct(&syn, &a, &b, now + Duration::from_secs(59)).unwrap(); flows.complete(r, true, now + Duration::from_secs(59));
+        flows.expire(now + Duration::from_secs(60)); assert_eq!(flows.flows.len(), 1);
+        flows.expire(now + Duration::from_secs(119)); assert!(flows.flows.is_empty());
+    }
+
+    #[test]
+    fn related_icmp_requires_committed_live_flow_and_matching_backend_identity() {
+        let a=peer("a","10.77.0.2"); let b=peer("b","10.77.0.3"); let now=t();
+        for proto in [6,17] {
+            for forwarded in [false,true] {
+                let mut flows=Flows::default(); let f=forward(if proto==6 {"tcp"} else {"udp"},443);
+                let frontend=if forwarded {flows.hub_ip} else {b.ipv4.parse().unwrap()};
+                let original=packet(proto,a.ipv4.parse().unwrap(),1234,frontend,443,2);
+                let (wire,r)=if forwarded {flows.prepare_forward_packet(&original,&a,&f,&b,now)} else {flows.prepare_direct(&original,&a,&b,now)}.unwrap();
+                let translated_src=Ipv4Addr::new(wire[12],wire[13],wire[14],wire[15]);
+                for (kind,code) in [(3,3),(3,4),(11,0),(12,0)] {
+                    let raw=ipv4::test_icmp_error(b.ipv4.parse().unwrap(),translated_src,kind,code,&wire[..28]);
+                    let error=ipv4::validate_forwarded(&raw).unwrap();
+                    assert!(flows.lookup_reply(&error,&b,now).is_none(),"pending reservations grant no error access");
+                }
+                flows.complete(r,true,now);
+                let key=flows.flows.keys().next().unwrap().clone(); let deadline=expiry_deadline(&key,&flows.flows[&key]);
+                let raw=ipv4::test_icmp_error(b.ipv4.parse().unwrap(),translated_src,3,3,&wire[..28]);
+                let error=ipv4::validate_forwarded(&raw).unwrap();
+                let (target,rewritten,r)=flows.lookup_reply(&error,&b,now+Duration::from_secs(59)).unwrap();
+                assert_eq!(target,a.id); assert_eq!(&rewritten[12..16],&frontend.octets()); assert_eq!(&rewritten[16..20],&a.ipv4.parse::<Ipv4Addr>().unwrap().octets());
+                assert_eq!(&rewritten[40..44],&a.ipv4.parse::<Ipv4Addr>().unwrap().octets()); assert_eq!(&rewritten[44..48],&frontend.octets());
+                flows.complete(r,true,now+Duration::from_secs(59));
+                assert_eq!(expiry_deadline(&key,&flows.flows[&key]),deadline,"ICMP does not refresh business-flow idle time");
+                assert!(flows.has_reply_mapping(&error,&b,now));
+                for bad_peer in [peer("different-id","10.77.0.3"),Peer{public_key:"different-key".into(),..b.clone()}] { assert!(flows.lookup_reply(&error,&bad_peer,now).is_none()); }
+                let mut wrong_wire=wire.clone(); wrong_wire[22..24].copy_from_slice(&444u16.to_be_bytes());
+                let wrong=ipv4::validate_forwarded(&ipv4::test_icmp_error(b.ipv4.parse().unwrap(),translated_src,3,3,&wrong_wire[..28])).unwrap();
+                assert!(flows.lookup_reply(&wrong,&b,now).is_none());
+                assert!(flows.lookup_reply(&error,&b,deadline).is_none()); assert!(!flows.has_reply_mapping(&error,&b,deadline));
+            }
+        }
+    }
+
+    #[test]
+    fn tcp_syn_payload_can_be_accepted_or_declined_without_losing_establishment() {
+        let a=peer("a","10.77.0.2");let b=peer("b","10.77.0.3");let now=t();
+        for accepted in [false,true] {
+            let syn=tcp_numbers(packet(6,a.ipv4.parse().unwrap(),1234,b.ipv4.parse().unwrap(),443,2),100,0);
+            let mut bytes=syn.bytes().to_vec();bytes.extend_from_slice(b"fast open");
+            let len=bytes.len() as u16;bytes[2..4].copy_from_slice(&len.to_be_bytes());bytes[10..12].fill(0);bytes[36..38].fill(0);
+            let sum=ipv4::checksum(&bytes[..20]);bytes[10..12].copy_from_slice(&sum.to_be_bytes());
+            let sum=tcp_checksum(syn.src().octets(),syn.dst().octets(),&bytes[20..]);bytes[36..38].copy_from_slice(&sum.to_be_bytes());
+            let syn=ipv4::validate_forwarded(&bytes).unwrap();let mut flows=Flows::default();
+            let (_,r)=flows.prepare_direct(&syn,&a,&b,now).unwrap();flows.complete(r,true,now);
+            let client_next=if accepted {110} else {101};
+            let syn_ack=tcp_numbers(packet(6,b.ipv4.parse().unwrap(),443,a.ipv4.parse().unwrap(),1234,0x12),200,client_next);
+            let (_,_,r)=flows.lookup_reply(&syn_ack,&b,now).unwrap();flows.complete(r,true,now);
+            let ack=tcp_numbers(packet(6,a.ipv4.parse().unwrap(),1234,b.ipv4.parse().unwrap(),443,0x10),client_next,201);
+            let (_,r)=flows.prepare_direct(&ack,&a,&b,now).unwrap();flows.complete(r,true,now);
+            assert_eq!(flows.flows.values().next().unwrap().tcp_state,Some(TcpState::Established));
+            flows.expire(now+Duration::from_secs(301));assert_eq!(flows.flows.len(),1);
+        }
+    }
 
     #[test]
     fn direct_flow_uses_destination_identity_and_exact_reverse_tuple() {
@@ -501,12 +681,12 @@ mod tests {
         let syn = packet(6, "10.77.0.2".parse().unwrap(), 1234, "10.77.0.1".parse().unwrap(), 443, 2);
         let (_, r) = flows.prepare_forward_packet(&syn, &source, &f, &backend, now).unwrap(); flows.complete(r, true, now);
         let ack = packet(6, "10.77.0.2".parse().unwrap(), 1234, "10.77.0.1".parse().unwrap(), 443, 16);
-        assert!(flows.prepare_forward_packet(&ack, &source, &f, &backend, now + Duration::from_secs(299)).is_some());
+        assert!(flows.prepare_forward_packet(&ack, &source, &f, &backend, now + Duration::from_secs(59)).is_some());
         // Complete that existing delivery so its reservation does not affect pending state.
-        let (_, r) = flows.prepare_forward_packet(&ack, &source, &f, &backend, now + Duration::from_secs(299)).unwrap(); flows.complete(r, true, now + Duration::from_secs(299));
-        assert!(flows.prepare_forward_packet(&ack, &source, &f, &backend, now + Duration::from_secs(600)).is_none());
+        let (_, r) = flows.prepare_forward_packet(&ack, &source, &f, &backend, now + Duration::from_secs(59)).unwrap(); flows.complete(r, true, now + Duration::from_secs(59));
+        assert!(flows.prepare_forward_packet(&ack, &source, &f, &backend, now + Duration::from_secs(120)).is_none());
         assert!(flows.flows.is_empty() && flows.reverse.is_empty());
-        assert!(flows.prepare_forward_packet(&syn, &source, &f, &backend, now + Duration::from_secs(600)).is_some());
+        assert!(flows.prepare_forward_packet(&syn, &source, &f, &backend, now + Duration::from_secs(120)).is_some());
     }
 
     #[test]
@@ -529,7 +709,7 @@ mod tests {
         let mut full = Flows::default();
         for n in 0..CAPACITY {
             let key = Tuple { peer: format!("p{n}"), ip: Ipv4Addr::LOCALHOST, port: n as u16, frontend_ip: Ipv4Addr::LOCALHOST, frontend_port: 9, protocol: 17 };
-            let flow = Flow { reply: Reverse { peer: format!("b{n}"), proto: 17, src: Ipv4Addr::LOCALHOST, sport: 9, dst: Ipv4Addr::LOCALHOST, dport: n as u16 }, output: None, backend: "backend".into(), backend_ip: Ipv4Addr::LOCALHOST, initiator_key:String::new(),backend_key:String::new(),forward_id:None,last: now, fin_directions: 0, closed_until: None, generation: n as u64 };
+            let flow = Flow { reply: Reverse { peer: format!("b{n}"), proto: 17, src: Ipv4Addr::LOCALHOST, sport: 9, dst: Ipv4Addr::LOCALHOST, dport: n as u16 }, output: None, backend: "backend".into(), backend_ip: Ipv4Addr::LOCALHOST, initiator_key:String::new(),backend_key:String::new(),forward_id:None,last: now, fin_directions: 0, closed_until: None, generation: n as u64, tcp_state: None };
             full.pending_reverse.insert(flow.reply.clone(), key.clone()); full.pending.insert(key, flow);
         }
         assert!(full.reserve_capacity("capacity-check", now).is_none());
@@ -574,7 +754,7 @@ mod tests {
         // Failed pending delivery releases a slot immediately.
         let pending_key = Tuple { peer: source.id.clone(), ip: source.ipv4.parse().unwrap(), port: (PEER_CAPACITY / 2) as u16, frontend_ip: flows.hub_ip, frontend_port: 443, protocol: 6 };
         let reservation = flows.pending.get(&pending_key).cloned().unwrap();
-        flows.complete(Reservation { key: pending_key, flow: reservation, is_new: true, from_initiator: true, tcp_flags: None }, false, now);
+        flows.complete(Reservation { key: pending_key, flow: reservation, is_new: true, from_initiator: true, tcp: None, refresh: true }, false, now);
         let replacement = packet(6, source.ipv4.parse().unwrap(), PEER_CAPACITY as u16, flows.hub_ip, 443, 2);
         assert!(flows.prepare_forward_packet(&replacement, &source, &tcp_forward, &backend, now).is_some());
 
@@ -636,7 +816,7 @@ mod tests {
                     src: Ipv4Addr::LOCALHOST, sport: 9, dst: Ipv4Addr::LOCALHOST, dport: port as u16 },
                     output: None, backend: "backend".into(), backend_ip: Ipv4Addr::LOCALHOST,
                     initiator_key: String::new(), backend_key: String::new(), forward_id: None,
-                    last: now, fin_directions: 0, closed_until: None, generation: port as u64 };
+                    last: now, fin_directions: 0, closed_until: None, generation: port as u64, tcp_state: None };
                 flows.flows.insert(key, flow);
             }
         }
@@ -807,7 +987,7 @@ mod tests {
         for (port, proto, snat) in [(1234, 17, 40000), (1235, 17, 40001), (1236, 6, 40000)] {
             let key = Tuple { peer: source.clone(), ip: peer_ip, port, frontend_ip: hub_ip, frontend_port: 9000, protocol: proto };
             let reply = Reverse { peer: "backend".into(), proto, src: "10.77.0.3".parse().unwrap(), sport: 9000, dst: hub_ip, dport: snat };
-            let flow = Flow { reply: reply.clone(), output: Some(PacketTuple { src: hub_ip, src_port: snat, dst: reply.src, dst_port: 9000 }), backend: "backend".into(), backend_ip: reply.src, initiator_key: String::new(), backend_key: String::new(), forward_id: Some("f".into()), last: t(), fin_directions: 0, closed_until: None, generation: port as u64 };
+            let flow = Flow { reply: reply.clone(), output: Some(PacketTuple { src: hub_ip, src_port: snat, dst: reply.src, dst_port: 9000 }), backend: "backend".into(), backend_ip: reply.src, initiator_key: String::new(), backend_key: String::new(), forward_id: Some("f".into()), last: t(), fin_directions: 0, closed_until: None, generation: port as u64, tcp_state: None };
             flows.reverse.insert(reply, key.clone());
             flows.flows.insert(key, flow);
         }

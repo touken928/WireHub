@@ -129,12 +129,18 @@ After a runtime reload fails, WireHub fails closed, reports the reload failure, 
 
 Each peer is limited to **256 active plus pending flow entries**. Separately, the router's queued-delivery buffer is bounded to 256 packets and also enforces byte and time limits; excess queued work is dropped rather than growing without bound.
 
+TCP flows that have completed the three-way handshake have an idle timeout of **2 hours 4 minutes**, following the established-connection baseline in [RFC 5382 section 5](https://www.rfc-editor.org/rfc/rfc5382.html#section-5). Incomplete TCP handshakes and UDP flows expire after **60 seconds** of inactivity. Successful FINs in both directions or an RST start a fixed **30-second** cleanup grace. Expired flows are silently reclaimed; use TCP keepalives or application heartbeats to retain an idle connection. WireGuard keepalives alone do not refresh business flows. Per-peer and global capacity limits still apply, and acknowledged ACL revocation removes affected flows immediately, regardless of their timeout.
+
+Related ICMP destination-unreachable, time-exceeded, and parameter-problem errors from the authenticated backend are returned through existing live TCP/UDP mappings, with the quoted original packet restored. ICMP errors do not extend flow lifetimes or create new mappings.
+
 ---
 
 Each version tag publishes **Linux amd64 / arm64** binaries to GitHub Releases, along with **amd64 / arm64** Docker images. See [`v0`](https://github.com/touken928/WireHub/tree/v0) for the previous version.
 # Database and hub-key backups
 
-This release uses strict schema version 3. Older or structurally drifted databases are rejected; there is no automatic migration. At startup, WireHub binds the hub private-key file to the public identity persisted in SQLite; network setup does not create or bind that identity. Back up the SQLite database and hub private-key file together as an immutable identity pair. Restoring only one half can make startup fail because the persisted public identity must match the private key. Schema drift detection includes unexpected SQLite statistics tables and index objects.
+This release uses strict schema version 4. Canonical version 3 databases are validated and upgraded atomically by adding a pending-provision journal; existing configuration and hub identity are preserved. Older or structurally drifted databases are rejected. Version 4 databases cannot be opened by an older version 3 binary. At startup, WireHub binds the hub private-key file to the public identity persisted in SQLite; network setup does not create or bind that identity. Back up the SQLite database and hub private-key file together as an immutable identity pair. Restoring only one half can make startup fail because the persisted public identity must match the private key. Schema drift detection includes unexpected SQLite statistics tables and index objects.
+
+Peer provisioning records its pending state without storing the private key. Pending peers are hidden from the peer inventory and cannot be forwarding targets. Cancelling an HTTP request during activation schedules peer removal and a cleanup reload; startup removes any remaining unfinished provisions before loading the router. Successful provisioning clears the pending marker before returning the one-time configuration. Save that response: delivery acknowledgement by the client is not tracked, so a lost response still requires deleting and recreating the peer.
 
 ## Hub-key security
 

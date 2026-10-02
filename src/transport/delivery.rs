@@ -27,6 +27,8 @@ pub(super) fn resolve_packet(packet: &ipv4::ValidatedPacket, source: &Peer, sour
     if let Some((target_id, bytes, reservation)) = nat.lookup_reply(packet, source, now) {
         return (Some(DeliveryPlan { source_id: source_id.into(), target_id, bytes, reservation: Some(reservation), forward_id:None }), true);
     }
+    // An unassociated error must never fall back to an ACL route or a new flow.
+    if packet.is_icmp_error() { return (None, true); }
     let mut terminal = false;
     let mut plan = None;
     if packet.dst() == hub_ip.unwrap_or(Ipv4Addr::UNSPECIFIED) {

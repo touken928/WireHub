@@ -2,7 +2,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::network;
 use super::{sql_error, Store};
 
-pub(super) const SCHEMA_VERSION: i64 = 3;
+pub(super) const SCHEMA_VERSION: i64 = 4;
 pub(super) const TABLES: &str = "
 CREATE TABLE groups(id TEXT PRIMARY KEY,name TEXT NOT NULL,allowed TEXT NOT NULL DEFAULT '[]');
 CREATE TABLE peers(id TEXT PRIMARY KEY,name TEXT NOT NULL,public_key TEXT NOT NULL UNIQUE,ipv4 TEXT NOT NULL UNIQUE,group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE RESTRICT,rx INTEGER NOT NULL DEFAULT 0,tx INTEGER NOT NULL DEFAULT 0,last_handshake INTEGER);
@@ -11,6 +11,7 @@ CREATE TABLE network_settings(id INTEGER PRIMARY KEY CHECK(id=1),subnet TEXT NOT
 CREATE TABLE hub_identity(id INTEGER PRIMARY KEY CHECK(id=1),public_key BLOB NOT NULL CHECK(typeof(public_key)='blob' AND length(public_key)=32));
 CREATE UNIQUE INDEX groups_name_unique ON groups(name);
 CREATE UNIQUE INDEX peers_name_unique ON peers(name);
+CREATE TABLE pending_provisions(peer_id TEXT PRIMARY KEY NOT NULL REFERENCES peers(id) ON DELETE CASCADE);
 ";
 
 pub(super) fn open(path: &str) -> rusqlite::Result<Store> {
@@ -18,7 +19,7 @@ pub(super) fn open(path: &str) -> rusqlite::Result<Store> {
     db.pragma_update(None, "foreign_keys", "ON")?;
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version != 0 && version != SCHEMA_VERSION {
+    if version != 0 && version != 3 && version != SCHEMA_VERSION {
         return Err(sql_error("database schema version is unsupported (including v1/v2); export any needed data and create a fresh database; refusing to modify database"));
     }
     if version == 0 {
@@ -33,16 +34,23 @@ pub(super) fn open(path: &str) -> rusqlite::Result<Store> {
         tx.execute_batch(TABLES)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     } else {
-        validate_current_schema(&tx)?;
+        validate_current_schema(&tx, version)?;
         validate_current_settings(&tx)?;
         validate_current_data(&tx)?;
+        if version == 3 {
+            tx.execute_batch("CREATE TABLE pending_provisions(peer_id TEXT PRIMARY KEY NOT NULL REFERENCES peers(id) ON DELETE CASCADE);")?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        } else {
+            let invalid: i64 = tx.query_row("SELECT COUNT(*) FROM pending_provisions WHERE typeof(peer_id)!='text'", [], |r| r.get(0))?;
+            if invalid != 0 { return Err(sql_error("current database contains invalid pending provisions; refusing to start")); }
+        }
     }
     tx.commit()?;
     Ok(Store { db: std::sync::Mutex::new(db) })
 }
 
-fn validate_current_schema(db: &Connection) -> rusqlite::Result<()> {
-    validate_schema_exact(db)?;
+fn validate_current_schema(db: &Connection, version: i64) -> rusqlite::Result<()> {
+    validate_schema_exact(db, version)?;
     let invalid: i64 = db.query_row("SELECT COUNT(*) FROM forwards WHERE protocol NOT IN ('tcp','udp') OR target_port NOT BETWEEN 1 AND 65535", [], |r| r.get(0))?;
     if invalid != 0 {
         return Err(sql_error("current database contains an invalid forward protocol or port; refusing to modify database"));
@@ -56,9 +64,10 @@ fn schema_rows(db: &Connection) -> rusqlite::Result<Vec<(String, String, String,
     rows
 }
 
-fn validate_schema_exact(db: &Connection) -> rusqlite::Result<()> {
+fn validate_schema_exact(db: &Connection, version: i64) -> rusqlite::Result<()> {
     let reference = Connection::open_in_memory()?;
-    reference.execute_batch(TABLES)?;
+    let tables = if version == 3 { TABLES.split("CREATE TABLE pending_provisions").next().unwrap() } else { TABLES };
+    reference.execute_batch(tables)?;
     if schema_rows(db)? != schema_rows(&reference)? {
         return Err(sql_error("current database schema differs from canonical schema; refusing to modify database"));
     }

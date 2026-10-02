@@ -117,3 +117,47 @@ use crate::{storage::Store, transport::{Readiness, ReloadCommand, RuntimeStats}}
         let(status,body)=response_text(delete_group(State(s.clone()),h.clone(),Path("g".into())).await.into_response()).await;assert_eq!(status,StatusCode::CONFLICT);assert!(body.contains("resource is in use"));assert!(rx.try_recv().is_err());
         let unchanged=s.store.forwards().unwrap();assert_eq!(unchanged.len(),1);assert_eq!(unchanged[0].allowed_group_ids,vec!["g"]);assert_eq!(s.store.group("g").unwrap().unwrap().allowed_groups,Vec::<String>::new());
     }
+
+#[tokio::test]
+async fn http_disconnect_during_peer_activation_cleans_up_and_allows_retry() {
+    use tokio::io::AsyncWriteExt;
+    let (state,mut rx,_)=test_state(true);
+    state.store.add_group(&Group{id:"g".into(),name:"g".into(),allowed_groups:vec![]}).unwrap();
+    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let address=listener.local_addr().unwrap();
+    let app=router(state.clone()); let server=tokio::spawn(async move { axum::serve(listener,app).await.unwrap(); });
+    let mut client=tokio::net::TcpStream::connect(address).await.unwrap();
+    let body=r#"{"name":"disconnected","group_id":"g"}"#;
+    let request=format!("POST /api/peers HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer secret\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",body.len(),body);
+    client.write_all(request.as_bytes()).await.unwrap();
+    let command=tokio::time::timeout(Duration::from_secs(1),rx.recv()).await.unwrap().unwrap();
+    assert_eq!(state.store.runtime_snapshot().unwrap().peers.len(),1);
+    assert!(state.store.peers().unwrap().is_empty(),"pending provision is hidden from inventory");
+    drop(client);
+    let cleanup=tokio::time::timeout(Duration::from_secs(1),rx.recv()).await.unwrap().unwrap();
+    assert!(command.ack.is_closed(),"HTTP disconnect cancelled the handler");
+    assert!(state.store.runtime_snapshot().unwrap().peers.is_empty());
+    cleanup.ack.send(Ok(())).unwrap();
+    let worker=tokio::spawn(async move { rx.recv().await.unwrap().ack.send(Ok(())).unwrap(); });
+    let mut headers=HeaderMap::new();headers.insert("authorization","Bearer secret".parse().unwrap());
+    let response=create_peer(State(state.clone()),headers,Json(NewPeer{name:"disconnected".into(),group_id:"g".into()})).await.into_response();
+    assert_eq!(response.status(),StatusCode::CREATED);
+    assert_eq!(state.store.peers().unwrap()[0].ipv4,"10.88.0.2");
+    worker.await.unwrap();server.abort();let _=server.await;
+}
+
+#[tokio::test]
+async fn concurrent_peer_deletion_during_activation_never_returns_unusable_config() {
+    let (state,mut rx,headers)=test_state(true);
+    state.store.add_group(&Group{id:"g".into(),name:"g".into(),allowed_groups:vec![]}).unwrap();
+    let task=tokio::spawn(create_peer(State(state.clone()),headers,Json(NewPeer{name:"deleted".into(),group_id:"g".into()})));
+    let command=rx.recv().await.unwrap();
+    let id=state.store.runtime_snapshot().unwrap().peers[0].id.clone();
+    state.store.remove_peer(&id).unwrap(); command.ack.send(Ok(())).unwrap();
+    let cleanup=rx.recv().await.unwrap();cleanup.ack.send(Ok(())).unwrap();
+    let response=task.await.unwrap().into_response();
+    assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[header::CACHE_CONTROL],"no-store");
+    let body=axum::body::to_bytes(response.into_body(),usize::MAX).await.unwrap();
+    assert!(!String::from_utf8_lossy(&body).contains("PrivateKey"));
+    assert!(state.store.runtime_snapshot().unwrap().peers.is_empty());
+}

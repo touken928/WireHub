@@ -38,12 +38,44 @@ fn render_config(private_key: &str, peer: &Peer, state: &AppState, settings: &cr
 }
 
 async fn cleanup_failed_provision(state: &AppState, peer_id: &str) -> bool {
-    matches!(state.store.remove_peer(peer_id), Ok(1)) && reload(state).await
+    state.store.remove_peer(peer_id).is_ok() && reload(state).await
+}
+
+struct ProvisionGuard { state: AppState, peer_id: String, armed: bool }
+impl ProvisionGuard {
+    async fn cleanup(&mut self) -> bool {
+        let cleaned = cleanup_failed_provision(&self.state, &self.peer_id).await;
+        if cleaned { self.armed = false; }
+        cleaned
+    }
+}
+impl Drop for ProvisionGuard {
+    fn drop(&mut self) {
+        if !self.armed { return; }
+        let state = self.state.clone(); let peer_id = self.peer_id.clone();
+        // Cancellation cannot await cleanup. Keep it alive independently of
+        // the HTTP connection; the durable journal covers process termination.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if !cleanup_failed_provision(&state, &peer_id).await {
+                    eprintln!("cancelled peer provisioning cleanup was not acknowledged");
+                }
+            });
+        }
+    }
 }
 
 #[utoipa::path(post, path = "/api/peers", tag = "crate", request_body = NewPeer, responses((status = 201, body = PeerProvision)))]
 pub async fn create_peer(State(state): State<AppState>, headers: HeaderMap, Json(new): Json<NewPeer>) -> impl IntoResponse {
     if !auth(&headers, &state) { return err(StatusCode::UNAUTHORIZED, "unauthorized").into_response(); }
+
+    // Fetch settings before allocating a record: a failed read cannot strand
+    // a peer whose private configuration has not been returned.
+    let settings = match state.store.network_settings() {
+        Ok(Some(settings)) => settings,
+        Ok(None) => return err(StatusCode::CONFLICT, "setup required").into_response(),
+        Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+    };
 
     let mut private = [0u8; 32];
     OsRng.fill_bytes(&mut private);
@@ -55,14 +87,15 @@ pub async fn create_peer(State(state): State<AppState>, headers: HeaderMap, Json
         id: uuid(), name: new.name, public_key, ipv4: String::new(), group_id: new.group_id,
         received_bytes: 0, sent_bytes: 0, last_handshake_unix: None,
     };
-    match state.store.create_peer_allocated(&mut peer) {
+    match state.store.begin_peer_provision(&mut peer) {
         Ok(true) => {}
         Ok(false) => return err(StatusCode::CONFLICT, "address pool exhausted").into_response(),
         Err(error) => return creation_error(error, "peer conflict"),
     }
+    let mut guard = ProvisionGuard { state: state.clone(), peer_id: peer.id.clone(), armed: true };
 
     if !reload(&state).await {
-        let cleanup_succeeded = cleanup_failed_provision(&state, &peer.id).await;
+        let cleanup_succeeded = guard.cleanup().await;
         let message = if cleanup_succeeded {
             "runtime reload failed; peer removal and cleanup reload acknowledged"
         } else {
@@ -73,11 +106,16 @@ pub async fn create_peer(State(state): State<AppState>, headers: HeaderMap, Json
         return response;
     }
 
-    let settings = match state.store.network_settings() {
-        Ok(Some(settings)) => settings,
-        _ => return err(StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
-    };
     let config = render_config(&private_key, &peer, &state, &settings);
+    match state.store.finish_peer_provision(&peer.id) {
+        Ok(1) => guard.armed = false,
+        _ => {
+            guard.cleanup().await;
+            let mut response = err(StatusCode::SERVICE_UNAVAILABLE, "peer provisioning could not be finalized").into_response();
+            response.headers_mut().insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
+            return response;
+        }
+    }
     let mut response = (StatusCode::CREATED, Json(PeerProvision { peer, config })).into_response();
     response.headers_mut().insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
     response

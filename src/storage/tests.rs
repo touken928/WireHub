@@ -99,3 +99,42 @@
     }
    }
  #[test] fn open_serializes_behind_immediate_writer(){let d=tempfile::tempdir().unwrap();let p=d.path().join("locked");let path=p.clone();let(ready,wait)=std::sync::mpsc::channel();let(release_tx,release_rx)=std::sync::mpsc::channel();let writer=std::thread::spawn(move||{let db=Connection::open(path).unwrap();let tx=db.unchecked_transaction().unwrap();tx.execute_batch("CREATE TABLE sentinel(value INTEGER)").unwrap();ready.send(()).unwrap();release_rx.recv().unwrap();tx.commit().unwrap();});wait.recv().unwrap();let releaser=std::thread::spawn(move||{std::thread::sleep(std::time::Duration::from_millis(100));release_tx.send(()).unwrap();});assert!(Store::open(p.to_str().unwrap()).is_err());writer.join().unwrap();releaser.join().unwrap();let db=Connection::open(&p).unwrap();let exists:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sentinel')",[],|r|r.get(0)).unwrap();assert!(exists);assert_eq!(db.query_row("PRAGMA user_version",[],|r|r.get::<_,i64>(0)).unwrap(),0);}
+
+#[test]
+fn canonical_v3_migrates_without_changing_existing_configuration_or_identity() {
+    let dir=tempfile::tempdir().unwrap();let path=dir.path().join("v3.db");
+    let s=Store::open(path.to_str().unwrap()).unwrap();s.bind_test_identity();
+    s.setup("10.77.0.0/24","hub.example:51820",25).unwrap();s.add_group(&group("group")).unwrap();
+    let mut p=peer("existing");s.create_peer_allocated(&mut p).unwrap();let identity=s.hub_identity().unwrap();drop(s);
+    let db=Connection::open(&path).unwrap();db.execute_batch("DROP TABLE pending_provisions; PRAGMA user_version=3;").unwrap();drop(db);
+    let s=Store::open(path.to_str().unwrap()).unwrap();assert_eq!(s.hub_identity().unwrap(),identity);
+    assert_eq!(s.peers().unwrap()[0].id,"existing");assert_eq!(s.peers().unwrap()[0].ipv4,"10.77.0.2");
+    assert_eq!(s.network_settings().unwrap().unwrap().endpoint,"hub.example:51820");
+    assert_eq!(s.db.lock().unwrap().pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),4);
+    assert_eq!(s.recover_pending_provisions().unwrap(),0);
+}
+
+#[test]
+fn drifted_v3_is_rejected_without_migration() {
+    let dir=tempfile::tempdir().unwrap();let path=dir.path().join("drift.db");drop(Store::open(path.to_str().unwrap()).unwrap());
+    let db=Connection::open(&path).unwrap();db.execute_batch("DROP TABLE pending_provisions; CREATE INDEX drift ON peers(group_id); PRAGMA user_version=3;").unwrap();drop(db);
+    assert!(Store::open(path.to_str().unwrap()).is_err());
+    let db=Connection::open(&path).unwrap();assert_eq!(db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),3);
+    let count:i64=db.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE name='pending_provisions'",[],|r|r.get(0)).unwrap();assert_eq!(count,0);
+}
+
+#[test]
+fn unfinished_provisions_are_hidden_unreferencable_and_recovered_after_restart() {
+    let dir=tempfile::tempdir().unwrap();let path=dir.path().join("recovery.db");
+    let s=Store::open(path.to_str().unwrap()).unwrap();s.bind_test_identity();s.setup("10.77.0.0/24","hub.example:51820",25).unwrap();s.add_group(&group("group")).unwrap();
+    let mut completed=peer("complete");s.begin_peer_provision(&mut completed).unwrap();s.finish_peer_provision(&completed.id).unwrap();
+    let mut pending=peer("pending");s.begin_peer_provision(&mut pending).unwrap();
+    assert_eq!(s.peers().unwrap().len(),1);assert_eq!(s.runtime_snapshot().unwrap().peers.len(),2);
+    let mut f=forward("pending-target");f.target_peer_id=pending.id.clone();assert!(s.create_forward(&mut f).is_err());
+    drop(s);
+    let s=Store::open(path.to_str().unwrap()).unwrap();assert_eq!(s.recover_pending_provisions().unwrap(),1);
+    assert_eq!(s.peers().unwrap()[0].id,"complete");assert_eq!(s.runtime_snapshot().unwrap().peers.len(),1);
+    assert_eq!(s.recover_pending_provisions().unwrap(),0);
+    let mut retry=peer("pending");s.begin_peer_provision(&mut retry).unwrap();assert_eq!(retry.ipv4,pending.ipv4);
+    s.finish_peer_provision(&retry.id).unwrap();assert_eq!(s.peers().unwrap().len(),2);
+}
