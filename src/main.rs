@@ -8,8 +8,6 @@ mod static_assets;
 mod transport;
 mod startup;
 mod hub_key;
-#[cfg(windows)]
-mod windows_key;
 
 #[tokio::main]
 async fn main() -> startup::Result<()> {

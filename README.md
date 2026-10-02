@@ -23,6 +23,8 @@
 
 ## Quick start
 
+WireHub supports native builds on Unix systems only. Windows is unsupported and is not built or tested.
+
 ### Docker
 
 Replace the admin token with your own long random secret, then start WireHub:
@@ -40,7 +42,7 @@ docker run -d --name wirehub \
   ghcr.io/touken928/wirehub:latest
 ```
 
-### Linux / Windows binary
+### Linux binary
 
 Download the file for your platform from [GitHub Releases](https://github.com/touken928/WireHub/releases):
 
@@ -48,9 +50,6 @@ Download the file for your platform from [GitHub Releases](https://github.com/to
 | --- | --- |
 | Linux amd64 | `wirehub-vX.Y.Z-linux-amd64` |
 | Linux arm64 | `wirehub-vX.Y.Z-linux-arm64` |
-| Windows amd64 | `wirehub-vX.Y.Z-windows-amd64.exe` |
-
-**Linux**
 
 ```sh
 chmod +x wirehub-vX.Y.Z-linux-amd64
@@ -60,18 +59,25 @@ export WIREHUB_ADMIN_TOKEN='replace-with-a-long-random-secret'
 
 Use the `linux-arm64` file on ARM servers.
 
-**Windows (PowerShell)**
-
-```powershell
-$env:WIREHUB_ADMIN_TOKEN = 'replace-with-a-long-random-secret'
-.\wirehub-vX.Y.Z-windows-amd64.exe
-```
-
 The web UI is included. Run the binary from a dedicated folder and keep that folder's data when updating.
 
 Open **[http://localhost:51820](http://localhost:51820)**, enter the same admin token, and click **Connect**.
 
 For a remote server, run `ssh -L 51820:127.0.0.1:51820 user@server`, then open the address above in your local browser. The admin interface is available only on the server's loopback interface by default. Use an HTTPS reverse proxy for public access.
+
+### Build from source on Unix
+
+Install Rust, Node.js 22, pnpm 9.15.9, and a native C toolchain for the bundled SQLite dependency. Build on the Unix system where you intend to run WireHub:
+
+```sh
+pnpm --dir frontend install --frozen-lockfile
+pnpm --dir frontend build
+cargo build --release --locked
+export WIREHUB_ADMIN_TOKEN='replace-with-a-long-random-secret'
+./target/release/wirehub
+```
+
+The frontend must be built first so its assets are embedded in the binary. Release binaries are built natively on Linux amd64 and arm64 runners.
 
 ### Initial setup
 
@@ -125,13 +131,13 @@ Each peer is limited to **256 active plus pending flow entries**. Separately, th
 
 ---
 
-Each version tag publishes **Linux amd64 / arm64** and **Windows amd64** binaries to GitHub Releases, along with **amd64 / arm64** Docker images. See [`v0`](https://github.com/touken928/WireHub/tree/v0) for the previous version.
+Each version tag publishes **Linux amd64 / arm64** binaries to GitHub Releases, along with **amd64 / arm64** Docker images. See [`v0`](https://github.com/touken928/WireHub/tree/v0) for the previous version.
 # Database and hub-key backups
 
 This release uses strict schema version 3. Older or structurally drifted databases are rejected; there is no automatic migration. At startup, WireHub binds the hub private-key file to the public identity persisted in SQLite; network setup does not create or bind that identity. Back up the SQLite database and hub private-key file together as an immutable identity pair. Restoring only one half can make startup fail because the persisted public identity must match the private key. Schema drift detection includes unexpected SQLite statistics tables and index objects.
 
-## Windows hub-key security
+## Hub-key security
 
-On Windows, newly generated hub-key files are created exclusively with an explicit current-user owner and a protected DACL granting full control only to that user and LocalSystem. Existing key files are never silently repaired or replaced. Startup opens the key through a single validated file handle and fails closed for reparse points, null or broad/unsupported ACLs, unexpected owners, and files not granting the current user read/write access. The key file must be readable and writable by the account running WireHub because startup flushes it to stable storage. Store the key in a directory writable by that account; broad parent-directory permissions do not weaken the protected DACL on newly created keys.
+Hub-key files are created exclusively with mode `0600`. Startup rejects symlinks, non-regular files, files with permissions other than `0600`, and keys that are not exactly 32 bytes. It checks the opened file's device and inode against the inspected path and validates permissions again before reading. Existing keys are never silently repaired or replaced.
 
-Windows key publication uses an exclusive, protected temporary file and keeps its handle open without write/delete sharing while attempting the non-overwriting hard-link publication. If the filesystem or directory does not support this safe publication route, startup fails rather than falling back to an overwrite or a weaker sharing mode. Back up `wirehub.sqlite3` and `wirehub.key` together and preserve their security descriptors when restoring them. The Windows security workflow exercises ACL validation, flush/read-write access, reparse-point rejection, and publication paths; creating file symlinks in the test suite requires Windows Developer Mode or an elevated test runner.
+Publication syncs an exclusive temporary file, creates a non-overwriting hard link, removes the temporary file, and syncs the parent directory. Store the key in a directory controlled by the account running WireHub on a filesystem that supports hard links and directory syncing. Back up `wirehub.sqlite3` and `wirehub.key` together, preserving mode `0600` when restoring the key.
