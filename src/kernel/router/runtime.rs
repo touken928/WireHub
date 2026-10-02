@@ -5,7 +5,7 @@ use super::delivery::PendingDelivery;
 
 /// Run the WireGuard router on an already-bound UDP socket. `hub_private` is
 /// the hub's persisted static private key; it is never written by this module.
-pub(super) async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [u8; 32], mut commands: mpsc::Receiver<ReloadCommand>, stats: RuntimeStats, readiness:Readiness, startup: Option<oneshot::Sender<Result<(), ()>>>) -> Result<(),()> {
+pub(super) async fn run_udp(socket: UdpSocket, loader: SnapshotLoader, hub_private: [u8; 32], mut commands: mpsc::Receiver<ReloadCommand>, stats: RuntimeStats, readiness:Readiness, startup: Option<oneshot::Sender<Result<(), ()>>>) -> Result<(),()> {
     let hub_secret = StaticSecret::from(hub_private);
     let hub_public = PublicKey::from(&hub_secret);
     let rate_limiter = Arc::new(RateLimiter::new(&hub_public, 100));
@@ -16,7 +16,7 @@ pub(super) async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [
     state.next_index = 1;
 
     readiness.set(false);
-    if let Err(error) = apply_snapshot(&store, hub_private, rate_limiter.clone(), &mut state, &stats, HashMap::new()).await {
+    if let Err(error) = apply_snapshot(&loader, hub_private, rate_limiter.clone(), &mut state, &stats, HashMap::new()).await {
         readiness.set(false);
         if let Some(ready) = startup { let _ = ready.send(Err(())); }
         return Err(error);
@@ -34,7 +34,7 @@ pub(super) async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [
                 // Snapshot and validate before touching the installed runtime. A failed
                 // reload is fail-closed; a valid reload reconciles authenticated state.
                 let old = std::mem::take(&mut state.peers);
-                let result = apply_snapshot(&store, hub_private, rate_limiter.clone(), &mut state, &stats, old).await;
+                let result = apply_snapshot(&loader, hub_private, rate_limiter.clone(), &mut state, &stats, old).await;
                 if result.is_err() { eprintln!("runtime reload snapshot failed; runtime remains fail-closed");state.fail_closed(); readiness.set(false);retry.succeeded();retry_at=Some(retry.failed_at(Instant::now())); }
                 else { readiness.set(true); retry.succeeded();retry_at=None; }
                 publish_stats(&state.peers, &stats).await;
@@ -44,13 +44,13 @@ pub(super) async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [
                 rate_limiter.reset_count();
                 state.flows.expire(Instant::now());
                 for runtime in state.peers.values_mut() {
-                    let result = runtime.tunnel.update_timers(&mut out);
-                    if let (TunnResult::WriteToNetwork(packet), Some(endpoint)) = (result, runtime.endpoint) { let _ = socket.send_to(packet, endpoint).await; }
+                    let result = runtime.session.tunnel.update_timers(&mut out);
+                    if let (TunnResult::WriteToNetwork(packet), Some(endpoint)) = (result, runtime.session.endpoint) { let _ = socket.send_to(packet, endpoint).await; }
                 }
                 drain_pending(&socket, &mut state.pending, &mut state.pending_bytes, &mut state.peers, &state.forwards, state.hub_ip, &mut state.flows, &mut out).await;
                 publish_stats(&state.peers, &stats).await;
                 if retry_at.is_some_and(|at|Instant::now()>=at) {
-                    match apply_snapshot(&store, hub_private, rate_limiter.clone(), &mut state, &stats, HashMap::new()).await {
+                    match apply_snapshot(&loader, hub_private, rate_limiter.clone(), &mut state, &stats, HashMap::new()).await {
                         Ok(())=>{ readiness.set(true);retry_at=None;retry.succeeded(); }
                         Err(())=>{ readiness.set(false);retry_at=Some(retry.failed_at(Instant::now()));eprintln!("runtime snapshot recovery failed; remaining fail-closed"); }
                     }
@@ -77,7 +77,7 @@ pub(super) async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [
                         #[cfg(test)]
                         ANON_PARSE_COUNT.with(|count| count.fetch_add(1, Ordering::SeqCst));
                         parse_handshake_anon(&hub_secret, &hub_public, &init).ok()
-                            .and_then(|h| state.peers.iter().find(|(_, p)| decode_public_key(&p.peer.public_key).ok().as_ref() == Some(&h.peer_static_public)).map(|(id, _)| id.clone()))
+                            .and_then(|h| state.keys.get(&h.peer_static_public).cloned())
                     }
                     Ok(Packet::HandshakeResponse(resp)) => state.indexes.get(&(resp.receiver_idx & 0xffff_ff00)).cloned(),
                     Ok(Packet::PacketCookieReply(cookie)) => state.indexes.get(&(cookie.receiver_idx & 0xffff_ff00)).cloned(),
@@ -86,7 +86,7 @@ pub(super) async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [
                 };
                 let Some(id) = peer_id else { continue };
                 let Some(runtime) = state.peers.get_mut(&id) else { continue };
-                let result = runtime.tunnel.decapsulate(Some(endpoint.ip()), bytes, &mut out);
+                let result = runtime.session.tunnel.decapsulate(Some(endpoint.ip()), bytes, &mut out);
                 let mut authenticated = false;
                 let mut handshake_authenticated = false;
                 let mut data_authenticated = false;
@@ -115,18 +115,18 @@ pub(super) async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [
                             }
                             first_result = false;
                             let _ = socket.send_to(&payload, endpoint).await;
-                            pending = runtime.tunnel.decapsulate(None, &[], &mut out);
+                            pending = runtime.session.tunnel.decapsulate(None, &[], &mut out);
                         }
                         TunnResult::WriteToTunnelV4(packet, _) => {
                             first_result = false;
                             authenticated = true;
                             data_authenticated = true;
-                            if let Some(packet) = ipv4::validate(packet, &runtime.peer, runtime.group.as_ref()) {
+                            if let Some(packet) = ipv4::validate(packet, &runtime.config, runtime.config.group.as_ref()) {
                                 packet_queue.push(packet);
                             }
-                            pending = runtime.tunnel.decapsulate(None, &[], &mut out);
+                            pending = runtime.session.tunnel.decapsulate(None, &[], &mut out);
                         }
-                        TunnResult::WriteToTunnelV6(_, _) => { first_result = false; data_authenticated = true; pending = runtime.tunnel.decapsulate(None, &[], &mut out); }
+                        TunnResult::WriteToTunnelV6(_, _) => { first_result = false; data_authenticated = true; pending = runtime.session.tunnel.decapsulate(None, &[], &mut out); }
                         // BoringTun 0.7.1 returns Done for an authenticated
                         // empty transport packet (keepalive), but also for a
                         // cookie reply. Never infer response authentication
@@ -136,28 +136,28 @@ pub(super) async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [
                         TunnResult::Err(_) => break,
                     }
                 }
-                if authenticated { runtime.endpoint = Some(endpoint); }
-                if handshake_authenticated { runtime.peer.last_handshake_unix = Some(unix_now()); }
-                if data_authenticated { runtime.last_data_unix = Some(unix_now()); }
+                if authenticated { runtime.session.endpoint = Some(endpoint); }
+                if handshake_authenticated { runtime.stats.last_handshake_unix = Some(unix_now()); }
+                if data_authenticated { runtime.stats.last_data_unix = Some(unix_now()); }
                 let _ = runtime;
                 for packet in packet_queue {
                     let now = std::time::Instant::now();
                     // `id` came from the authenticated tunnel receiver index. Keep
                     // that identity; never infer a source peer from packet IP.
-                    let Some(source) = state.peers.get(&id).map(|p| p.peer.clone()) else { continue };
-                    let Some(source_group) = state.peers.get(&id).and_then(|p| p.group.clone()) else { continue };
-                    let (plan, was_reply) = resolve_packet(&packet, &source, &source_group, &id, &state.peers, &state.forwards, state.hub_ip, &mut state.flows, now);
+                    let Some(source) = state.peers.get(&id).map(|p| p.config.clone()) else { continue };
+                    let Some(source_group) = state.peers.get(&id).and_then(|p| p.config.group.clone()) else { continue };
+                    let (plan, was_reply) = resolve_packet_indexed(&packet, &source, &source_group, &id, &state.peers, Some(&state.ips), &state.forwards, state.hub_ip, &mut state.flows, now);
                     if let Some(mut plan) = plan {
                         let outcome = deliver_plan(&socket, &mut state.peers, &plan, &mut out).await;
                         complete_delivery(&mut state.flows, &mut state.peers, &mut plan, outcome);
                         if outcome == EgressOutcome::NotReady {
                             let target=state.peers.get(&plan.target_id);
                             let forward=plan.forward_id.as_ref().and_then(|id|state.forwards.iter().find(|f|&f.id==id));
-                            enqueue_pending(&mut state.pending, &mut state.pending_bytes, PendingDelivery { source_id: id.clone(), source_key:source.public_key.clone(), source_ip:packet.src(), packet: packet.clone(), reply_only: was_reply, deadline: Instant::now() + PENDING_TTL, target_id: plan.target_id.clone(), target_key:target.map(|p|p.peer.public_key.clone()).unwrap_or_default(), target_ip:target.and_then(|p|p.peer.ipv4.parse().ok()).unwrap_or(Ipv4Addr::UNSPECIFIED), forward_id: plan.forward_id.clone(), forward_protocol:forward.map(|f|f.protocol.clone()), forward_target_port:forward.map(|f|f.target_port) });
+                            enqueue_pending(&mut state.pending, &mut state.pending_bytes, PendingDelivery { source_id: id.clone(), source_key:source.public_key.clone(), source_ip:packet.src(), packet: packet.clone(), reply_only: was_reply, deadline: Instant::now() + PENDING_TTL, target_id: plan.target_id.clone(), target_key:target.map(|p|p.config.public_key.clone()).unwrap_or_default(), target_ip:target.map(|p|p.config.ip).unwrap_or(Ipv4Addr::UNSPECIFIED), forward_id: plan.forward_id.clone(), forward_protocol:forward.map(|f|f.protocol.clone()), forward_target_port:forward.map(|f|f.target_port) });
                             #[cfg(test)]
                             QUEUE_OBSERVER.try_with(|observer| {
                                 let queued = state.pending.iter().map(|item| (item.source_id.clone(), item.target_id.clone(), item.forward_id.clone(), item.packet.src(), item.packet.dst(), item.target_ip, item.packet.src_port().unwrap_or_default(), item.packet.protocol())).collect();
-                                let counters = state.peers.get(&id).map(|peer| (peer.peer.received_bytes, peer.peer.sent_bytes)).unwrap_or_default();
+                                let counters = state.peers.get(&id).map(|peer| (peer.stats.received_bytes, peer.stats.sent_bytes)).unwrap_or_default();
                                 let _ = observer.send(QueueObservation { queued, queued_bytes: state.pending_bytes, flow_counts: state.flows.test_state_counts(), source_counters: counters });
                             }).ok();
                         }

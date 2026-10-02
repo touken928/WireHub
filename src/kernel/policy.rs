@@ -1,9 +1,9 @@
 use std::net::Ipv4Addr;
-use crate::model::{Forward, Group, Peer};
+use crate::{model::Forward, model::Group, kernel::snapshot::{PeerConfig, PeerConfigView}};
 
 /// Borrowed authorization context, independent of WireGuard tunnel state.
 #[derive(Clone, Copy)]
-pub(super) struct PeerPolicy<'a> { pub peer: &'a Peer, pub group: Option<&'a Group> }
+pub(super) struct PeerPolicy<'a> { pub peer: &'a PeerConfig, pub group: Option<&'a Group> }
 
 pub(super) fn route_allowed(source: Option<&Group>, destination: Option<&Group>) -> bool {
     matches!((source, destination), (Some(s), Some(d)) if allows(s, d))
@@ -22,13 +22,14 @@ pub fn forward_allowed(forward: &Forward, source_group_id: &str, source: Option<
 }
 
 /// A peer may only originate packets from its assigned /32 address.
-pub fn source_is_valid(peer: &Peer, source: Ipv4Addr) -> bool {
-    peer.ipv4.parse::<Ipv4Addr>().ok() == Some(source)
+pub fn source_is_valid(peer: &impl PeerConfigView, source: Ipv4Addr) -> bool {
+    peer.ip() == source
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Peer;
     #[test] fn forward_requires_allowlist_and_backend_acl() {
         let forward=Forward{id:"f".into(),name:"f".into(),protocol:"udp".into(),target_peer_id:"b".into(),target_port:53,allowed_group_ids:vec!["a".into()]};
         let source=Group{id:"a".into(),name:"A".into(),allowed_groups:vec!["b".into()]};

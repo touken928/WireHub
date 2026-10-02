@@ -28,7 +28,8 @@ pub(crate) async fn run() -> Result<()> {
     let tcp = tokio::net::TcpListener::bind(SocketAddr::from((bind, port))).await?;
     let udp = tokio::net::UdpSocket::bind(SocketAddr::from(([0,0,0,0], port))).await?;
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let udp_task=tokio::spawn(kernel::run_udp(udp, store, private, reload_rx, runtime_stats, readiness.clone(), Some(ready_tx)));
+    let loader: kernel::SnapshotLoader = Arc::new({ let store = store.clone(); move || store.runtime_snapshot().map_err(|_| ()) });
+    let udp_task=tokio::spawn(kernel::run_udp(udp, loader, private, reload_rx, runtime_stats, readiness.clone(), Some(ready_tx)));
     match ready_rx.await {
         Err(_) => return Err("UDP router failed during startup".into()),
         Ok(Err(())) => return Err("failed to load persisted peers; refusing to start".into()),

@@ -1,5 +1,6 @@
 mod api;
 mod model;
+mod network;
 mod kernel;
 mod storage;
 mod static_assets;

@@ -15,15 +15,19 @@ pub(super) fn enqueue_pending(queue: &mut VecDeque<PendingDelivery>, bytes: &mut
 pub(super) fn retain_pending(queue:&mut VecDeque<PendingDelivery>, bytes:&mut usize, peers:&HashMap<String,RuntimePeer>, forwards:&[Forward], hub:Option<Ipv4Addr>, nat:&Flows) {
     queue.retain(|item| {
         let source=peers.get(&item.source_id);let target=peers.get(&item.target_id);
-        let identities=item.packet.src()==item.source_ip && source.is_some_and(|p|p.peer.public_key==item.source_key && p.peer.ipv4.parse::<Ipv4Addr>().ok()==Some(item.source_ip)) && target.is_some_and(|p|p.peer.public_key==item.target_key && p.peer.ipv4.parse::<Ipv4Addr>().ok()==Some(item.target_ip));
-        let route_allowed=if item.reply_only { source.is_some_and(|p|nat.has_reply_mapping(&item.packet,&p.peer,Instant::now())) } else if let Some(id)=&item.forward_id { source.zip(target).is_some_and(|(s,t)|forwards.iter().any(|f|&f.id==id && Some(f.protocol.as_str())==item.forward_protocol.as_deref() && Some(f.target_port)==item.forward_target_port && Some(item.packet.dst())==hub && f.target_peer_id==item.target_id && policy::forward_allowed(f,&s.peer.group_id,s.group.as_ref(),&t.peer.group_id))) } else { source.zip(target).is_some_and(|(s,t)|policy::route_allowed(s.group.as_ref(),t.group.as_ref())) };
+        let identities=item.packet.src()==item.source_ip && source.is_some_and(|p|p.config.public_key==item.source_key && p.config.ip==item.source_ip) && target.is_some_and(|p|p.config.public_key==item.target_key && p.config.ip==item.target_ip);
+        let route_allowed=if item.reply_only { source.is_some_and(|p|nat.has_reply_mapping(&item.packet,&p.config,Instant::now())) } else if let Some(id)=&item.forward_id { source.zip(target).is_some_and(|(s,t)|forwards.iter().any(|f|&f.id==id && Some(f.protocol.as_str())==item.forward_protocol.as_deref() && Some(f.target_port)==item.forward_target_port && Some(item.packet.dst())==hub && f.target_peer_id==item.target_id && policy::forward_allowed(f,&s.config.group_id,s.config.group.as_ref(),&t.config.group_id))) } else { source.zip(target).is_some_and(|(s,t)|policy::route_allowed(s.config.group.as_ref(),t.config.group.as_ref())) };
         let valid=identities && route_allowed;
         if !valid { *bytes=bytes.saturating_sub(item.packet.bytes().len()); }
         valid
     });
 }
 
-pub(super) fn resolve_packet(packet: &ipv4::ValidatedPacket, source: &Peer, source_group: &Group, source_id: &str, peers: &HashMap<String, RuntimePeer>, forwards: &[Forward], hub_ip: Option<Ipv4Addr>, nat: &mut Flows, now: Instant) -> (Option<DeliveryPlan>, bool) {
+pub(super) fn resolve_packet(packet: &ipv4::ValidatedPacket, source: &impl crate::kernel::snapshot::PeerConfigView, source_group: &Group, source_id: &str, peers: &HashMap<String, RuntimePeer>, forwards: &[Forward], hub_ip: Option<Ipv4Addr>, nat: &mut Flows, now: Instant) -> (Option<DeliveryPlan>, bool) {
+    resolve_packet_indexed(packet,source,source_group,source_id,peers,None,forwards,hub_ip,nat,now)
+}
+
+pub(super) fn resolve_packet_indexed(packet: &ipv4::ValidatedPacket, source: &impl crate::kernel::snapshot::PeerConfigView, source_group: &Group, source_id: &str, peers: &HashMap<String, RuntimePeer>, ips:Option<&HashMap<Ipv4Addr,String>>, forwards: &[Forward], hub_ip: Option<Ipv4Addr>, nat: &mut Flows, now: Instant) -> (Option<DeliveryPlan>, bool) {
     if let Some((target_id, bytes, reservation)) = nat.lookup_reply(packet, source, now) {
         return (Some(DeliveryPlan { source_id: source_id.into(), target_id, bytes, reservation: Some(reservation), forward_id:None }), true);
     }
@@ -34,21 +38,22 @@ pub(super) fn resolve_packet(packet: &ipv4::ValidatedPacket, source: &Peer, sour
     if packet.dst() == hub_ip.unwrap_or(Ipv4Addr::UNSPECIFIED) {
         for forward in forwards {
             let Some(target) = peers.get(&forward.target_peer_id) else { continue };
-            if !policy::forward_allowed(forward, &source.group_id, Some(source_group), &target.peer.group_id) { continue; }
-            if let Some((bytes, reservation)) = nat.prepare_forward_packet(packet, source, forward, &target.peer, now) {
+            if !policy::forward_allowed(forward, source.group_id(), Some(source_group), &target.config.group_id) { continue; }
+            if let Some((bytes, reservation)) = nat.prepare_forward_packet(packet, source, forward, &target.config, now) {
                 terminal = true;
-                plan = Some(DeliveryPlan { source_id: source_id.into(), target_id: target.peer.id.clone(), bytes, reservation: Some(reservation), forward_id:Some(forward.id.clone()) });
+                plan = Some(DeliveryPlan { source_id: source_id.into(), target_id: target.config.id.clone(), bytes, reservation: Some(reservation), forward_id:Some(forward.id.clone()) });
                 break;
             }
         }
     }
     if !terminal {
-        if let Some(target) = peers.values().find(|p| p.peer.ipv4.parse().ok() == Some(packet.dst())) {
-            if policy::route_allowed(Some(source_group), target.group.as_ref()) {
+        let target=ips.and_then(|index|index.get(&packet.dst())).and_then(|id|peers.get(id)).or_else(||peers.values().find(|p|p.config.ip==packet.dst()));
+        if let Some(target) = target {
+                if policy::route_allowed(Some(source_group), target.config.group.as_ref()) {
                 if matches!(packet.association(), FlowAssociation::Stateless) {
-                    plan = Some(DeliveryPlan { source_id: source_id.into(), target_id: target.peer.id.clone(), bytes: packet.bytes().to_vec(), reservation: None, forward_id:None });
-                } else if let Some((bytes, reservation)) = nat.prepare_direct(packet, source, &target.peer, now) {
-                    plan = Some(DeliveryPlan { source_id: source_id.into(), target_id: target.peer.id.clone(), bytes, reservation: Some(reservation), forward_id:None });
+                    plan = Some(DeliveryPlan { source_id: source_id.into(), target_id: target.config.id.clone(), bytes: packet.bytes().to_vec(), reservation: None, forward_id:None });
+                } else if let Some((bytes, reservation)) = nat.prepare_direct(packet, source, &target.config, now) {
+                    plan = Some(DeliveryPlan { source_id: source_id.into(), target_id: target.config.id.clone(), bytes, reservation: Some(reservation), forward_id:None });
                 }
             }
         }
@@ -65,8 +70,8 @@ pub(super) async fn drain_pending(socket: &UdpSocket, queue: &mut VecDeque<Pendi
         let now = Instant::now();
         if item.expired_at(now) { continue; }
         let Some(source) = peers.get(&item.source_id) else { continue };
-        let Some(group) = source.group.as_ref() else { continue };
-        let source_peer = source.peer.clone();
+        let Some(group) = source.config.group.as_ref() else { continue };
+        let source_peer = source.config.clone();
         let source_group = group.clone();
         let result = if item.reply_only {
             nat.lookup_reply(&item.packet, &source_peer, now).map(|(target_id, bytes, reservation)| DeliveryPlan { source_id: item.source_id.clone(), target_id, bytes, reservation: Some(reservation), forward_id:None })
@@ -74,7 +79,7 @@ pub(super) async fn drain_pending(socket: &UdpSocket, queue: &mut VecDeque<Pendi
             resolve_packet(&item.packet, &source_peer, &source_group, &item.source_id, peers, forwards, hub_ip, nat, now).0
         };
         let Some(mut plan) = result else { nat.cancel_pending_packet(&item.packet,&source_peer); continue };
-        let provenance_ok=plan.target_id==item.target_id && plan.forward_id==item.forward_id && peers.get(&item.source_id).is_some_and(|p|p.peer.ipv4.parse::<Ipv4Addr>().ok()==Some(item.source_ip)) && peers.get(&item.target_id).is_some_and(|p|p.peer.ipv4.parse::<Ipv4Addr>().ok()==Some(item.target_ip)) && item.forward_id.as_ref().map_or(true,|id|forwards.iter().any(|f|&f.id==id && Some(f.protocol.as_str())==item.forward_protocol.as_deref() && Some(f.target_port)==item.forward_target_port));
+        let provenance_ok=plan.target_id==item.target_id && plan.forward_id==item.forward_id && peers.get(&item.source_id).is_some_and(|p|p.config.ip==item.source_ip) && peers.get(&item.target_id).is_some_and(|p|p.config.ip==item.target_ip) && item.forward_id.as_ref().map_or(true,|id|forwards.iter().any(|f|&f.id==id && Some(f.protocol.as_str())==item.forward_protocol.as_deref() && Some(f.target_port)==item.forward_target_port));
         if !provenance_ok { complete_delivery(nat,peers,&mut plan,EgressOutcome::Failed); nat.cancel_pending_packet(&item.packet,&source_peer); continue; }
         let outcome = deliver_plan(socket, peers, &plan, out).await;
         complete_delivery(nat, peers, &mut plan, outcome);
@@ -88,8 +93,8 @@ pub(super) fn complete_delivery(nat: &mut Flows, peers: &mut HashMap<String, Run
     if let Some(reservation) = plan.reservation.take() { nat.complete(reservation, delivered, Instant::now()); }
     if delivered {
         let n = plan.bytes.len() as u64;
-        if let Some(source) = peers.get_mut(&plan.source_id) { source.peer.received_bytes = source.peer.received_bytes.saturating_add(n); }
-        if let Some(target) = peers.get_mut(&plan.target_id) { target.peer.sent_bytes = target.peer.sent_bytes.saturating_add(n); }
+        if let Some(source) = peers.get_mut(&plan.source_id) { source.stats.received_bytes = source.stats.received_bytes.saturating_add(n); }
+        if let Some(target) = peers.get_mut(&plan.target_id) { target.stats.sent_bytes = target.stats.sent_bytes.saturating_add(n); }
     }
 }
 
@@ -104,7 +109,7 @@ pub(super) async fn publish_stats(peers: &HashMap<String, RuntimePeer>, stats: &
     }).ok();
     let mut snapshot = stats.write().await;
     snapshot.clear();
-    snapshot.extend(peers.iter().map(|(id, p)| (id.clone(), (p.peer.received_bytes, p.peer.sent_bytes, p.peer.last_handshake_unix, p.last_data_unix))));
+    snapshot.extend(peers.iter().map(|(id, p)| (id.clone(), (p.stats.received_bytes, p.stats.sent_bytes, p.stats.last_handshake_unix, p.stats.last_data_unix))));
 }
 
 pub(super) async fn publish_packet_stats(peers: &HashMap<String, RuntimePeer>, stats: &RuntimeStats, authenticated: bool) {
@@ -115,24 +120,24 @@ pub(super) async fn publish_packet_stats(peers: &HashMap<String, RuntimePeer>, s
 
 pub(super) async fn deliver_plan(socket:&UdpSocket, peers:&mut HashMap<String,RuntimePeer>, plan:&DeliveryPlan, out:&mut [u8]) -> EgressOutcome {
     let Some(target) = peers.get_mut(&plan.target_id) else { return EgressOutcome::Failed };
-    if target.tunnel.time_since_last_handshake().is_none() {
+    if target.session.tunnel.time_since_last_handshake().is_none() {
         // Cold delivery is not accepted: do not pass plaintext
         // into BoringTun's internal queue or commit a flow reservation.
-        if let Some(endpoint) = target.endpoint {
-            if let TunnResult::WriteToNetwork(initiation) = target.tunnel.format_handshake_initiation(out, false) {
+        if let Some(endpoint) = target.session.endpoint {
+            if let TunnResult::WriteToNetwork(initiation) = target.session.tunnel.format_handshake_initiation(out, false) {
                 let _ = socket.send_to(initiation, endpoint).await;
             }
         }
         return EgressOutcome::NotReady;
     }
-    let wire = match target.tunnel.encapsulate(&plan.bytes, out) {
+    let wire = match target.session.tunnel.encapsulate(&plan.bytes, out) {
         TunnResult::WriteToNetwork(wire) => wire,
         _ => return EgressOutcome::Failed,
     };
     if !matches!(Tunn::parse_incoming_packet(wire), Ok(Packet::PacketData(_))) {
         return EgressOutcome::NotReady;
     }
-    let Some(endpoint) = target.endpoint else { return EgressOutcome::Failed };
+    let Some(endpoint) = target.session.endpoint else { return EgressOutcome::Failed };
     if socket.send_to(wire, endpoint).await.is_ok() { EgressOutcome::Delivered } else { EgressOutcome::Failed }
 }
 

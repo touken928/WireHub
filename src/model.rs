@@ -3,6 +3,7 @@ use utoipa::ToSchema;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct NetworkSettings { pub subnet: String, pub endpoint: String, pub persistent_keepalive: u16 }
+#[derive(Clone, Debug)]
 #[derive(Serialize, ToSchema)]
 pub struct SetupStatus { pub configured: bool, pub settings: Option<NetworkSettings> }
 #[derive(Deserialize, ToSchema)]
@@ -32,6 +33,8 @@ pub struct SetAcl { pub allowed_groups: Vec<String> }
 pub struct Status { pub ok: bool }
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct Forward { pub id: String, pub name: String, pub protocol: String, pub target_peer_id: String, pub target_port: u16, pub allowed_group_ids: Vec<String> }
+#[derive(Clone, Debug)]
+pub struct NetworkSnapshot { pub settings: Option<NetworkSettings>, pub groups: Vec<Group>, pub peers: Vec<Peer>, pub forwards: Vec<Forward> }
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NewForward { pub name: String, pub protocol: String, pub target_peer_id: String, pub target_port: u16, pub allowed_group_ids: Vec<String> }

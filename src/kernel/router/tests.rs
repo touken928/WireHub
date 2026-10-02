@@ -1,4 +1,18 @@
 use super::*;
+use crate::storage::Store;
+fn test_peer_config(peer:&Peer, group:Option<Group>)->crate::kernel::snapshot::PeerConfig {
+    crate::kernel::snapshot::PeerConfig{id:peer.id.clone(),public_key:peer.public_key.clone(),key:crate::kernel::snapshot::decode_public_key(&peer.public_key).unwrap_or([0;32]),ip:peer.ipv4.parse().unwrap_or(Ipv4Addr::UNSPECIFIED),group_id:peer.group_id.clone(),group}
+}
+fn test_runtime_peer(peer:Peer, group:Option<Group>, tunnel:Tunn, endpoint:Option<SocketAddr>, receiver_index:u32)->RuntimePeer {
+    let config=test_peer_config(&peer,group);
+    RuntimePeer{peer,config,session:PeerSession{tunnel,endpoint,receiver_index},stats:PeerRuntimeStats::default()}
+}
+// Preserve the storage-backed fixture shorthand while production runtime only
+// depends on an injected snapshot loader.
+async fn run_udp(socket: UdpSocket, store: Arc<Store>, key: [u8; 32], commands: mpsc::Receiver<ReloadCommand>, stats: RuntimeStats, readiness: Readiness, startup: Option<oneshot::Sender<Result<(), ()>>>) -> Result<(), ()> {
+    let loader: SnapshotLoader = Arc::new(move || store.runtime_snapshot().map_err(|_| ()));
+    super::run_udp(socket, loader, key, commands, stats, readiness, startup).await
+}
 use crate::kernel::checksum::checksum;
 use super::delivery::*;
 use super::snapshot::*;
@@ -45,11 +59,34 @@ use super::snapshot::*;
             let store=Store::open(":memory:").unwrap();
             store.bind_test_identity();store.setup("10.77.0.0/24","hub.example:51820",25).unwrap();
             store.add_group(&Group{id:"g".into(),name:"g".into(),allowed_groups:vec![]}).unwrap();
-            store.add_peer(&Peer{id:"p".into(),name:"p".into(),public_key:"key".into(),ipv4:ip.into(),group_id:"g".into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None}).unwrap();
-            let mut snapshot=store.runtime_snapshot().unwrap();
-            snapshot.forwards.clear();
-            assert_eq!(validate_persisted_addresses(&snapshot).is_ok(),expected,"{ip}");
+            let secret=StaticSecret::from([211u8;32]);
+            store.add_peer(&Peer{id:"p".into(),name:"p".into(),public_key:base64::engine::general_purpose::STANDARD.encode(PublicKey::from(&secret).as_bytes()),ipv4:ip.into(),group_id:"g".into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None}).unwrap();
+            let snapshot=store.runtime_snapshot().unwrap();
+            assert_eq!(crate::kernel::snapshot::CompiledSnapshot::try_from(snapshot).is_ok(),expected,"{ip}");
         }
+    }
+
+    #[test]
+    fn install_peers_initializes_snapshot_stats_and_preserves_stats_for_same_key_reload() {
+        let secret=StaticSecret::from([212u8;32]);
+        let public=PublicKey::from(&secret);
+        let key=base64::engine::general_purpose::STANDARD.encode(public.as_bytes());
+        let group=Group{id:"g".into(),name:"g".into(),allowed_groups:vec![]};
+        let mut incoming=Peer{id:"p".into(),name:"p".into(),public_key:key.clone(),ipv4:"10.77.0.2".into(),group_id:"g".into(),received_bytes:123,sent_bytes:456,last_handshake_unix:Some(789)};
+        let compiled=HashMap::from([(incoming.id.clone(),test_peer_config(&incoming,Some(group.clone())))]);
+        let limiter=Arc::new(RateLimiter::new(&public,100));
+        let mut state=RouterState::default();
+        install_peers(vec![incoming.clone()],&compiled,[213u8;32],limiter.clone(),&mut state,HashMap::new()).unwrap();
+        let installed=&state.peers["p"];
+        assert_eq!((installed.stats.received_bytes,installed.stats.sent_bytes,installed.stats.last_handshake_unix,installed.stats.last_data_unix),(123,456,Some(789),None));
+
+        let prior=state.peers.remove("p").unwrap();
+        let mut prior=prior;
+        prior.stats=PeerRuntimeStats{received_bytes:900,sent_bytes:1000,last_handshake_unix:Some(1100),last_data_unix:Some(1200)};
+        incoming.received_bytes=1;incoming.sent_bytes=2;incoming.last_handshake_unix=Some(3);
+        install_peers(vec![incoming],&compiled,[213u8;32],limiter,&mut state,HashMap::from([("p".into(),prior)])).unwrap();
+        let reloaded=&state.peers["p"];
+        assert_eq!((reloaded.stats.received_bytes,reloaded.stats.sent_bytes,reloaded.stats.last_handshake_unix,reloaded.stats.last_data_unix),(900,1000,Some(1100),Some(1200)));
     }
 
     #[test]
@@ -114,7 +151,7 @@ use super::snapshot::*;
         let mut prior = peer("prior", &key);
         prior.id = "old".into();
         let index = 0x100;
-        installed.insert("old".into(), RuntimePeer { peer: prior, group: Some(group.clone()), tunnel: Tunn::new(StaticSecret::from([72u8;32]), PublicKey::from(&secret), None, None, index >> 8, None), endpoint: None, last_data_unix: None, receiver_index: index });
+        installed.insert("old".into(), test_runtime_peer(prior,Some(group.clone()),Tunn::new(StaticSecret::from([72u8;32]),PublicKey::from(&secret),None,None,index>>8,None),None,index));
         let indexes = HashMap::from([(index, "old".to_owned())]);
         let before_indexes = indexes.clone();
         let mut state = RouterState { peers: installed, indexes, next_index: 0, ..RouterState::default() };
@@ -122,7 +159,8 @@ use super::snapshot::*;
         let mut invalid_late = vec![peer("a", &key), peer("z", "not-a-valid-public-key")];
         // Valid peer comes first to prove that its provisional install is not published.
         invalid_late[0].id = "a".into();
-        assert!(install_peers(&[group.clone()], invalid_late, [73u8;32], Arc::new(RateLimiter::new(&PublicKey::from(&secret),100)), &mut state, HashMap::new()).is_err());
+        let compiled = invalid_late.iter().filter_map(|p| {let key=crate::kernel::snapshot::decode_public_key(&p.public_key).ok()?;let ip=p.ipv4.parse().ok()?;let group=Some(group.clone());Some((p.id.clone(),crate::kernel::snapshot::PeerConfig{id:p.id.clone(),public_key:p.public_key.clone(),key,ip,group_id:p.group_id.clone(),group}))}).collect();
+        assert!(install_peers(invalid_late, &compiled, [73u8;32], Arc::new(RateLimiter::new(&PublicKey::from(&secret),100)), &mut state, HashMap::new()).is_err());
         assert_eq!(state.peers.keys().cloned().collect::<Vec<_>>(), before_peer_ids);
         assert_eq!(state.indexes, before_indexes);
     }
@@ -135,7 +173,7 @@ use super::snapshot::*;
         fn runtime_peer(id:&str,ip:&str,group:Group,secret:[u8;32],receiver_index:u32)->RuntimePeer {
             let public=PublicKey::from(&StaticSecret::from(secret));
             let peer=Peer{id:id.into(),name:id.into(),public_key:base64::engine::general_purpose::STANDARD.encode(public.as_bytes()),ipv4:ip.into(),group_id:group.id.clone(),received_bytes:0,sent_bytes:0,last_handshake_unix:None};
-            RuntimePeer{peer,group:Some(group),tunnel:Tunn::new(StaticSecret::from(secret),PublicKey::from(&StaticSecret::from([99;32])),None,None,receiver_index>>8,None),endpoint:None,last_data_unix:None,receiver_index}
+            test_runtime_peer(peer,Some(group),Tunn::new(StaticSecret::from(secret),PublicKey::from(&StaticSecret::from([99;32])),None,None,receiver_index>>8,None),None,receiver_index)
         }
         fn install_flow(flows:&mut Flows,forward:&Forward,source:&Peer,backend:&Peer,source_port:u16,protocol:u8,flags:u8)->u16 {
             let packet=ipv4::validate_forwarded(&service_packet(protocol,source.ipv4.parse::<Ipv4Addr>().unwrap().octets(),[10,77,0,1],source_port,forward.target_port,flags,b"req")).unwrap();
@@ -1164,7 +1202,7 @@ use super::snapshot::*;
         let endpoint_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let endpoint = endpoint_socket.local_addr().unwrap();
         let mut peers = HashMap::new();
-        peers.insert("b".into(), RuntimePeer{peer:backend.clone(),group:None,tunnel:Tunn::new(secret,hub_public,None,None,1,None),endpoint:Some(endpoint),last_data_unix:None,receiver_index:256});
+        peers.insert("b".into(), test_runtime_peer(backend.clone(),None,Tunn::new(secret,hub_public,None,None,1,None),Some(endpoint),256));
         let mut nat = Flows::new(hub_ip, &[forward.clone()]);
         let now = Instant::now();
         let mut out = vec![0;65535];
@@ -1184,7 +1222,7 @@ use super::snapshot::*;
             assert_eq!(outcome,EgressOutcome::NotReady,"cold TCP must remain application-owned until PacketData");
             complete_delivery(&mut nat,&mut peers,&mut plan,outcome);
             assert_eq!(nat.test_state_counts(),(0,0),"cold TCP does not commit or leave a reservation");
-            assert_eq!(peers["b"].peer.sent_bytes,0,"handshake traffic is not application accounting");
+            assert_eq!(peers["b"].stats.sent_bytes,0,"handshake traffic is not application accounting");
             if sport==12001 {
                 let (n,_) = timeout(Duration::from_secs(1),endpoint_socket.recv_from(&mut out)).await.unwrap().unwrap();
                 assert!(!out[..n].windows(b"secret-tcp-payload".len()).any(|w|w==b"secret-tcp-payload"),"plaintext must never reach the network socket");
@@ -1206,7 +1244,7 @@ use super::snapshot::*;
         let target_group=Group{id:"backend".into(),name:"backend".into(),allowed_groups:vec![]};
         let forward=Forward{id:"f".into(),name:"tcp".into(),protocol:"tcp".into(),target_peer_id:"b".into(),target_port:443,allowed_group_ids:vec!["clients".into()]};
         let hub_public=PublicKey::from(&StaticSecret::from([183u8;32]));
-        let runtime=|peer:Peer,group:Group| RuntimePeer{peer,group:Some(group),tunnel:Tunn::new(StaticSecret::from([184u8;32]),hub_public,None,None,1,None),endpoint:None,last_data_unix:None,receiver_index:256};
+        let runtime=|peer:Peer,group:Group| test_runtime_peer(peer,Some(group),Tunn::new(StaticSecret::from([184u8;32]),hub_public,None,None,1,None),None,256);
         let mut peers=HashMap::new();peers.insert("a".into(),runtime(source,source_group.clone()));peers.insert("b".into(),runtime(target,target_group));
         let packet=ipv4::validate_forwarded(&service_packet(6,[10,88,0,2],[10,88,0,1],13000,443,0x02,b"queued")).unwrap();
         let mut queue=VecDeque::new();let mut queued_bytes=0;
@@ -1221,7 +1259,7 @@ use super::snapshot::*;
 
         // Model an ACL revocation in the acknowledged snapshot. The cold queue
         // is discarded before a later target handshake can drain it.
-        peers.get_mut("a").unwrap().group.as_mut().unwrap().allowed_groups.clear();
+        peers.get_mut("a").unwrap().config.group.as_mut().unwrap().allowed_groups.clear();
         nat.reconcile(Some(Ipv4Addr::new(10,88,0,1)),Some(Ipv4Addr::new(10,88,0,1)),&[forward.clone()],&[forward.clone()],|id| peers.get(id).map(RuntimePeer::policy));
         retain_pending(&mut queue,&mut queued_bytes,&peers,&[forward],Some(Ipv4Addr::new(10,88,0,1)),&nat);
         assert!(queue.is_empty(),"revoked queued SYN must be purged before target handshake");
@@ -1239,7 +1277,7 @@ use super::snapshot::*;
         let source_group=Group{id:"clients".into(),name:"clients".into(),allowed_groups:vec!["backend".into()]};
         let target_group=Group{id:"backend".into(),name:"backend".into(),allowed_groups:vec![]};
         let hub_public=PublicKey::from(&StaticSecret::from([193u8;32]));
-        let runtime=|peer:Peer,group:Group| RuntimePeer{peer,group:Some(group),tunnel:Tunn::new(StaticSecret::from([194u8;32]),hub_public,None,None,1,None),endpoint:None,last_data_unix:None,receiver_index:256};
+        let runtime=|peer:Peer,group:Group| test_runtime_peer(peer,Some(group),Tunn::new(StaticSecret::from([194u8;32]),hub_public,None,None,1,None),None,256);
         let mut peers=HashMap::new();peers.insert("a".into(),runtime(source,source_group));peers.insert("b".into(),runtime(target,target_group));
         let forward=Forward{id:"f".into(),name:"tcp".into(),protocol:"tcp".into(),target_peer_id:"b".into(),target_port:443,allowed_group_ids:vec!["clients".into()]};
         let packet=ipv4::validate_forwarded(&service_packet(6,[10,88,0,2],[10,88,0,1],13000,443,0x02,b"queued")).unwrap();
@@ -1255,7 +1293,7 @@ use super::snapshot::*;
         let (mut peers,forward,packet)=pending_forward_fixture();
         let deadline=Instant::now()+PENDING_TTL;
         let mut queue=VecDeque::from([queued_forward(packet,&peers,&forward,deadline)]);let mut bytes=queue[0].packet.bytes().len();
-        peers.get_mut("a").unwrap().peer.ipv4="10.88.0.22".into();
+        peers.get_mut("a").unwrap().peer.ipv4="10.88.0.22".into(); peers.get_mut("a").unwrap().config.ip="10.88.0.22".parse().unwrap();
         let nat=Flows::new(Ipv4Addr::new(10,88,0,1),&[forward.clone()]);
         retain_pending(&mut queue,&mut bytes,&peers,&[forward],Some(Ipv4Addr::new(10,88,0,1)),&nat);
         assert!(queue.is_empty(),"pending packet source IP is part of its authenticated identity");
@@ -1267,7 +1305,7 @@ use super::snapshot::*;
         let (mut peers,forward,packet)=pending_forward_fixture();
         let deadline=Instant::now()+PENDING_TTL;
         let mut queue=VecDeque::from([queued_forward(packet,&peers,&forward,deadline)]);let mut bytes=queue[0].packet.bytes().len();
-        peers.get_mut("b").unwrap().peer.ipv4="10.88.0.33".into();
+        peers.get_mut("b").unwrap().peer.ipv4="10.88.0.33".into(); peers.get_mut("b").unwrap().config.ip="10.88.0.33".parse().unwrap();
         let nat=Flows::new(Ipv4Addr::new(10,88,0,1),&[forward.clone()]);
         retain_pending(&mut queue,&mut bytes,&peers,&[forward],Some(Ipv4Addr::new(10,88,0,1)),&nat);
         assert!(queue.is_empty(),"pending packet target IP is part of its authenticated identity");
@@ -1303,13 +1341,14 @@ use super::snapshot::*;
     #[tokio::test]
     async fn drain_pending_releases_reservation_when_original_target_ip_is_reassigned() {
         let (mut peers,_forward,_)=pending_forward_fixture();
-        let packet=ipv4::validate(&service_packet(17,[10,88,0,2],[10,88,0,3],13000,443,0,b"queued"),&peers["a"].peer,peers["a"].group.as_ref()).unwrap();
+        let packet=ipv4::validate(&service_packet(17,[10,88,0,2],[10,88,0,3],13000,443,0,b"queued"),&peers["a"].peer,peers["a"].config.group.as_ref()).unwrap();
         let mut moved=peers["b"].peer.clone();moved.ipv4="10.88.0.33".into();
-        peers.get_mut("b").unwrap().peer=moved;
+        peers.get_mut("b").unwrap().peer=moved;peers.get_mut("b").unwrap().config.ip="10.88.0.33".parse().unwrap();
         let secret_c=StaticSecret::from([195u8;32]);
         let c=Peer{id:"c".into(),name:"c".into(),public_key:base64::engine::general_purpose::STANDARD.encode(PublicKey::from(&secret_c).as_bytes()),ipv4:"10.88.0.3".into(),group_id:"backend".into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None};
         let hub_public=PublicKey::from(&StaticSecret::from([196u8;32]));
-        peers.insert("c".into(),RuntimePeer{peer:c,group:Some(Group{id:"backend".into(),name:"backend".into(),allowed_groups:vec![]}),tunnel:Tunn::new(secret_c,hub_public,None,None,1,None),endpoint:None,last_data_unix:None,receiver_index:512});
+        let gc=Group{id:"backend".into(),name:"backend".into(),allowed_groups:vec![]}; peers.insert("c".into(),test_runtime_peer(c,Some(gc),Tunn::new(secret_c,hub_public,None,None,1,None),None,512));
+        assert_ne!(peers["b"].config.ip,peers["c"].config.ip,"B's reassigned config address must differ from C's actual target address");
         let original_b=Peer{ipv4:"10.88.0.3".into(),..peers["b"].peer.clone()};
         let now=Instant::now();
         let mut nat=Flows::new(Ipv4Addr::new(10,88,0,1),&[]);
@@ -1328,24 +1367,24 @@ use super::snapshot::*;
     #[tokio::test]
     async fn drain_pending_releases_new_retarget_plan_with_empty_flow_state() {
         let (mut peers,_,_)=pending_forward_fixture();
-        let packet=ipv4::validate(&service_packet(17,[10,88,0,2],[10,88,0,3],13001,444,0,b"queued"),&peers["a"].peer,peers["a"].group.as_ref()).unwrap();
+        let packet=ipv4::validate(&service_packet(17,[10,88,0,2],[10,88,0,3],13001,444,0,b"queued"),&peers["a"].peer,peers["a"].config.group.as_ref()).unwrap();
         let captured_target=peers["b"].peer.clone();
-        peers.get_mut("b").unwrap().peer.ipv4="10.88.0.33".into();
+        peers.get_mut("b").unwrap().peer.ipv4="10.88.0.33".into(); peers.get_mut("b").unwrap().config.ip="10.88.0.33".parse().unwrap();
         let secret_c=StaticSecret::from([197u8;32]);
         let c=Peer{id:"c".into(),name:"c".into(),public_key:base64::engine::general_purpose::STANDARD.encode(PublicKey::from(&secret_c).as_bytes()),ipv4:"10.88.0.3".into(),group_id:"backend".into(),received_bytes:0,sent_bytes:0,last_handshake_unix:None};
         let hub_public=PublicKey::from(&StaticSecret::from([198u8;32]));
-        peers.insert("c".into(),RuntimePeer{peer:c,group:Some(Group{id:"backend".into(),name:"backend".into(),allowed_groups:vec![]}),tunnel:Tunn::new(secret_c,hub_public,None,None,1,None),endpoint:None,last_data_unix:None,receiver_index:512});
+        let gc=Group{id:"backend".into(),name:"backend".into(),allowed_groups:vec![]}; peers.insert("c".into(),test_runtime_peer(c,Some(gc),Tunn::new(secret_c,hub_public,None,None,1,None),None,512));
         let item=PendingDelivery{source_id:"a".into(),source_key:peers["a"].peer.public_key.clone(),source_ip:packet.src(),packet,reply_only:false,deadline:Instant::now()+PENDING_TTL,target_id:"b".into(),target_key:captured_target.public_key,target_ip:"10.88.0.3".parse().unwrap(),forward_id:None,forward_protocol:None,forward_target_port:None};
         let mut queue=VecDeque::from([item]);let mut queued_bytes=queue[0].packet.bytes().len();
         let mut nat=Flows::new(Ipv4Addr::new(10,88,0,1),&[]);
         assert_eq!(nat.test_state_counts(),(0,0),"this case starts without an orphaned pending reservation");
-        let counters_before:HashMap<_,_>=peers.iter().map(|(id,p)|(id.clone(),(p.peer.received_bytes,p.peer.sent_bytes))).collect();
+        let counters_before:HashMap<_,_>=peers.iter().map(|(id,p)|(id.clone(),(p.stats.received_bytes,p.stats.sent_bytes))).collect();
         let socket=UdpSocket::bind("127.0.0.1:0").await.unwrap();let mut out=vec![0;65535];
         drain_pending(&socket,&mut queue,&mut queued_bytes,&mut peers,&[],Some(Ipv4Addr::new(10,88,0,1)),&mut nat,&mut out).await;
         assert!(queue.is_empty());
         assert_eq!(queued_bytes,0);
         assert_eq!(nat.test_state_counts(),(0,0),"the fresh plan for replacement C is rejected against captured B provenance and released");
-        assert_eq!(peers.iter().map(|(id,p)|(id.clone(),(p.peer.received_bytes,p.peer.sent_bytes))).collect::<HashMap<_,_>>(),counters_before);
+        assert_eq!(peers.iter().map(|(id,p)|(id.clone(),(p.stats.received_bytes,p.stats.sent_bytes))).collect::<HashMap<_,_>>(),counters_before);
     }
 
     #[tokio::test]
@@ -1418,7 +1457,7 @@ use super::snapshot::*;
         let mut peers=HashMap::new();
         for (peer,group,key) in [(a.clone(),ga.clone(),[101u8;32]),(b.clone(),gb.clone(),[102u8;32])] {
             let tunnel=Tunn::new(StaticSecret::from(key),PublicKey::from(&StaticSecret::from([103u8;32])),None,None,1,None);
-            peers.insert(peer.id.clone(),RuntimePeer{peer,group:Some(group),tunnel,endpoint:None,last_data_unix:None,receiver_index:256});
+         peers.insert(peer.id.clone(),test_runtime_peer(peer,Some(group),tunnel,None,256));
         }
         let mut nat=Flows::new(Ipv4Addr::new(10,90,0,1),&[]);
         let original=ipv4::validate(&service_packet(17,[10,90,0,2],[10,90,0,3],1234,9090,0,b"request"),&a,Some(&ga)).unwrap();
@@ -1461,12 +1500,7 @@ use super::snapshot::*;
                 ipv4: ip.into(), group_id: group_id.into(), received_bytes: 0, sent_bytes: 0,
                 last_handshake_unix: None,
             };
-            peers.insert(id.into(), RuntimePeer {
-                peer,
-                group: Some(Group { id: group_id.into(), name: group_id.into(), allowed_groups }),
-                tunnel: Tunn::new(hub_secret.clone(), PublicKey::from(secret), None, None, index, None),
-                endpoint: None, last_data_unix: None, receiver_index: index << 8,
-            });
+            peers.insert(id.into(), test_runtime_peer(peer,Some(Group { id: group_id.into(), name: group_id.into(), allowed_groups }),Tunn::new(hub_secret.clone(),PublicKey::from(secret),None,None,index,None),None,index<<8));
         }
 
         let echo = |src: [u8; 4], dst: [u8; 4], kind: u8| {
@@ -1490,15 +1524,15 @@ use super::snapshot::*;
         let now = Instant::now();
         let mut nat = Flows::new("10.77.0.1".parse().unwrap(), &[]);
         let b = peers["b"].peer.clone();
-        let b_group = peers["b"].group.clone().unwrap();
+        let b_group = peers["b"].config.group.clone().unwrap();
         let request_raw = echo([10, 77, 0, 3], [10, 77, 0, 2], 8);
         let request = ipv4::validate(&request_raw, &b, Some(&b_group)).expect("B-owned valid ICMP request");
         assert_eq!(request.src(), "10.77.0.3".parse::<Ipv4Addr>().unwrap());
         let (denied, _) = resolve_packet(&request, &b, &b_group, "b", &peers, &[], None, &mut nat, now);
         assert!(denied.is_none(), "B cannot route to A before its directed ACL grant");
 
-        peers.get_mut("b").unwrap().group.as_mut().unwrap().allowed_groups.push("a".into());
-        let b_group = peers["b"].group.clone().unwrap();
+        peers.get_mut("b").unwrap().config.group.as_mut().unwrap().allowed_groups.push("a".into());
+        let b_group = peers["b"].config.group.clone().unwrap();
         let (plan, _) = resolve_packet(&request, &b, &b_group, "b", &peers, &[], None, &mut nat, now);
         let plan = plan.expect("runtime B-to-A ACL grant permits reservation-free ICMP plan");
         assert_eq!(plan.target_id, "a");
@@ -1511,7 +1545,7 @@ use super::snapshot::*;
         assert_eq!(plan.bytes, expected_request, "only IPv4 TTL/checksum change, exactly once");
 
         let a = peers["a"].peer.clone();
-        let a_group = peers["a"].group.clone().unwrap();
+        let a_group = peers["a"].config.group.clone().unwrap();
         let reply_raw = echo([10, 77, 0, 2], [10, 77, 0, 3], 0);
         let reply = ipv4::validate(&reply_raw, &a, Some(&a_group)).expect("A-owned valid ICMP echo reply");
         let (reply_plan, _) = resolve_packet(&reply, &a, &a_group, "a", &peers, &[], None, &mut nat, now);
@@ -1542,17 +1576,17 @@ fn established_tcp_survives_reload_but_acl_revocation_removes_flow_and_queued_ic
     nat.reconcile(Some(hub),Some(hub),&[forward.clone()],&[forward.clone()],|id| peers.get(id).map(RuntimePeer::policy));
     nat.expire(now+Duration::from_secs(301));assert_eq!(nat.test_state_counts(),(1,0));
     let raw=ipv4::test_icmp_error(b.ipv4.parse().unwrap(),hub,3,4,&translated[..28]);
-    let error=ipv4::validate(&raw,b,peers["b"].group.as_ref()).unwrap();
-    let (plan,reply_only)=resolve_packet(&error,b,peers["b"].group.as_ref().unwrap(),"b",&peers,&[forward.clone()],Some(hub),&mut nat,now);
+    let error=ipv4::validate(&raw,b,peers["b"].config.group.as_ref()).unwrap();
+    let (plan,reply_only)=resolve_packet(&error,b,peers["b"].config.group.as_ref().unwrap(),"b",&peers,&[forward.clone()],Some(hub),&mut nat,now);
     assert!(reply_only);let mut plan=plan.unwrap();assert_eq!(plan.target_id,"a");
     complete_delivery(&mut nat,&mut peers,&mut plan,EgressOutcome::NotReady);
     let pending=PendingDelivery { source_id:"b".into(),source_key:peers["b"].peer.public_key.clone(),source_ip:peers["b"].peer.ipv4.parse().unwrap(),packet:error.clone(),reply_only:true,deadline:now+PENDING_TTL,target_id:"a".into(),target_key:peers["a"].peer.public_key.clone(),target_ip:peers["a"].peer.ipv4.parse().unwrap(),forward_id:None,forward_protocol:None,forward_target_port:None };
     let mut queue=VecDeque::from([pending]);let mut bytes=raw.len();
     retain_pending(&mut queue,&mut bytes,&peers,&[forward.clone()],Some(hub),&nat);assert_eq!(queue.len(),1);
-    peers.get_mut("a").unwrap().group.as_mut().unwrap().allowed_groups.clear();
+    peers.get_mut("a").unwrap().config.group.as_mut().unwrap().allowed_groups.clear();
     nat.reconcile(Some(hub),Some(hub),&[forward.clone()],&[forward.clone()],|id| peers.get(id).map(RuntimePeer::policy));
     retain_pending(&mut queue,&mut bytes,&peers,&[forward.clone()],Some(hub),&nat);
     assert_eq!(nat.test_state_counts(),(0,0));assert!(queue.is_empty());assert_eq!(bytes,0);
-    let (plan,_)=resolve_packet(&error,&peers["b"].peer,peers["b"].group.as_ref().unwrap(),"b",&peers,&[forward],Some(hub),&mut nat,now);
+    let (plan,_)=resolve_packet(&error,&peers["b"].peer,peers["b"].config.group.as_ref().unwrap(),"b",&peers,&[forward],Some(hub),&mut nat,now);
     assert!(plan.is_none(),"ICMP errors cannot fall back to ACL routing after revocation");
 }

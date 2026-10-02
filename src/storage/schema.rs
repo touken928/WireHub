@@ -1,5 +1,5 @@
 use rusqlite::{Connection, OptionalExtension};
-use crate::kernel::config as network;
+use crate::network as network;
 use super::{sql_error, Store};
 
 pub(super) const SCHEMA_VERSION: i64 = 4;

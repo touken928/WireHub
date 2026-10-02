@@ -1,7 +1,8 @@
 //! Bounded bidirectional state. Pending reservations never grant reply access.
 use std::{collections::{HashMap, HashSet}, net::Ipv4Addr, time::Instant};
 
-use crate::model::{Forward, Peer};
+use crate::model::Forward;
+use crate::kernel::snapshot::{PeerConfigView, PeerKey};
 use super::{policy::{self, PeerPolicy}, ipv4::ValidatedPacket, protocol::{PacketTuple, FlowAssociation, FlowEvent, FlowState, RewritePlan}};
 #[cfg(test)]
 use crate::kernel::{ipv4, protocol::{TcpState, TCP_ESTABLISHED_IDLE, TCP_HANDSHAKE_IDLE, TCP_CLOSED_GRACE, UDP_IDLE}};
@@ -33,8 +34,8 @@ struct Flow {
     output: Option<PacketTuple>,
     backend: String,
     backend_ip: Ipv4Addr,
-    initiator_key: String,
-    backend_key: String,
+    initiator_key: PeerKey,
+    backend_key: PeerKey,
     forward_id: Option<String>,
     last: Instant,
     generation: u64,
@@ -83,12 +84,12 @@ impl Flows {
             if !same_hub { return false; }
             let Some(source) = peer_policy(&key.peer) else { return false };
             let Some(target) = peer_policy(&flow.backend) else { return false };
-            if source.peer.public_key != flow.initiator_key || target.peer.public_key != flow.backend_key || source.peer.ipv4.parse::<Ipv4Addr>().ok() != Some(key.ip) || target.peer.ipv4.parse::<Ipv4Addr>().ok() != Some(flow.backend_ip) { return false; }
+            if source.peer.key_identity() != flow.initiator_key || target.peer.key_identity() != flow.backend_key || source.peer.ip() != key.ip || target.peer.ip() != flow.backend_ip { return false; }
             if flow.forward_id.is_some() {
                 let Some(id) = flow.forward_id.as_deref() else { return false };
                 let Some(before) = old_forwards.iter().find(|f| f.id == id) else { return false };
                 let Some(after) = new_forwards.iter().find(|f| f.id == id) else { return false };
-                if before.protocol != after.protocol || before.target_peer_id != after.target_peer_id || before.target_port != after.target_port || !after.allowed_group_ids.contains(&source.peer.group_id) || !policy::forward_allowed(after, &source.peer.group_id, source.group, &target.peer.group_id) { return false; }
+                if before.protocol != after.protocol || before.target_peer_id != after.target_peer_id || before.target_port != after.target_port || !after.allowed_group_ids.iter().any(|id|id==source.peer.group_id()) || !policy::forward_allowed(after, source.peer.group_id(), source.group, target.peer.group_id()) { return false; }
             } else if !policy::route_allowed(source.group, target.group) { return false; }
             true
         });
@@ -122,24 +123,24 @@ impl Flows {
     }
 
     /// Direct and translated delivery share allocation, quotas and commit semantics.
-    pub(crate) fn prepare_direct(&mut self, packet: &ValidatedPacket, source: &Peer, destination: &Peer, now: Instant) -> Option<(Vec<u8>, Reservation)> {
-        if packet.dst().to_string() != destination.ipv4 { return None; }
+    pub(crate) fn prepare_direct(&mut self, packet: &ValidatedPacket, source: &impl PeerConfigView, destination: &impl PeerConfigView, now: Instant) -> Option<(Vec<u8>, Reservation)> {
+        if packet.dst() != destination.ip() { return None; }
         self.prepare(packet, source, destination, None, now)
     }
 
-    pub(crate) fn prepare_forward_packet(&mut self, packet: &ValidatedPacket, source: &Peer, forward: &Forward, backend: &Peer, now: Instant) -> Option<(Vec<u8>, Reservation)> {
+    pub(crate) fn prepare_forward_packet(&mut self, packet: &ValidatedPacket, source: &impl PeerConfigView, forward: &Forward, backend: &impl PeerConfigView, now: Instant) -> Option<(Vec<u8>, Reservation)> {
         if packet.protocol() != protocol(&forward.protocol)? || packet.dst() != self.hub_ip || packet.dst_port()? != forward.target_port { return None; }
         self.prepare(packet, source, backend, Some(forward), now)
     }
 
-    fn prepare(&mut self, packet: &ValidatedPacket, source: &Peer, destination: &Peer, forward: Option<&Forward>, now: Instant) -> Option<(Vec<u8>, Reservation)> {
+    fn prepare(&mut self, packet: &ValidatedPacket, source: &impl PeerConfigView, destination: &impl PeerConfigView, forward: Option<&Forward>, now: Instant) -> Option<(Vec<u8>, Reservation)> {
         let FlowAssociation::Connection { protocol, tuple, event } = packet.association() else { return None };
-        let key = Tuple { peer: source.id.clone(), ip: tuple.src, port: tuple.src_port, frontend_ip: tuple.dst, frontend_port: tuple.dst_port, protocol };
+        let key = Tuple { peer: source.id().to_owned(), ip: tuple.src, port: tuple.src_port, frontend_ip: tuple.dst, frontend_port: tuple.dst_port, protocol };
         // An expired tuple is a new flow and must satisfy its protocol's initiation rule.
         if self.flows.get(&key).is_some_and(|flow| flow.deadline() <= now) { self.remove_active(&key); }
-        let destination_ip: Ipv4Addr = destination.ipv4.parse().ok()?;
+        let destination_ip = destination.ip();
         let flow = if let Some(flow) = self.flows.get(&key).cloned() {
-            if flow.backend != destination.id || flow.backend_ip != destination_ip || flow.forward_id.as_deref() != forward.map(|f| f.id.as_str()) { return None; }
+            if flow.backend != destination.id() || flow.backend_ip != destination_ip || flow.forward_id.as_deref() != forward.map(|f| f.id.as_str()) { return None; }
             if event.starts_new_tcp() && flow.state.is_closing() { return None; }
             flow
         } else {
@@ -152,9 +153,9 @@ impl Flows {
                 Some(PacketTuple { src: self.hub_ip, src_port: self.choose_snat(protocol, destination, forward.target_port)?, dst: destination_ip, dst_port: forward.target_port })
             } else { None };
             let wire = output.unwrap_or(tuple);
-            let reply = Reverse { peer: destination.id.clone(), proto: protocol, src: wire.dst, sport: wire.dst_port, dst: wire.src, dport: wire.src_port };
+            let reply = Reverse { peer: destination.id().to_owned(), proto: protocol, src: wire.dst, sport: wire.dst_port, dst: wire.src, dport: wire.src_port };
             let generation = self.allocate_generation()?;
-            let flow = Flow { reply: reply.clone(), output, backend: destination.id.clone(), backend_ip: destination_ip, initiator_key: source.public_key.clone(), backend_key: destination.public_key.clone(), forward_id: forward.map(|f| f.id.clone()), last: now, generation, state };
+            let flow = Flow { reply: reply.clone(), output, backend: destination.id().to_owned(), backend_ip: destination_ip, initiator_key: source.key_identity(), backend_key: destination.key_identity(), forward_id: forward.map(|f| f.id.clone()), last: now, generation, state };
             self.pending_reverse.insert(reply, key.clone());
             self.pending.insert(key.clone(), flow.clone());
             self.note_expiry(flow.deadline());
@@ -178,14 +179,14 @@ impl Flows {
             && self.peer_counts.get(peer).copied().unwrap_or(0) < PEER_CAPACITY).then_some(())
     }
 
-    fn choose_snat(&mut self, proto: u8, backend: &Peer, target_port: u16) -> Option<u16> {
-        let backend_ip = backend.ipv4.parse().ok()?;
+    fn choose_snat(&mut self, proto: u8, backend: &impl PeerConfigView, target_port: u16) -> Option<u16> {
+        let backend_ip = backend.ip();
         let slots = (SNAT_END - SNAT_START + 1) as usize;
         let counter = if proto == 6 { &mut self.next_tcp_snat } else { &mut self.next_udp_snat };
         for _ in 0..slots {
             let candidate = *counter;
             *counter = if candidate == SNAT_END { SNAT_START } else { candidate + 1 };
-            let idx = Reverse { peer: backend.id.clone(), proto, src: backend_ip, sport: target_port, dst: self.hub_ip, dport: candidate };
+            let idx = Reverse { peer: backend.id().to_owned(), proto, src: backend_ip, sport: target_port, dst: self.hub_ip, dport: candidate };
             if !self.service_ports.contains(&(proto, candidate)) && !self.reverse.contains_key(&idx) && !self.pending_reverse.contains_key(&idx) { return Some(candidate); }
         }
         None
@@ -235,9 +236,9 @@ impl Flows {
 
     /// Release an orphaned reservation belonging to a queued packet whose
     /// current route no longer matches its captured provenance.
-    pub(crate) fn cancel_pending_packet(&mut self, packet: &ValidatedPacket, source: &Peer) {
+    pub(crate) fn cancel_pending_packet(&mut self, packet: &ValidatedPacket, source: &impl PeerConfigView) {
         let (Some(port),Some(frontend_port))=(packet.src_port(),packet.dst_port()) else { return };
-        let key=Tuple{peer:source.id.clone(),ip:packet.src(),port,frontend_ip:packet.dst(),frontend_port,protocol:packet.protocol()};
+        let key=Tuple{peer:source.id().to_owned(),ip:packet.src(),port,frontend_ip:packet.dst(),frontend_port,protocol:packet.protocol()};
         self.remove_pending(&key);
     }
 
@@ -276,7 +277,7 @@ impl Flows {
 
     /// Resolve both transport replies and related ICMP errors through the same
     /// committed reverse index. Related errors never create or refresh state.
-    pub(crate) fn lookup_reply(&mut self, packet: &ValidatedPacket, peer: &Peer, now: Instant) -> Option<(String, Vec<u8>, Reservation)> {
+    pub(crate) fn lookup_reply(&mut self, packet: &ValidatedPacket, peer: &impl PeerConfigView, now: Instant) -> Option<(String, Vec<u8>, Reservation)> {
         let key = self.reply_key(packet, peer)?.clone();
         let flow = self.flows.get(&key)?.clone();
         if flow.deadline() <= now { self.remove_active(&key); return None; }
@@ -289,25 +290,25 @@ impl Flows {
         Some((key.peer.clone(), bytes, Reservation { key, flow, is_new: false, from_initiator: false, event: packet.association().event() }))
     }
 
-    fn reply_key(&self, packet: &ValidatedPacket, peer: &Peer) -> Option<&Tuple> {
+    fn reply_key(&self, packet: &ValidatedPacket, peer: &impl PeerConfigView) -> Option<&Tuple> {
         let (reverse, related) = match packet.association() {
             FlowAssociation::Connection { protocol, tuple, event } => {
                 if event.starts_new_tcp() { return None; }
-                (Reverse { peer: peer.id.clone(), proto: protocol, src: tuple.src, sport: tuple.src_port, dst: tuple.dst, dport: tuple.dst_port }, false)
+                (Reverse { peer: peer.id().to_owned(), proto: protocol, src: tuple.src, sport: tuple.src_port, dst: tuple.dst, dport: tuple.dst_port }, false)
             }
             FlowAssociation::Related { protocol, tuple } => {
                 if packet.dst() != tuple.src { return None; }
-                (Reverse { peer: peer.id.clone(), proto: protocol, src: tuple.dst, sport: tuple.dst_port, dst: tuple.src, dport: tuple.src_port }, true)
+                (Reverse { peer: peer.id().to_owned(), proto: protocol, src: tuple.dst, sport: tuple.dst_port, dst: tuple.src, dport: tuple.src_port }, true)
             }
             FlowAssociation::Stateless => return None,
         };
         let key = self.reverse.get(&reverse)?;
         let flow = self.flows.get(key)?;
-        if flow.backend_key != peer.public_key || (related && packet.src() != flow.backend_ip) { return None; }
+        if flow.backend_key != peer.key_identity() || (related && packet.src() != peer.ip()) { return None; }
         Some(key)
     }
 
-    pub(crate) fn has_reply_mapping(&self, packet: &ValidatedPacket, peer: &Peer, now: Instant) -> bool {
+    pub(crate) fn has_reply_mapping(&self, packet: &ValidatedPacket, peer: &impl PeerConfigView, now: Instant) -> bool {
         self.reply_key(packet, peer).and_then(|key| self.flows.get(key).map(|flow| flow.deadline() > now)).unwrap_or(false)
     }
 }

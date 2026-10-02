@@ -8,7 +8,7 @@ use tokio::{net::UdpSocket, sync::{mpsc, oneshot, RwLock}, time};
 
 use super::{ipv4, protocol::FlowAssociation};
 
-use crate::{model::{Forward, Group, Peer}, kernel::{flows::{Flows, Reservation}, config::Subnet24, policy}, storage::Store};
+use crate::{model::{Forward, Group, NetworkSnapshot, Peer}, kernel::{flows::{Flows, Reservation}, policy}};
 
 const TIMER: Duration = Duration::from_secs(1);
 const PENDING_LIMIT: usize = 256;
@@ -87,15 +87,17 @@ impl Readiness {
 pub struct ReloadCommand { pub ack: oneshot::Sender<Result<(), ()>> }
 
 pub(crate) struct RuntimePeer {
+    /// Persisted/API record retained only as immutable presentation metadata.
     pub(crate) peer: Peer,
-    pub(crate) group: Option<Group>,
-    pub(crate) tunnel: Tunn,
-    pub(crate) endpoint: Option<SocketAddr>,
-    pub(crate) last_data_unix: Option<i64>,
-    receiver_index: u32,
+    pub(crate) config: crate::kernel::snapshot::PeerConfig,
+    pub(crate) session: PeerSession,
+    pub(crate) stats: PeerRuntimeStats,
 }
+pub(crate) struct PeerSession { pub(crate) tunnel:Tunn, pub(crate) endpoint:Option<SocketAddr>, pub(crate) receiver_index:u32 }
+#[derive(Clone, Copy, Default)]
+pub(crate) struct PeerRuntimeStats { pub(crate) received_bytes:u64, pub(crate) sent_bytes:u64, pub(crate) last_handshake_unix:Option<i64>, pub(crate) last_data_unix:Option<i64> }
 impl RuntimePeer {
-    fn policy(&self) -> policy::PeerPolicy<'_> { policy::PeerPolicy { peer: &self.peer, group: self.group.as_ref() } }
+    fn policy(&self) -> policy::PeerPolicy<'_> { policy::PeerPolicy { peer: &self.config, group: self.config.group.as_ref() } }
 }
 
 
@@ -104,6 +106,9 @@ impl RuntimePeer {
 struct RouterState {
     peers: HashMap<String, RuntimePeer>,
     indexes: HashMap<u32, String>,
+    keys: HashMap<[u8; 32], String>,
+    ips: HashMap<Ipv4Addr, String>,
+    protocols: HashMap<String, crate::kernel::snapshot::TransportProtocol>,
     next_index: u32,
     forwards: Vec<Forward>,
     hub_ip: Option<Ipv4Addr>,
@@ -117,6 +122,9 @@ impl RouterState {
     fn fail_closed(&mut self) {
         self.peers.clear();
         self.indexes.clear();
+        self.keys.clear();
+        self.ips.clear();
+        self.protocols.clear();
         self.forwards.clear();
         self.hub_ip = None;
         self.flows.clear();
@@ -133,6 +141,7 @@ mod delivery;
 #[cfg(test)]
 mod tests;
 
-pub async fn run_udp(socket: UdpSocket, store: Arc<Store>, hub_private: [u8; 32], commands: mpsc::Receiver<ReloadCommand>, stats: RuntimeStats, readiness: Readiness, startup: Option<oneshot::Sender<Result<(), ()>>>) -> Result<(), ()> {
-    runtime::run_udp(socket, store, hub_private, commands, stats, readiness, startup).await
+pub type SnapshotLoader = Arc<dyn Fn() -> Result<NetworkSnapshot, ()> + Send + Sync>;
+pub async fn run_udp(socket: UdpSocket, loader: SnapshotLoader, hub_private: [u8; 32], commands: mpsc::Receiver<ReloadCommand>, stats: RuntimeStats, readiness: Readiness, startup: Option<oneshot::Sender<Result<(), ()>>>) -> Result<(), ()> {
+    runtime::run_udp(socket, loader, hub_private, commands, stats, readiness, startup).await
 }

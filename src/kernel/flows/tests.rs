@@ -1,5 +1,6 @@
 use super::*;
 use crate::kernel::checksum::checksum;
+use crate::model::Peer;
 
 fn peer(id: &str, ip: &str) -> Peer {
     Peer { id: id.into(), name: id.into(), public_key: String::new(), ipv4: ip.into(), group_id: String::new(), received_bytes: 0, sent_bytes: 0, last_handshake_unix: None }
@@ -301,7 +302,7 @@ fn pending_dedup_service_exclusion_protocol_sharing_and_capacity() {
     let mut full = Flows::default();
     for n in 0..CAPACITY {
         let key = Tuple { peer: format!("p{n}"), ip: Ipv4Addr::LOCALHOST, port: n as u16, frontend_ip: Ipv4Addr::LOCALHOST, frontend_port: 9, protocol: 17 };
-        let flow = Flow { reply: Reverse { peer: format!("b{n}"), proto: 17, src: Ipv4Addr::LOCALHOST, sport: 9, dst: Ipv4Addr::LOCALHOST, dport: n as u16 }, output: None, backend: "backend".into(), backend_ip: Ipv4Addr::LOCALHOST, initiator_key:String::new(),backend_key:String::new(),forward_id:None,last: now, generation: n as u64, state: FlowEvent::Udp.initial_state().unwrap() };
+        let flow = Flow { reply: Reverse { peer: format!("b{n}"), proto: 17, src: Ipv4Addr::LOCALHOST, sport: 9, dst: Ipv4Addr::LOCALHOST, dport: n as u16 }, output: None, backend: "backend".into(), backend_ip: Ipv4Addr::LOCALHOST, initiator_key: PeerKey::Invalid(String::new()),backend_key: PeerKey::Invalid(String::new()),forward_id:None,last: now, generation: n as u64, state: FlowEvent::Udp.initial_state().unwrap() };
         full.pending_reverse.insert(flow.reply.clone(), key.clone()); full.pending.insert(key, flow);
     }
     assert!(full.reserve_capacity("capacity-check", now).is_none());
@@ -407,7 +408,7 @@ fn quota_full_without_expiry_does_not_rescan_table_per_attempt() {
             let flow = Flow { reply: Reverse { peer: "backend".into(), proto: 17,
                 src: Ipv4Addr::LOCALHOST, sport: 9, dst: Ipv4Addr::LOCALHOST, dport: port as u16 },
                 output: None, backend: "backend".into(), backend_ip: Ipv4Addr::LOCALHOST,
-                initiator_key: String::new(), backend_key: String::new(), forward_id: None,
+                initiator_key: PeerKey::Invalid(String::new()), backend_key: PeerKey::Invalid(String::new()), forward_id: None,
                 last: now, generation: port as u64, state: FlowEvent::Udp.initial_state().unwrap() };
             flows.flows.insert(key, flow);
         }
@@ -579,7 +580,7 @@ fn service_port_collision_removes_only_matching_protocol_snat_mapping() {
     for (port, proto, snat) in [(1234, 17, 40000), (1235, 17, 40001), (1236, 6, 40000)] {
         let key = Tuple { peer: source.clone(), ip: peer_ip, port, frontend_ip: hub_ip, frontend_port: 9000, protocol: proto };
         let reply = Reverse { peer: "backend".into(), proto, src: "10.77.0.3".parse().unwrap(), sport: 9000, dst: hub_ip, dport: snat };
-        let flow = Flow { reply: reply.clone(), output: Some(PacketTuple { src: hub_ip, src_port: snat, dst: reply.src, dst_port: 9000 }), backend: "backend".into(), backend_ip: reply.src, initiator_key: String::new(), backend_key: String::new(), forward_id: Some("f".into()), last: t(), generation: port as u64, state: FlowEvent::Udp.initial_state().unwrap() };
+        let flow = Flow { reply: reply.clone(), output: Some(PacketTuple { src: hub_ip, src_port: snat, dst: reply.src, dst_port: 9000 }), backend: "backend".into(), backend_ip: reply.src, initiator_key: PeerKey::Invalid(String::new()), backend_key: PeerKey::Invalid(String::new()), forward_id: Some("f".into()), last: t(), generation: port as u64, state: FlowEvent::Udp.initial_state().unwrap() };
         flows.reverse.insert(reply, key.clone());
         flows.flows.insert(key, flow);
     }

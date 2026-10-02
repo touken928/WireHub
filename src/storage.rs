@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
-use crate::{model::{Forward, Group, Peer}, kernel::config::{self as network, NetworkSettings, Subnet24}};
+use crate::{model::{Forward, Group, NetworkSnapshot, Peer}, network::{self as network, NetworkSettings, Subnet24}};
 mod schema;
 mod identity;
 #[cfg(test)]
@@ -18,13 +18,6 @@ thread_local! { static BUSY_TEST_HOOK: std::cell::RefCell<Option<(std::sync::mps
 #[cfg(not(test))] fn after_begin_immediate(){}
 #[cfg(test)] fn test_busy_handler(_:i32)->bool{BUSY_TEST_HOOK.with(|h|h.borrow().as_ref().map(|(tx,rx)|{let _=tx.send(());rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok()}).unwrap_or(false))}
 
-/// A coherent view of the configuration used to initialize a runtime.
-pub struct RuntimeSnapshot {
-    pub settings: Option<NetworkSettings>,
-    pub groups: Vec<Group>,
-    pub peers: Vec<Peer>,
-    pub forwards: Vec<Forward>,
-}
 impl Store {
     pub fn open(path: &str) -> rusqlite::Result<Self> { schema::open(path) }
     pub fn setup(&self, subnet:&str, endpoint:&str, keepalive:u32)->rusqlite::Result<NetworkSettings>{
@@ -51,10 +44,10 @@ impl Store {
         read_network_settings(&db)
     }
     pub fn groups(&self)->rusqlite::Result<Vec<Group>> { let db=self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?; read_groups(&db) }
-    pub fn runtime_snapshot(&self)->rusqlite::Result<RuntimeSnapshot>{
+    pub fn runtime_snapshot(&self)->rusqlite::Result<NetworkSnapshot>{
         let mut db=self.db.lock().map_err(|_|rusqlite::Error::InvalidQuery)?;
         let tx=db.transaction()?;
-        let snapshot=RuntimeSnapshot { settings:read_network_settings(&tx)?, groups:read_groups(&tx)?, peers:read_peers(&tx)?, forwards:read_forwards(&tx)? };
+        let snapshot=NetworkSnapshot { settings:read_network_settings(&tx)?, groups:read_groups(&tx)?, peers:read_peers(&tx)?, forwards:read_forwards(&tx)? };
         tx.commit()?;
         Ok(snapshot)
     }
@@ -157,7 +150,7 @@ fn ensure_forward_target_exists(tx: &Transaction<'_>, peer_id: &str) -> rusqlite
 }
 fn find_free_peer_ip(tx: &Transaction<'_>, subnet: Subnet24) -> rusqlite::Result<Option<String>> {
     for host in 2..=254 {
-        let ip = subnet.peer_ip(host).unwrap();
+        let ip = subnet.peer_ip(host).unwrap().to_string();
         let used: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM peers WHERE ipv4=?1)", [&ip], |r| r.get(0))?;
         if !used { return Ok(Some(ip)); }
     }

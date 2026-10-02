@@ -1,6 +1,7 @@
 //! Strict IPv4 envelope validation; transport behavior is delegated to protocols.
 use std::net::Ipv4Addr;
-use crate::model::{Group, Peer};
+use crate::model::Group;
+use crate::kernel::snapshot::PeerConfigView;
 use super::{policy, protocol::{TransportPacket, FlowAssociation, RewritePlan}};
 use super::checksum::checksum;
 
@@ -41,7 +42,7 @@ impl ValidatedPacket {
     }
 }
 
-pub(crate) fn validate(packet: &[u8], source: &Peer, source_group: Option<&Group>) -> Option<ValidatedPacket> {
+pub(crate) fn validate(packet: &[u8], source: &impl PeerConfigView, source_group: Option<&Group>) -> Option<ValidatedPacket> {
     let parsed = parse(packet)?;
     if !policy::source_is_valid(source, parsed.src) || source_group.is_none() { return None; }
     Some(parsed.decrement_ttl())
@@ -54,7 +55,7 @@ pub(crate) fn validate_forwarded(packet: &[u8]) -> Option<ValidatedPacket> {
 }
 
 #[cfg(test)]
-pub(crate) fn validate_and_forward(packet: &[u8], source: &Peer, group: Option<&Group>) -> Option<(Ipv4Addr, Ipv4Addr, Vec<u8>)> {
+pub(crate) fn validate_and_forward(packet: &[u8], source: &impl PeerConfigView, group: Option<&Group>) -> Option<(Ipv4Addr, Ipv4Addr, Vec<u8>)> {
     let p = validate(packet, source, group)?;
     let src = p.src();
     let dst = p.dst();
