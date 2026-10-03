@@ -151,7 +151,11 @@ async fn full_queue_rejects_seventeenth_without_leaking_callers() {
         caller.abort();
     }
     for caller in callers {
-        assert!(caller.await.unwrap_err().is_cancelled());
+        match caller.await {
+            Err(join_error) => assert!(join_error.is_cancelled()),
+            Ok(Err(ReloadError::Timeout)) => {}
+            result => panic!("unexpected full-queue caller result: {result:?}"),
+        }
     }
     let readiness = handle.readiness.clone();
     drop(handle);
@@ -238,6 +242,27 @@ async fn closed_command_channel_returns_stopped_and_clears_readiness() {
         Err(RunError::Stopped)
     ));
     assert!(!ready.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn reserved_reload_can_be_sent_synchronously_at_cooperative_budget_boundary() {
+    use std::{future::{poll_fn, Future}, task::Poll};
+
+    let (handle, mut receiver) = super::test_harness();
+    let permit = handle.reserve_reload().await.unwrap();
+
+    poll_fn(|cx| loop {
+        let mut consume = Box::pin(tokio::task::consume_budget());
+        if consume.as_mut().poll(cx).is_pending() {
+            return Poll::Ready(());
+        }
+    })
+    .await;
+
+    // send has no await point, so it publishes the reserved command even with
+    // no cooperative budget left. Dropping the acknowledgement is independent.
+    drop(permit.send());
+    assert!(receiver.recv().await.is_some());
 }
 
 fn assert_error_traits<E: std::error::Error + Send + Sync + 'static>() {}

@@ -1,5 +1,5 @@
 use crate::{
-    api::{auth, creation_error, delete_result, err, is_input_error, reload, uuid, AppState},
+    api::{auth, creation_error, delete_result, err, is_input_error, uuid, AppState},
     model::{MovePeer, NewPeer, Peer, PeerProvision, PeerStatus},
 };
 use axum::{
@@ -61,7 +61,14 @@ fn render_config(
 }
 
 async fn cleanup_failed_provision(state: &AppState, peer_id: &str) -> bool {
-    state.store.remove_peer(peer_id).is_ok() && reload(state).await
+    let permit = match state.kernel.reserve_reload().await {
+        Ok(permit) => permit,
+        Err(_) => return false,
+    };
+    if state.store.remove_peer(peer_id).is_err() {
+        return false;
+    }
+    permit.send().wait().await.is_ok()
 }
 
 struct ProvisionGuard {
@@ -115,6 +122,11 @@ pub async fn create_peer(
         Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
 
+    let permit = match state.kernel.reserve_reload().await {
+        Ok(permit) => permit,
+        Err(_) => return err(StatusCode::SERVICE_UNAVAILABLE, "runtime reload failed").into_response(),
+    };
+
     let mut private = [0u8; 32];
     OsRng.fill_bytes(&mut private);
     let secret = StaticSecret::from(private);
@@ -148,7 +160,8 @@ pub async fn create_peer(
         armed: true,
     };
 
-    if !reload(&state).await {
+    let ack = permit.send();
+    if ack.wait().await.is_err() {
         let cleanup_succeeded = guard.cleanup().await;
         let message = if cleanup_succeeded {
             "runtime reload failed; peer removal and cleanup reload acknowledged"
@@ -197,7 +210,11 @@ pub async fn delete_peer(
     if !auth(&headers, &state) {
         return err(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
-    delete_result(state.store.remove_peer(&id), &state, "peer not found").await
+    let permit = match state.kernel.reserve_reload().await {
+        Ok(permit) => permit,
+        Err(_) => return err(StatusCode::SERVICE_UNAVAILABLE, "runtime reload failed").into_response(),
+    };
+    delete_result(state.store.remove_peer(&id), permit, "peer not found").await
 }
 
 #[utoipa::path(put, path = "/api/peers/{id}/group", tag = "crate", request_body = MovePeer, responses((status = 200, body = Peer)))]
@@ -210,9 +227,14 @@ pub async fn move_peer(
     if !auth(&headers, &state) {
         return err(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
+    let permit = match state.kernel.reserve_reload().await {
+        Ok(permit) => permit,
+        Err(_) => return err(StatusCode::SERVICE_UNAVAILABLE, "runtime reload failed").into_response(),
+    };
     match state.store.move_peer(&id, &movement.group_id) {
         Ok(1) => {
-            if !reload(&state).await {
+            let ack = permit.send();
+            if ack.wait().await.is_err() {
                 return err(StatusCode::SERVICE_UNAVAILABLE, "runtime reload failed")
                     .into_response();
             }

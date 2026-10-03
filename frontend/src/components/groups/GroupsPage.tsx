@@ -10,8 +10,9 @@ import { autoLayout, buildEdges, connectionEnds, connectRules, disconnectRules, 
 type Group = components['schemas']['Group']
 type Peer = components['schemas']['Peer']
 type Props = {
-  groups: Group[]; peers: Peer[]; onCreate: () => void; onSaved: () => void
-  onDelete: (group: Group) => void; onSaveAcl: (id: string, allowed: string[]) => Promise<void>
+  groups: Group[]; peers: Peer[]; onCreate: () => void
+  saving: boolean; uncertain: boolean; error: string
+  onDelete: (group: Group) => void; onSavePolicy: (changes: { id: string; allowed: string[] }[]) => Promise<void>
   onReload: () => Promise<void>; onDirtyChange: (dirty: boolean) => void
 }
 const GroupCard = memo(function GroupCard({ data, selected }: NodeProps<GroupNode>) {
@@ -40,7 +41,7 @@ function FitCanvas({ groupIds }: { groupIds: string }) {
   return null
 }
 
-export default function GroupsPage({ groups, peers, onCreate, onSaved, onDelete, onSaveAcl, onReload, onDirtyChange }: Props) {
+export default function GroupsPage({ groups, peers, onCreate, saving, uncertain, error, onDelete, onSavePolicy, onReload, onDirtyChange }: Props) {
   const serverRules = useMemo(() => readRules(groups), [groups])
   const [draft, setDraft] = useState<Rule[] | null>(null)
   const rules = draft ?? serverRules
@@ -49,7 +50,7 @@ export default function GroupsPage({ groups, peers, onCreate, onSaved, onDelete,
   const [both, setBoth] = useState(true)
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null)
   const [selectedEdges, setSelectedEdges] = useState<string[]>([])
-  const [saving, setSaving] = useState(false), [uncertain, setUncertain] = useState(false), [error, setError] = useState('')
+  const [source, setSource] = useState(groups[0]?.id ?? ''), [target, setTarget] = useState(groups[1]?.id ?? '')
   const startNode = useRef<string | null>(null), flow = useRef<ReactFlowInstance<GroupNode, GroupEdge> | null>(null)
   const positions = useRef(readLayout())
   const selectedGroup = groups.find(g => g.id === selectedGroupId)
@@ -72,7 +73,11 @@ export default function GroupsPage({ groups, peers, onCreate, onSaved, onDelete,
     }))
   }, [groups, peers, rules, selectedGroupId, setNodes])
   const groupIds = groups.map(g => g.id).join(',')
-  const edit = useCallback((next: Rule[]) => { setDraft(next); setError('') }, [])
+  useEffect(() => {
+    setSource(value => groups.some(g => g.id === value) ? value : groups[0]?.id ?? '')
+    setTarget(value => groups.some(g => g.id === value) ? value : groups[1]?.id ?? groups[0]?.id ?? '')
+  }, [groupIds])
+  const edit = useCallback((next: Rule[]) => { if (!saving && !uncertain) setDraft(next) }, [saving, uncertain])
   const onConnect = (connection: Connection) => {
     const { from, to } = connectionEnds(connection, startNode.current)
     startNode.current = null
@@ -84,23 +89,16 @@ export default function GroupsPage({ groups, peers, onCreate, onSaved, onDelete,
     edit(disconnectRules(rules, edges.filter(edge => selectedEdges.includes(edge.id)))); setSelectedEdges([])
   }
   const reload = async () => {
-    setSaving(true)
-    try { await onReload(); setDraft(null); setUncertain(false); setSelectedEdges([]); setError('') }
-    catch { setError('Unable to reload policy. The canvas may differ from the server.') }
-    finally { setSaving(false) }
+    try { await onReload(); setDraft(null); setSelectedEdges([]) }
+    catch { /* The resource owner keeps the recovery error across navigation. */ }
   }
   const save = async () => {
-    setSaving(true); setError('')
+    if (locked || !dirty) return
     const changed = groups.filter(g => !sameRules(serverRules.filter(r => r.from === g.id), rules.filter(r => r.from === g.id)))
     try {
-      const results = await Promise.allSettled(changed.map(g => onSaveAcl(g.id, rules.filter(r => r.from === g.id).map(r => r.to))))
-      if (results.some(result => result.status === 'rejected')) {
-        try { await onReload(); setDraft(null); setUncertain(false); setSelectedEdges([]); setError('Save incomplete. Server policy reloaded; review before editing.') }
-        catch { setUncertain(true); setError('Save unconfirmed. Reload server policy to continue.') }
-        return
-      }
-      setDraft(null); onSaved()
-    } finally { setSaving(false) }
+      await onSavePolicy(changed.map(g => ({ id: g.id, allowed: rules.filter(r => r.from === g.id).map(r => r.to) })))
+      setDraft(null)
+    } catch { /* Pending/uncertain writes are rejected by the resource owner. */ }
   }
   const arrange = () => {
     const layout = autoLayout(groups.map(g => g.id))
@@ -120,7 +118,7 @@ export default function GroupsPage({ groups, peers, onCreate, onSaved, onDelete,
   const selfAllowed = selectedGroup ? rules.some(r => r.from === selectedGroup.id && r.to === selectedGroup.id) : false
   return <div className="page-enter policy-page"><div className="page-heading"><div><h1>Groups</h1><span className="heading-count">{groups.length} groups</span></div><button className="button button-primary" onClick={onCreate} disabled={locked}><Plus size={16} />New group</button></div>
     {error && <div className="error-banner" role="alert"><span>{error}</span>{uncertain && <button onClick={() => void reload()} disabled={saving}>Reload policy</button>}</div>}
-    <div className="policy-workspace"><section className="graph-panel"><div className="graph-toolbar"><div className="graph-status"><span className={`status-dot ${dirty || uncertain ? 'status-pending' : ''}`} /><span>{uncertain ? 'Unconfirmed' : dirty ? 'Unsaved changes' : 'Policy canvas'}</span></div><div className="graph-actions"><button className="icon-button" title="Auto layout" aria-label="Auto layout" disabled={locked || !groups.length} onClick={arrange}><LayoutGrid size={16} /></button>{dirty && !uncertain && <button className="icon-button" title="Discard changes" aria-label="Discard changes" disabled={saving} onClick={() => { setDraft(null); setSelectedEdges([]); setError('') }}><RotateCcw size={16} /></button>}<button className="button button-primary compact" disabled={!dirty || locked} onClick={() => void save()}>{saving ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}{saving ? 'Saving' : 'Save'}</button></div></div>
+    <div className="policy-workspace"><section className="graph-panel"><div className="graph-toolbar"><div className="graph-status"><span className={`status-dot ${dirty || uncertain ? 'status-pending' : ''}`} /><span>{uncertain ? 'Unconfirmed' : dirty ? 'Unsaved changes' : 'Policy canvas'}</span></div><div className="graph-actions"><button className="icon-button" title="Auto layout" aria-label="Auto layout" disabled={locked || !groups.length} onClick={arrange}><LayoutGrid size={16} /></button>{dirty && !uncertain && <button className="icon-button" title="Discard changes" aria-label="Discard changes" disabled={saving} onClick={() => { setDraft(null); setSelectedEdges([]) }}><RotateCcw size={16} /></button>}<button className="button button-primary compact" disabled={!dirty || locked} onClick={() => void save()}>{saving ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}{saving ? 'Saving' : 'Save'}</button></div></div>
       <div className="graph-canvas"><ReactFlow<GroupNode, GroupEdge> nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
         onInit={instance => { flow.current = instance }} onNodesChange={changes => {
           onNodesChange(changes)
@@ -151,6 +149,19 @@ export default function GroupsPage({ groups, peers, onCreate, onSaved, onDelete,
         <Panel position="bottom-right"><div className="link-modes" role="group" aria-label="New link direction"><button aria-pressed={!both} disabled={locked} onClick={() => setBoth(false)} title="Drag from source to target"><ArrowRight size={16} />One way</button><button aria-pressed={both} disabled={locked} onClick={() => setBoth(true)}><ArrowLeftRight size={16} />Both ways</button></div></Panel>
       </ReactFlow>{!groups.length && <div className="graph-empty"><GitBranch size={26} /><b>No groups yet</b><button className="button button-primary" onClick={onCreate}><Plus size={15} />New group</button></div>}</div>
       <div className="graph-foot"><span>Drag a handle to connect</span><span className="mono">{edges.length} links</span></div>
+      <form className="policy-link-form" onSubmit={e => {
+        e.preventDefault()
+        if (locked || source === target || !groups.some(g => g.id === source) || !groups.some(g => g.id === target)) return
+        edit(connectRules(rules, source, target, both)); setSelectedEdges([])
+      }}>
+        <div className="policy-link-heading"><GitBranch size={15} /><div><b>Add access link</b><span>Choose groups instead of dragging. Save to apply.</span></div></div>
+        <div className="policy-link-fields">
+          <label className="form-label">Source group<select value={source} disabled={locked} onChange={e => setSource(e.target.value)}>{groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label>
+          <label className="form-label">Target group<select value={target} disabled={locked} onChange={e => setTarget(e.target.value)}>{groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label>
+          <label className="form-label">Direction<select value={both ? 'both' : 'one'} disabled={locked} onChange={e => setBoth(e.target.value === 'both')}><option value="both">Both ways</option><option value="one">Source to target</option></select></label>
+          <button className="button button-quiet" disabled={locked || !source || !target || source === target || sameRules(rules, connectRules(rules, source, target, both))}><Plus size={15} />Add link</button>
+        </div>
+      </form>
     </section><aside className="panel group-detail">{selectedGroup ? <><div className="panel-head"><div><span className="eyebrow">GROUP</span><h2>{selectedGroup.name}</h2></div><button className="icon-button" aria-label="Close group details" onClick={clearSelection}><X size={16} /></button></div><label className="intra-group-toggle"><span>Intra-group access</span><input role="switch" type="checkbox" checked={selfAllowed} disabled={locked} onChange={e => edit(e.target.checked ? [...rules, { from: selectedGroup.id, to: selectedGroup.id }] : rules.filter(r => !(r.from === selectedGroup.id && r.to === selectedGroup.id)))} /></label>
       <div className="detail-section"><h3>Outbound <span>{outgoing.length}</span></h3>{outgoing.length ? outgoing.map(r => <div className="detail-rule" key={r.to}><ArrowRight size={14} /><span>{groupName(r.to)}</span><button className="icon-button tiny" aria-label={`Remove access to ${groupName(r.to)}`} disabled={locked} onClick={() => edit(rules.filter(x => !(x.from === r.from && x.to === r.to)))}><X size={13} /></button></div>) : <p>No access</p>}</div>
       <div className="detail-section"><h3>Inbound <span>{incoming.length}</span></h3>{incoming.length ? incoming.map(r => <div className="detail-rule" key={r.from}><ArrowRight size={14} /><span>{groupName(r.from)}</span></div>) : <p>No access</p>}</div>

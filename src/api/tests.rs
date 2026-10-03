@@ -514,3 +514,307 @@ async fn concurrent_peer_deletion_during_activation_never_returns_unusable_confi
     assert!(!String::from_utf8_lossy(&body).contains("PrivateKey"));
     assert!(state.store.runtime_snapshot().unwrap().peers.is_empty());
 }
+
+#[tokio::test]
+async fn cancel_acl_update_at_cooperative_reservation_leaves_database_unchanged() {
+    use std::{future::{poll_fn, Future}, task::Poll};
+
+    let (state, mut rx, headers) = test_state(true);
+    for id in ["source", "allowed"] {
+        state
+            .store
+            .add_group(&Group {
+                id: id.into(),
+                name: id.into(),
+                allowed_groups: vec![],
+            })
+            .unwrap();
+    }
+
+    // Exhaust this poll's budget without yielding to the scheduler. The next
+    // cooperative operation must therefore suspend before it can enqueue.
+    poll_fn(|cx| loop {
+        let mut consume = Box::pin(tokio::task::consume_budget());
+        if consume.as_mut().poll(cx).is_pending() {
+            return Poll::Ready(());
+        }
+    })
+    .await;
+
+    let mut request = Box::pin(set_acl(
+        State(state.clone()),
+        headers,
+        Path("source".into()),
+        Json(SetAcl {
+            allowed_groups: vec!["allowed".into()],
+        }),
+    ));
+    let suspended_before_completion = poll_fn(|cx| {
+        Poll::Ready(request.as_mut().poll(cx).is_pending())
+    })
+    .await;
+    drop(request);
+
+    assert!(suspended_before_completion, "handler unexpectedly completed");
+    assert_eq!(
+        state
+            .store
+            .group("source")
+            .unwrap()
+            .unwrap()
+            .allowed_groups,
+        Vec::<String>::new(),
+        "cancelled request must not commit before obtaining a reload permit"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), rx.recv())
+            .await
+            .is_err(),
+        "reload should not have been enqueued before cancellation"
+    );
+}
+
+#[tokio::test]
+async fn cancel_acl_update_after_sync_send_keeps_reload_command_queued() {
+    let (state, mut rx, headers) = test_state(true);
+    for id in ["source", "other"] {
+        state
+            .store
+            .add_group(&Group {
+                id: id.into(),
+                name: id.into(),
+                allowed_groups: vec![],
+            })
+            .unwrap();
+    }
+    let task = tokio::spawn(set_acl(
+        State(state.clone()),
+        headers,
+        Path("source".into()),
+        Json(SetAcl {
+            allowed_groups: vec!["other".into()],
+        }),
+    ));
+    let command = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        state
+            .store
+            .group("source")
+            .unwrap()
+            .unwrap()
+            .allowed_groups,
+        vec!["other"]
+    );
+    task.abort();
+    let _ = task.await;
+    // The reload command has already been synchronously published. Its ack
+    // receiver may be gone, but cancellation cannot retract the command.
+    command.respond(Ok(()));
+    assert_no_reload(&mut rx).await;
+}
+
+#[tokio::test]
+async fn no_op_and_database_error_release_reserved_reload_capacity() {
+    let (state, mut rx, headers) = test_state(true);
+    for id in ["source", "other"] {
+        state
+            .store
+            .add_group(&Group {
+                id: id.into(),
+                name: id.into(),
+                allowed_groups: vec![],
+            })
+            .unwrap();
+    }
+    let missing = set_acl(
+        State(state.clone()),
+        headers.clone(),
+        Path("missing".into()),
+        Json(SetAcl { allowed_groups: vec![] }),
+    )
+    .await
+    .into_response();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let invalid = set_acl(
+        State(state.clone()),
+        headers.clone(),
+        Path("source".into()),
+        Json(SetAcl {
+            allowed_groups: vec!["missing".into()],
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    assert_no_reload(&mut rx).await;
+
+    // Hold every published slot at once. This catches even small permit leaks
+    // that would leave enough capacity for one subsequent valid request.
+    let mut permits = Vec::with_capacity(16);
+    for _ in 0..16 {
+        permits.push(
+            tokio::time::timeout(Duration::from_millis(100), state.kernel.reserve_reload())
+                .await
+                .expect("available reload capacity should be reservable")
+                .expect("reload channel should remain open"),
+        );
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), state.kernel.reserve_reload())
+            .await
+            .is_err(),
+        "all sixteen reload slots should be held"
+    );
+    drop(permits);
+
+    let task = tokio::spawn(set_acl(
+        State(state),
+        headers,
+        Path("source".into()),
+        Json(SetAcl {
+            allowed_groups: vec!["other".into()],
+        }),
+    ));
+    let command = rx.recv().await.unwrap();
+    command.respond(Ok(()));
+    assert_eq!(task.await.unwrap().into_response().status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn full_reload_queue_rejects_acl_and_setup_before_database_mutation() {
+    let (state, mut rx, headers) = test_state(true);
+    state
+        .store
+        .add_group(&Group {
+            id: "source".into(),
+            name: "source".into(),
+            allowed_groups: vec![],
+        })
+        .unwrap();
+    for _ in 0..16 {
+        drop(state.kernel.reserve_reload().await.unwrap().send());
+    }
+
+    let (status, _) = response_text(
+        set_acl(
+            State(state.clone()),
+            headers.clone(),
+            Path("source".into()),
+            Json(SetAcl {
+                allowed_groups: vec!["another".into()],
+            }),
+        )
+        .await
+        .into_response(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(state
+        .store
+        .group("source")
+        .unwrap()
+        .unwrap()
+        .allowed_groups
+        .is_empty());
+
+    let mut unconfigured = test_state(false);
+    for _ in 0..16 {
+        drop(unconfigured.0.kernel.reserve_reload().await.unwrap().send());
+    }
+    let (status, body) = response_text(
+        post_setup(
+            State(unconfigured.0.clone()),
+            unconfigured.2,
+            Json(SetupRequest {
+                subnet: "172.23.45.0/24".into(),
+                endpoint: "hub.example:51820".into(),
+                persistent_keepalive: 25,
+            }),
+        )
+        .await
+        .into_response(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!body.contains("settings saved"));
+    assert!(unconfigured.0.store.network_settings().unwrap().is_none());
+
+    for _ in 0..16 {
+        assert!(rx.recv().await.is_some());
+    }
+    assert_no_reload(&mut rx).await;
+    for _ in 0..16 {
+        assert!(unconfigured.1.recv().await.is_some());
+    }
+    assert_no_reload(&mut unconfigured.1).await;
+}
+
+#[tokio::test]
+async fn full_reload_queue_rejects_each_mutation_family_before_writing() {
+    let (state, mut rx, headers) = test_state(true);
+    for id in ["g", "other"] {
+        state
+            .store
+            .add_group(&Group {
+                id: id.into(),
+                name: id.into(),
+                allowed_groups: vec![],
+            })
+            .unwrap();
+    }
+    let mut peer = Peer {
+        id: "p".into(),
+        name: "peer".into(),
+        public_key: "pk".into(),
+        ipv4: String::new(),
+        group_id: "g".into(),
+        received_bytes: 0,
+        sent_bytes: 0,
+        last_handshake_unix: None,
+    };
+    assert!(state.store.create_peer_allocated(&mut peer).unwrap());
+    state
+        .store
+        .create_forward(&mut Forward {
+            id: "f".into(),
+            name: "forward".into(),
+            protocol: "tcp".into(),
+            target_peer_id: "p".into(),
+            target_port: 80,
+            allowed_group_ids: vec!["g".into()],
+        })
+        .unwrap();
+    let before = state.store.runtime_snapshot().unwrap();
+    for _ in 0..16 {
+        drop(state.kernel.reserve_reload().await.unwrap().send());
+    }
+
+    let (create_group_status, delete_group_status, acl_status, create_forward_status,
+        delete_forward_status, create_peer_status, delete_peer_status, move_peer_status) = tokio::join!(
+        async { create_group(State(state.clone()), headers.clone(), Json(NewGroup { name: "new".into() })).await.into_response().status() },
+        async { delete_group(State(state.clone()), headers.clone(), Path("other".into())).await.into_response().status() },
+        async { set_acl(State(state.clone()), headers.clone(), Path("g".into()), Json(SetAcl { allowed_groups: vec!["other".into()] })).await.into_response().status() },
+        async { create_forward(State(state.clone()), headers.clone(), Json(NewForward { name: "new".into(), protocol: "tcp".into(), target_peer_id: "p".into(), target_port: 81, allowed_group_ids: vec!["g".into()] })).await.into_response().status() },
+        async { delete_forward(State(state.clone()), headers.clone(), Path("f".into())).await.into_response().status() },
+        async { create_peer(State(state.clone()), headers.clone(), Json(NewPeer { name: "new".into(), group_id: "g".into() })).await.into_response().status() },
+        async { delete_peer(State(state.clone()), headers.clone(), Path("p".into())).await.into_response().status() },
+        async { move_peer(State(state.clone()), headers.clone(), Path("p".into()), Json(MovePeer { group_id: "other".into() })).await.into_response().status() },
+    );
+    assert_eq!(
+        [create_group_status, delete_group_status, acl_status, create_forward_status,
+            delete_forward_status, create_peer_status, delete_peer_status, move_peer_status],
+        [StatusCode::SERVICE_UNAVAILABLE; 8]
+    );
+    let after = state.store.runtime_snapshot().unwrap();
+    assert_eq!(serde_json::to_value(after.settings).unwrap(), serde_json::to_value(before.settings).unwrap());
+    assert_eq!(serde_json::to_value(after.groups).unwrap(), serde_json::to_value(before.groups).unwrap());
+    assert_eq!(serde_json::to_value(after.peers).unwrap(), serde_json::to_value(before.peers).unwrap());
+    assert_eq!(serde_json::to_value(after.forwards).unwrap(), serde_json::to_value(before.forwards).unwrap());
+    for _ in 0..16 {
+        assert!(rx.recv().await.is_some());
+    }
+    assert_no_reload(&mut rx).await;
+}

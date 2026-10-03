@@ -11,6 +11,7 @@ pub(crate) mod snapshot;
 mod wireguard;
 
 pub use control::KernelHandle;
+pub(crate) use control::ReloadPermit;
 #[expect(
     unused_imports,
     reason = "public kernel API facade re-exports statistics and reload error types"

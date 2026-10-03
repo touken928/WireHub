@@ -7,6 +7,10 @@ import { chromium } from 'playwright'
 // Exercise the production bundle against isolated API fixtures; never touch a running hub.
 const dist = resolve(import.meta.dirname, '../dist')
 const screenshots = process.env.WIREHUB_UI_SCREENSHOTS
+// Opt-in, independently reported gates for the five remaining review defects.
+// WIREHUB_UI_REGRESSIONS=all (or comma-separated scenario names) leaves the
+// original suite unchanged when unset. Every scenario starts a fresh UI session.
+const regressions = process.env.WIREHUB_UI_REGRESSIONS
 const server = createServer(async (req, res) => {
   try {
     const pathname = new URL(req.url, 'http://localhost').pathname
@@ -30,7 +34,8 @@ try {
   if (screenshots) await page.context().tracing.start({ screenshots: true, snapshots: true, sources: true })
   const runtimeErrors = []
   page.on('pageerror', error => runtimeErrors.push(error.message))
-  page.on('dialog', dialog => dialog.accept())
+  let acceptDialog = true, dialogCount = 0
+  page.on('dialog', dialog => { dialogCount++; return acceptDialog ? dialog.accept() : dialog.dismiss() })
   let groups = [
     { id: 'engineering', name: 'Engineering', allowed_groups: [] },
     { id: 'operations', name: 'Operations', allowed_groups: [] },
@@ -44,22 +49,42 @@ try {
   let settings = { subnet: '10.77.0.0/24', endpoint: 'vpn.example.com:51820', persistent_keepalive: 25 }
   let configured = true, failSave = false, failReload = false, partialSave = false, commitAclThenFail = false
   let failSettings = false
+  let loseSettingsResponse = false, peerCreateError = ''
+  const reads = []
   let setupCreateStatus = 200, setupCreateError = ''
   const mutations = []
   // Capture the response at request time, then explicitly release it after a mutation.
   // No timing sleeps: each race is ordered by the request/response barriers below.
   const heldResponses = new Map()
+  const heldAclCommits = new Map()
+  const pendingReleases = new Set()
   const holdNext = (method, path) => {
     const key = `${method} ${path}`
     assert.ok(!heldResponses.has(key), `Only one pending barrier for ${key}`)
     let seen, release
     const requested = new Promise(resolve => { seen = resolve })
-    const released = new Promise(resolve => { release = resolve })
+     const released = new Promise(resolve => { release = resolve })
+     pendingReleases.add(release)
     heldResponses.set(key, { seen, released })
     return { requested, release: async () => {
       const response = page.waitForResponse(r => r.request().method() === method && new URL(r.url()).pathname === path)
-      release()
-      await (await response).finished()
+       release()
+       await (await response).finished()
+       pendingReleases.delete(release)
+    } }
+  }
+  // Unlike a held acknowledgement, this barrier prevents the server mutation
+  // itself. GET snapshots taken before release therefore contain the old ACL.
+  const holdAclCommit = id => {
+    const path = `/api/groups/${id}/acl`
+    assert.ok(!heldAclCommits.has(path))
+    let seen, release
+    const requested = new Promise(resolve => { seen = resolve })
+    const released = new Promise(resolve => { release = resolve })
+    heldAclCommits.set(path, { seen, released }); pendingReleases.add(release)
+    return { requested, release: async () => {
+      const response = page.waitForResponse(r => r.request().method() === 'PUT' && new URL(r.url()).pathname === path)
+      release(); await (await response).finished(); pendingReleases.delete(release)
     } }
   }
   await page.route('**/api/**', async route => {
@@ -72,6 +97,7 @@ try {
     const reply = (json, status = 200) => respond({ status, contentType: 'application/json', body: JSON.stringify(json) })
     const textError = (text, status) => respond({ status, contentType: 'text/plain; charset=utf-8', body: text })
     if (req.headers().authorization !== 'Bearer ui-test-token') return textError('unauthorized', 401)
+    if (method === 'GET') reads.push(path)
     if (method !== 'GET') mutations.push({ method, path, body })
     if (path === '/api/setup') {
       if (method === 'POST') {
@@ -86,11 +112,15 @@ try {
     }
     if (path === '/api/settings') {
       if (failSettings) return textError('setup required', 409)
-      settings = { ...settings, ...body }; return reply(settings)
+      settings = { ...settings, ...body }
+      if (loseSettingsResponse) return route.abort('failed')
+      return reply(settings)
     }
     if (path === '/api/groups' && method === 'GET') return failReload ? reply({}, 503) : reply(groups)
     if (path.endsWith('/acl')) {
       if (failSave || (partialSave && path.includes('/operations/'))) return reply({}, 503)
+      const commit = heldAclCommits.get(path)
+      if (commit) { heldAclCommits.delete(path); commit.seen(); await commit.released }
       const group = groups.find(g => g.id === path.split('/')[3])
       group.allowed_groups = body.allowed_groups
       if (commitAclThenFail) return reply({}, 503)
@@ -99,7 +129,7 @@ try {
     if (path === '/api/groups' && method === 'POST') { const group = { id: 'new-group', ...body, allowed_groups: [] }; groups.push(group); return reply(group) }
     if (path.startsWith('/api/groups/') && method === 'DELETE') { const id = path.split('/')[3]; groups = groups.filter(g => g.id !== id); groups.forEach(g => { g.allowed_groups = g.allowed_groups.filter(to => to !== id) }); forwards = forwards.map(f => ({ ...f, allowed_group_ids: f.allowed_group_ids.filter(to => to !== id) })); return route.fulfill({ status: 204 }) }
     if (path === '/api/peers' && method === 'GET') return reply(peers)
-    if (path === '/api/peers' && method === 'POST') { const peer = { ...peers[0], ...body, id: 'new-peer', ipv4: '10.77.0.4' }; peers.push(peer); return reply({ peer, config: '[Interface]\nPrivateKey = fixture-only\nAddress = 10.77.0.4/32' }) }
+    if (path === '/api/peers' && method === 'POST') { if (peerCreateError) return textError(peerCreateError, 409); const id = peers.some(p => p.id === 'new-peer') ? `new-peer-${peers.length}` : 'new-peer'; const peer = { ...peers[0], ...body, id, ipv4: '10.77.0.4' }; peers.push(peer); return reply({ peer, config: '[Interface]\nPrivateKey = fixture-only\nAddress = 10.77.0.4/32' }) }
     if (path.endsWith('/group')) { const peer = peers.find(p => p.id === path.split('/')[3]); peer.group_id = body.group_id; return reply(peer) }
     if (path.startsWith('/api/peers/') && method === 'DELETE') { const id = path.split('/')[3]; peers = peers.filter(p => p.id !== id); forwards = forwards.filter(f => f.target_peer_id !== id); return route.fulfill({ status: 204 }) }
     if (path === '/api/forwards' && method === 'GET') return reply(forwards)
@@ -221,6 +251,296 @@ try {
     return async () => { await held.release(); await refreshSettled() }
   }
   const flushFrames = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  if (regressions) {
+    page.setDefaultTimeout(5000)
+    const initialPeers = structuredClone(peers)
+    const fresh = async () => {
+      groups = [
+        { id: 'engineering', name: 'Engineering', allowed_groups: [] },
+        { id: 'operations', name: 'Operations', allowed_groups: [] },
+        { id: 'services', name: 'Services', allowed_groups: [] },
+      ]
+      peers = structuredClone(initialPeers); forwards = []
+      settings = { subnet: '10.77.0.0/24', endpoint: 'vpn.example.com:51820', persistent_keepalive: 25 }
+      failSave = failReload = partialSave = commitAclThenFail = failSettings = loseSettingsResponse = false
+      peerCreateError = ''; acceptDialog = true; configured = true
+      mutations.length = 0; reads.length = 0; runtimeErrors.length = 0
+      await page.goto(url); await login(); await refreshSettled()
+    }
+    const newPeer = async (name = 'Regression laptop') => {
+      await navigate('Peers'); await page.getByRole('button', { name: 'New peer', exact: true }).click()
+      await page.getByRole('dialog').getByLabel('Name', { exact: true }).fill(name)
+      await page.getByRole('button', { name: 'Create', exact: true }).click()
+    }
+    const scenarios = {
+      'acl-mid-batch-get': async () => {
+        await navigate('Groups'); await node('engineering').click()
+        await page.getByRole('switch', { name: 'Intra-group access' }).check(); await save({ engineering: ['engineering'] })
+        await page.getByRole('switch', { name: 'Intra-group access' }).uncheck()
+        await connect('engineering', 'operations'); await poll(async () => await edge().count() === 1, 'Two-group batch draft exists')
+        const a = holdAclCommit('engineering'), b = holdNext('PUT', '/api/groups/operations/acl')
+        await page.getByRole('button', { name: 'Save', exact: true }).click(); await Promise.all([a.requested, b.requested])
+        assert.deepEqual(groups[0].allowed_groups, ['engineering'], 'A is blocked before commit, not just before response')
+        const old = holdNext('GET', '/api/groups')
+        await refresh.click(); await old.requested
+        await a.release()
+        assert.deepEqual(groups[0].allowed_groups, ['operations'], 'A confirmed self revoke while B acknowledgement is pending')
+        assert.ok(await page.getByRole('button', { name: 'Saving', exact: true }).isDisabled())
+        await old.release(); await refreshSettled(); await flushFrames()
+        await b.release()
+        await poll(async () => await page.getByRole('button', { name: 'Save', exact: true }).isDisabled() && await page.getByRole('button', { name: 'Saving', exact: true }).count() === 0, 'Whole batch settles')
+        const restored = await page.getByRole('switch', { name: 'Intra-group access' }).isChecked()
+        console.log(`EVIDENCE acl-mid-batch-get: after old GET + batch settlement server=${JSON.stringify(fixtureAcl())}, UI=${JSON.stringify(await graphAcl())}`)
+        await connect('engineering', 'services'); await poll(async () => await edge().count() >= 2, 'Unrelated link draft exists')
+        const written = page.waitForResponse(r => r.request().method() === 'PUT' && new URL(r.url()).pathname === '/api/groups/engineering/acl')
+        await page.getByRole('button', { name: 'Save', exact: true }).click(); await (await written).finished()
+        await poll(async () => await page.getByRole('button', { name: 'Save', exact: true }).isDisabled(), 'Follow-up save settles')
+        console.log(`EVIDENCE acl-mid-batch-get: unrelated link save server=${JSON.stringify(fixtureAcl())}`)
+        assert.deepEqual({ restored, regranted: groups[0].allowed_groups.includes('engineering') }, { restored: false, regranted: false }, 'Mid-batch old GET cannot restore revoked UI permission or regrant it in a later write')
+      },
+      'acl-navigation': async () => {
+        const failures = []
+        const check = (value, message) => { if (!value) failures.push(message) }
+        await navigate('Groups'); await node('engineering').click()
+        await page.getByRole('switch', { name: 'Intra-group access' }).check()
+        const old = holdNext('PUT', '/api/groups/engineering/acl')
+        await page.getByRole('button', { name: 'Save', exact: true }).click(); await old.requested
+        assert.deepEqual(groups[0].allowed_groups, ['engineering'], 'Old grant committed, acknowledgement held')
+        {
+          await navigate('Overview'); await navigate('Groups')
+          await refresh.click(); await refreshSettled(); await node('engineering').click()
+          const toggle = page.getByRole('switch', { name: 'Intra-group access' })
+          const locked = await toggle.isDisabled()
+          check(locked, 'Remounted Groups must retain the pending ACL write lock')
+          if (locked) {
+            const count = mutations.length
+            await toggle.dispatchEvent('click'); await flushFrames()
+            check(mutations.length === count, 'Pending same-policy write rejects reentry')
+            await old.release()
+            await poll(async () => await toggle.isEnabled(), 'Original ACL save settles across navigation')
+            await toggle.uncheck(); await save({ engineering: [] })
+          } else {
+            // Continue despite the missing lock to expose the security consequence:
+            // a new confirmed revoke is overwritten by the first write's old reply.
+            await toggle.uncheck(); await save({ engineering: [] })
+            await old.release(); await flushFrames()
+            console.log(`EVIDENCE acl-navigation: after revoke + old response server=${JSON.stringify(fixtureAcl())}, UI=${JSON.stringify(await graphAcl())}`)
+            check(!(await toggle.isChecked()), 'Old PUT response must not restore revoked self-access in UI')
+          }
+          await page.getByRole('group', { name: 'New link direction' }).getByRole('button', { name: 'Both ways', exact: true }).click()
+          await connect('engineering', 'operations'); await poll(async () => await edge().count() === 1, 'Subsequent link draft exists')
+          const written = page.waitForResponse(r => r.request().method() === 'PUT' && new URL(r.url()).pathname === '/api/groups/engineering/acl')
+          await page.getByRole('button', { name: 'Save', exact: true }).click(); await (await written).finished()
+          await poll(async () => await page.getByRole('button', { name: 'Save', exact: true }).isDisabled(), 'Follow-up save settles')
+          console.log(`EVIDENCE acl-navigation: subsequent A↔B save server=${JSON.stringify(fixtureAcl())}`)
+          check(!groups[0].allowed_groups.includes('engineering'), 'Subsequent unrelated link save must not regrant revoked self-access')
+          assert.deepEqual(failures, [], 'Cross-page ACL write ownership and stale-response protection')
+        }
+      },
+      'settings-recovery': async () => {
+        await navigate('Settings')
+        loseSettingsResponse = true
+        await page.getByLabel('Endpoint', { exact: true }).fill('committed.example.com:51820')
+        const failed = page.waitForEvent('requestfailed', { predicate: r => new URL(r.url()).pathname === '/api/settings' })
+        await page.getByRole('button', { name: 'Save changes', exact: true }).click(); await failed
+        await page.getByRole('alert').filter({ hasText: 'Refresh' }).waitFor()
+        assert.equal(settings.endpoint, 'committed.example.com:51820', 'Fixture committed before acknowledgement loss')
+        loseSettingsResponse = false
+        await refresh.click(); await refreshSettled(); await navigate('Overview')
+        const overview = await page.locator('.hub-summary').innerText()
+        await navigate('Settings')
+        const actual = await page.getByLabel('Endpoint', { exact: true }).inputValue()
+        console.log(`EVIDENCE settings-recovery: server=${settings.endpoint}, reentered form=${actual}, Overview=${overview.replace(/\n/g, ' | ')}, setup GETs=${reads.filter(p => p === '/api/setup').length}`)
+        assert.equal(actual, settings.endpoint, 'Refresh + reenter must recover Settings committed before lost response')
+        assert.ok(overview.includes(settings.endpoint), 'Overview must show recovered authoritative defaults')
+      },
+      'acl-uncertain-navigation': async () => {
+        await navigate('Groups'); await node('engineering').click()
+        await page.getByRole('switch', { name: 'Intra-group access' }).check()
+        commitAclThenFail = true; failReload = true
+        await page.getByRole('button', { name: 'Save', exact: true }).click()
+        await page.getByRole('button', { name: 'Reload policy', exact: true }).waitFor()
+        assert.deepEqual(groups[0].allowed_groups, ['engineering'], 'Unacknowledged grant really committed')
+        await navigate('Overview'); await navigate('Groups'); await node('engineering').click()
+        assert.ok(await page.getByRole('switch', { name: 'Intra-group access' }).isDisabled(), 'Uncertainty keeps editing locked across navigation')
+        assert.ok(await page.getByRole('button', { name: 'New group', exact: true }).isDisabled())
+        const count = mutations.length
+        await page.getByRole('button', { name: 'Save', exact: true }).dispatchEvent('click'); await flushFrames()
+        assert.equal(mutations.length, count, 'Uncertain policy rejects reentrant writes')
+        commitAclThenFail = false; failReload = false
+        await page.getByRole('button', { name: 'Reload policy', exact: true }).click()
+        await poll(async () => await page.getByRole('switch', { name: 'Intra-group access' }).isEnabled(), 'Successful reconciliation unlocks remounted policy')
+        assert.ok(await page.getByRole('switch', { name: 'Intra-group access' }).isChecked(), 'Recovery adopts committed server ACL')
+      },
+      'acl-session': async () => {
+        await navigate('Groups'); await node('engineering').click()
+        await page.getByRole('switch', { name: 'Intra-group access' }).check()
+        const old = holdNext('PUT', '/api/groups/engineering/acl')
+        await page.getByRole('button', { name: 'Save', exact: true }).click(); await old.requested
+        await page.getByRole('button', { name: 'Administrator Sign out' }).click()
+        await page.getByLabel('Access token').waitFor(); await login(); await refreshSettled()
+        await navigate('Groups'); await node('engineering').click()
+        await page.getByRole('switch', { name: 'Intra-group access' }).uncheck()
+        const current = holdNext('PUT', '/api/groups/engineering/acl')
+        await page.getByRole('button', { name: 'Save', exact: true }).click(); await current.requested
+        await old.release(); await flushFrames()
+        assert.ok(await page.getByRole('button', { name: 'Saving', exact: true }).isDisabled(), 'Old-session ACL response cannot unlock the new save')
+        assert.ok(await page.getByRole('switch', { name: 'Intra-group access' }).isDisabled())
+        assert.equal(await page.getByText('Policy saved', { exact: true }).count(), 0, 'No old-session success toast')
+        assert.deepEqual(groups[0].allowed_groups, [])
+        await current.release()
+        await poll(async () => await page.getByRole('switch', { name: 'Intra-group access' }).isEnabled(), 'New-session save settles independently')
+        assert.equal(await page.getByRole('switch', { name: 'Intra-group access' }).isChecked(), false)
+      },
+      'settings-draft-refresh': async () => {
+        await navigate('Settings')
+        await page.getByLabel('Endpoint', { exact: true }).fill('draft.example.com:51820')
+        settings = { ...settings, endpoint: 'external.example.com:51820', persistent_keepalive: 30 }
+        await refresh.click(); await refreshSettled(); await flushFrames()
+        assert.equal(await page.getByLabel('Endpoint', { exact: true }).inputValue(), 'draft.example.com:51820', 'Authoritative refresh does not erase endpoint draft')
+        assert.equal(await page.getByLabel('Keepalive', { exact: false }).inputValue(), '25', 'Refresh keeps the complete editing draft')
+        await page.getByRole('button', { name: 'Save changes', exact: true }).click()
+        await page.getByText('Settings saved', { exact: true }).waitFor()
+        assert.equal(settings.endpoint, 'draft.example.com:51820', 'Preserved draft can still be saved')
+        loseSettingsResponse = true
+        await page.getByLabel('Endpoint', { exact: true }).fill('unacknowledged.example.com:51820')
+        const failed = page.waitForEvent('requestfailed', { predicate: r => new URL(r.url()).pathname === '/api/settings' })
+        await page.getByRole('button', { name: 'Save changes', exact: true }).click(); await failed
+        await page.getByRole('alert').filter({ hasText: 'Refresh' }).waitFor()
+        loseSettingsResponse = false
+        await page.getByLabel('Endpoint', { exact: true }).fill('next-draft.example.com:51820')
+        await refresh.click(); await refreshSettled(); await flushFrames()
+        assert.equal(await page.getByLabel('Endpoint', { exact: true }).inputValue(), 'next-draft.example.com:51820', 'A failed acknowledgement must not mark the next draft as a confirmed save')
+      },
+      'settings-old-get': async () => {
+        await navigate('Settings'); await refreshSettled()
+        const old = holdNext('GET', '/api/setup')
+        const before = reads.filter(p => p === '/api/setup').length
+        await refresh.click()
+        // A refresh with no setup GET settles immediately on the baseline; do
+        // not hang awaiting a nonexistent request or let it hide other gates.
+        await poll(async () => reads.filter(p => p === '/api/setup').length > before || await refresh.isEnabled(), 'Refresh either requests setup or settles')
+        if (reads.filter(p => p === '/api/setup').length === before) {
+          heldResponses.delete('GET /api/setup')
+          assert.fail('Refresh must read authoritative /api/setup before old-GET/new-PUT protection can be exercised')
+        }
+        await old.requested
+        await page.getByLabel('Endpoint', { exact: true }).fill('new-put.example.com:51820')
+        await page.getByRole('button', { name: 'Save changes', exact: true }).click()
+        await page.getByText('Settings saved', { exact: true }).waitFor()
+        await old.release(); await refreshSettled(); await flushFrames()
+        assert.equal(await page.getByLabel('Endpoint', { exact: true }).inputValue(), settings.endpoint, 'Old setup GET cannot overwrite confirmed Settings PUT')
+        await navigate('Overview'); assert.ok((await page.locator('.hub-summary').innerText()).includes(settings.endpoint))
+      },
+      'keyboard-link': async () => {
+        await navigate('Groups')
+        const handles = await page.locator('.react-flow__handle').evaluateAll(els => els.map(e => ({ tabIndex: e.tabIndex, role: e.getAttribute('role') })))
+        console.log(`EVIDENCE keyboard-link: graph handles=${JSON.stringify(handles)}`)
+        // Explicit accessible contract for the forthcoming non-drag path. Native
+        // selects use arrow keys, never pointer drag or direct DOM mutation.
+        const source = page.getByRole('combobox', { name: 'Source group', exact: true })
+        assert.equal(await source.count(), 1, 'Keyboard-only cross-group creation needs a Source group form control (drag handles are not focusable)')
+        const tabTo = async locator => {
+          for (let i = 0; i < 80; i++) {
+            await page.keyboard.press('Tab')
+            if (await locator.evaluate(e => document.activeElement === e)) return
+          }
+          assert.fail('Control must be reachable by Tab')
+        }
+        await tabTo(source); await page.keyboard.press('ArrowUp'); await page.keyboard.press('ArrowUp')
+        assert.equal(await source.inputValue(), 'engineering', 'Keyboard selects source A')
+        const target = page.getByRole('combobox', { name: 'Target group', exact: true })
+        await tabTo(target); await page.keyboard.press('ArrowUp'); await page.keyboard.press('ArrowUp'); await page.keyboard.press('ArrowDown')
+        assert.equal(await target.inputValue(), 'operations', 'Keyboard selects target B')
+        await tabTo(page.getByRole('button', { name: 'Add link', exact: true })); await page.keyboard.press('Enter')
+        await poll(async () => await edge().count() === 1, 'Keyboard form creates A↔B draft')
+        await tabTo(page.getByRole('button', { name: 'Save', exact: true })); await page.keyboard.press('Enter')
+        await poll(async () => groups[0].allowed_groups.includes('operations') && groups[1].allowed_groups.includes('engineering'), 'Keyboard-only save commits bidirectional server ACL')
+      },
+      ...Object.fromEntries(['escape', 'close', 'backdrop'].map(action => [`provision-${action}`, async () => {
+        await newPeer(); await page.getByRole('heading', { name: 'Peer ready' }).waitFor()
+        const close = async () => {
+          if (action === 'escape') await page.keyboard.press('Escape')
+          else if (action === 'close') await page.getByLabel('Close dialog', { exact: true }).click()
+          else await page.locator('.modal-backdrop').click({ position: { x: 5, y: 5 } })
+          await flushFrames()
+        }
+        const before = dialogCount; acceptDialog = false
+        await close()
+        assert.equal(await page.getByRole('heading', { name: 'Peer ready' }).count(), 1, `Unsaved one-time config: cancelling ${action} dismissal must retain it`)
+        assert.ok(dialogCount > before, 'Unsaved close requires explicit discard confirmation')
+        assert.match(await page.locator('.config-details pre').textContent(), /PrivateKey = fixture-only/, 'Cancel retains original config')
+        acceptDialog = true; await close()
+        assert.equal(await page.getByRole('heading', { name: 'Peer ready' }).count(), 0, 'Explicit confirmed discard closes dialog')
+        assert.equal(peers.length, 3, 'Discard only dismisses config; peer still exists')
+      }])),
+      ...Object.fromEntries([false, true].map(signOut => [`provision-late-copy${signOut ? '-session' : ''}`, async () => {
+        await page.evaluate(() => {
+          Object.defineProperty(navigator.clipboard, 'writeText', { configurable: true, value: () => new Promise(resolve => {
+            window.__clipboardRequested = true; window.__releaseClipboard = resolve
+          }) })
+        })
+        await newPeer('Configuration A'); await page.getByRole('heading', { name: 'Peer ready' }).waitFor()
+        await page.getByRole('button', { name: 'Copy', exact: true }).click()
+        await page.waitForFunction(() => window.__clipboardRequested === true)
+        // Explicit discard is allowed, but the old copy completion must not
+        // transfer its retained status to a different configuration/session.
+        await page.keyboard.press('Escape'); await poll(async () => await page.getByRole('heading', { name: 'Peer ready' }).count() === 0, 'A explicitly discarded')
+        if (signOut) {
+          await page.getByRole('button', { name: 'Administrator Sign out' }).click()
+          await page.getByLabel('Access token').waitFor(); await login(); await refreshSettled()
+        }
+        await newPeer('Configuration B'); await page.getByRole('heading', { name: 'Peer ready' }).waitFor()
+        await page.evaluate(() => window.__releaseClipboard()); await flushFrames()
+        const before = dialogCount; acceptDialog = false
+        await page.keyboard.press('Escape'); await flushFrames()
+        const retained = await page.getByRole('heading', { name: 'Peer ready' }).count() === 1
+        console.log(`EVIDENCE provision-late-copy${signOut ? '-session' : ''}: B close confirmation count=${dialogCount - before}, B remains=${retained}`)
+        assert.ok(dialogCount > before, 'A clipboard completion must not suppress B discard confirmation')
+        assert.ok(retained, 'Cancelling B discard keeps its unsaved configuration')
+        assert.equal(await page.getByRole('dialog').getByText('Configuration B', { exact: true }).count(), 1)
+        acceptDialog = true; await page.keyboard.press('Escape'); await flushFrames()
+        assert.equal(await page.getByRole('heading', { name: 'Peer ready' }).count(), 0, 'Only explicit accepted discard closes B')
+      }])),
+      'peer-pool-error': async () => {
+        peerCreateError = 'address pool exhausted'
+        await newPeer(); await page.getByRole('dialog').getByRole('alert').waitFor()
+        const actual = await page.getByRole('dialog').getByRole('alert').innerText()
+        console.log(`EVIDENCE peer-pool-error: backend 409 text/plain=${peerCreateError}, UI=${actual}`)
+        assert.match(actual, /address pool exhausted/i, 'Pool exhaustion must not be mislabeled as duplicate peer name')
+        assert.doesNotMatch(actual, /name already exists/i)
+        assert.equal(peers.length, 2, 'Failed POST creates no peer')
+      },
+      ...Object.fromEntries(['peer conflict', 'setup required', 'Peer name already exists.'].map((detail, index) => [`peer-conflict-${index}`, async () => {
+        peerCreateError = detail; await newPeer(); await page.getByRole('dialog').getByRole('alert').waitFor()
+        assert.equal(await page.getByRole('dialog').getByRole('alert').innerText(), detail, 'Known plain-text conflict detail is preserved without guessing from 409')
+        assert.equal(peers.length, 2)
+      }])),
+    }
+    const selected = regressions === 'all' ? Object.keys(scenarios) : regressions.split(',')
+    const failures = []
+    for (const name of selected) {
+      assert.ok(scenarios[name], `Unknown regression scenario: ${name}`)
+      try {
+        await fresh(); await scenarios[name]()
+        assert.deepEqual(runtimeErrors, [], 'No runtime exceptions')
+        assert.equal(heldResponses.size, 0, 'All barriers exercised')
+        assert.equal(heldAclCommits.size, 0, 'All pre-commit barriers exercised')
+        console.log(`PASS regression: ${name}`)
+      } catch (error) {
+        failures.push(name); console.error(`FAIL regression: ${name}\n${error.stack ?? error}`)
+        await screenshot(`regression-${name}-failure`)
+        heldResponses.clear()
+        heldAclCommits.clear()
+      } finally {
+        // Do not strand a routed request if an earlier assertion failed. The
+        // next goto destroys that UI session before any fixture reset occurs.
+        for (const release of pendingReleases) release()
+        pendingReleases.clear()
+      }
+    }
+    assert.deepEqual(failures, [], `Remaining UI regression gates failed: ${failures.join(', ')}`)
+  } else {
   await page.goto(url); await english(); await screenshot('login')
   await page.getByLabel('Access token').fill('wrong-token'); await page.getByRole('button', { name: 'Connect', exact: true }).click(); await page.getByRole('alert').waitFor(); assert.equal(await page.getByRole('alert').innerText(), 'unauthorized'); await english()
   await login(); await english(); await noOverflow(); await screenshot('overview')
@@ -506,6 +826,7 @@ try {
   assert.equal(heldResponses.size, 0, 'All deterministic response barriers were exercised')
   assert.ok(mutations.every(m => m.path.startsWith('/api/')), 'Existing API paths only')
   console.log('PASS: group details closing, compact peer rows, graph direction, drag, persistence, deletion, self-access, partial saves, recovery, CRUD, English, mobile, setup, session reset, and stale-response regressions')
+  }
 } catch (error) {
   if (page && screenshots) {
     try {

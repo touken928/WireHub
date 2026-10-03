@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{kernel::KernelHandle, model::*, storage::Store};
+use crate::{kernel::{KernelHandle, ReloadPermit}, model::*, storage::Store};
 use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
@@ -42,6 +42,7 @@ pub(crate) fn err(status: StatusCode, message: &str) -> impl IntoResponse {
     (status, message.to_owned())
 }
 
+#[cfg(test)]
 pub(crate) async fn reload(state: &AppState) -> bool {
     state.kernel.reload().await.is_ok()
 }
@@ -84,16 +85,24 @@ pub(crate) fn delete_error(error: rusqlite::Error) -> axum::response::Response {
     }
 }
 
-pub(crate) async fn delete_result(
+pub(crate) fn delete_result<'a>(
     result: Result<usize, rusqlite::Error>,
-    state: &AppState,
+    permit: ReloadPermit<'a>,
     missing: &'static str,
-) -> axum::response::Response {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = axum::response::Response> + Send + 'a>> {
     match result {
-        Ok(1) if reload(state).await => StatusCode::NO_CONTENT.into_response(),
-        Ok(1) => err(StatusCode::SERVICE_UNAVAILABLE, "runtime reload failed").into_response(),
-        Ok(_) => err(StatusCode::NOT_FOUND, missing).into_response(),
-        Err(error) => delete_error(error),
+        Ok(1) => {
+            let ack = permit.send();
+            Box::pin(async move {
+                if ack.wait().await.is_ok() {
+                    StatusCode::NO_CONTENT.into_response()
+                } else {
+                    err(StatusCode::SERVICE_UNAVAILABLE, "runtime reload failed").into_response()
+                }
+            })
+        }
+        Ok(_) => Box::pin(std::future::ready(err(StatusCode::NOT_FOUND, missing).into_response())),
+        Err(error) => Box::pin(std::future::ready(delete_error(error))),
     }
 }
 

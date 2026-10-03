@@ -27,6 +27,30 @@ pub(super) struct ReloadCommand {
     pub(super) ack: oneshot::Sender<Result<(), ReloadError>>,
 }
 
+pub(crate) struct ReloadPermit<'a> {
+    permit: mpsc::Permit<'a, ReloadCommand>,
+}
+
+pub(crate) struct ReloadAck(oneshot::Receiver<Result<(), ReloadError>>);
+
+impl ReloadPermit<'_> {
+    pub(crate) fn send(self) -> ReloadAck {
+        let (ack, wait) = oneshot::channel();
+        self.permit.send(ReloadCommand { ack });
+        ReloadAck(wait)
+    }
+}
+
+impl ReloadAck {
+    pub(crate) async fn wait(self) -> Result<(), ReloadError> {
+        match tokio::time::timeout(RELOAD_ACK_TIMEOUT, self.0).await {
+            Err(_) => Err(ReloadError::Timeout),
+            Ok(Err(_)) => Err(ReloadError::Stopped),
+            Ok(Ok(result)) => result,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct KernelHandle {
     pub(super) commands: mpsc::Sender<ReloadCommand>,
@@ -39,20 +63,23 @@ impl KernelHandle {
         self.readiness.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    pub async fn reload(&self) -> Result<(), ReloadError> {
-        let (ack, wait) = oneshot::channel();
-        tokio::time::timeout(
-            RELOAD_SEND_TIMEOUT,
-            self.commands.send(ReloadCommand { ack }),
+    pub(crate) async fn reserve_reload(&self) -> Result<ReloadPermit<'_>, ReloadError> {
+        let permit = tokio::time::timeout(RELOAD_SEND_TIMEOUT, self.commands.reserve())
+            .await
+            .map_err(|_| ReloadError::Timeout)?
+            .map_err(|_| ReloadError::Stopped)?;
+        Ok(ReloadPermit { permit })
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained kernel control API; management writes reserve before mutating"
         )
-        .await
-        .map_err(|_| ReloadError::Timeout)?
-        .map_err(|_| ReloadError::Stopped)?;
-        match tokio::time::timeout(RELOAD_ACK_TIMEOUT, wait).await {
-            Err(_) => Err(ReloadError::Timeout),
-            Ok(Err(_)) => Err(ReloadError::Stopped),
-            Ok(Ok(result)) => result,
-        }
+    )]
+    pub async fn reload(&self) -> Result<(), ReloadError> {
+        self.reserve_reload().await?.send().wait().await
     }
 
     pub async fn stats(&self) -> Arc<HashMap<String, PeerRuntimeStats>> {

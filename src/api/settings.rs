@@ -1,5 +1,5 @@
 use axum::{extract::State, http::{HeaderMap, StatusCode}, response::IntoResponse, Json};
-use crate::{api::{auth, err, is_input_error, reload, AppState}, model::{SetupRequest, SetupStatus, SettingsRequest}};
+use crate::{api::{auth, err, is_input_error, AppState}, model::{SetupRequest, SetupStatus, SettingsRequest}};
 
 #[utoipa::path(get, path = "/api/setup", tag = "crate", responses((status = 200, body = SetupStatus), (status = 401)))]
 pub async fn get_setup(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
@@ -21,6 +21,10 @@ pub async fn post_setup(
     if !auth(&headers, &state) {
         return err(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
+    let permit = match state.kernel.reserve_reload().await {
+        Ok(permit) => permit,
+        Err(_) => return err(StatusCode::SERVICE_UNAVAILABLE, "runtime reload failed").into_response(),
+    };
     let settings = match state.store.setup(
         &request.subnet, &request.endpoint, request.persistent_keepalive,
     ) {
@@ -40,7 +44,8 @@ pub async fn post_setup(
         }
     };
 
-    if reload(&state).await {
+    let ack = permit.send();
+    if ack.wait().await.is_ok() {
         Json(settings).into_response()
     } else {
         err(StatusCode::SERVICE_UNAVAILABLE,

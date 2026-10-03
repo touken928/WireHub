@@ -26,6 +26,7 @@ const mutationFailure = (error: unknown, fallback: string) => {
   if (/\b503\b|\b5\d\d\b|network|fetch failed|failed to fetch|networkerror/i.test(message)) return 'Result unconfirmed. Refresh to check the current state before retrying.'
   return message || fallback
 }
+const confirmDiscardConfig = () => confirm('Discard this configuration? Its private key is shown only once and cannot be recovered. If you have not saved it, delete this peer and create a new one to get another configuration.')
 
 export default function App() {
   const [token, setToken] = useState('')
@@ -42,12 +43,20 @@ export default function App() {
   const pendingPeersRef = useRef(new Set<string>())
   const [settingsSaving, setSettingsSaving] = useState(false)
   const [settingsError, setSettingsError] = useState('')
+  const [settingsVersion, setSettingsVersion] = useState(0)
   const settingsPendingRef = useRef(false)
+  const [policySaving, setPolicySaving] = useState(false)
+  const [policyUncertain, setPolicyUncertain] = useState(false)
+  const [policyError, setPolicyError] = useState('')
+  const policyPendingRef = useRef(false), policyUncertainRef = useRef(false)
+  const policyVersionRef = useRef(0)
   const [error, setError] = useState('')
   const [forwardsError, setForwardsError] = useState('')
   const [query, setQuery] = useState('')
   const [modal, setModal] = useState<'peer' | 'group' | 'forward' | null>(null)
   const [provision, setProvision] = useState<Provision | null>(null)
+  const [provisionRetained, setProvisionRetained] = useState(false)
+  const provisionGenerationRef = useRef(0)
   const [mobileNav, setMobileNav] = useState(false)
   const [toast, setToast] = useState('')
   const [loginError, setLoginError] = useState('')
@@ -77,10 +86,17 @@ export default function App() {
     const isCurrent = () => session === sessionRef.current && epoch === mutationEpochRef.current && request === loadRef.current
     setBusy(true); setError('')
     try {
-      const [p, g] = await Promise.all([client.GET('/api/peers'), client.GET('/api/groups')])
+      const settingsPending = settingsPendingRef.current
+      const policyPending = policyPendingRef.current
+      const [p, g, status] = await Promise.all([client.GET('/api/peers'), client.GET('/api/groups'), setupApi.get()])
       if (!isCurrent()) return
       if (p.error || g.error) throw new Error('Unable to load data. Check your access token.')
-      setPeers(p.data ?? []); setGroups(g.data ?? []); setUpdatedAt(new Date())
+      setPeers(p.data ?? []); setUpdatedAt(new Date())
+      // A read captured during a batch can still contain an earlier group's
+      // pre-commit ACL after that group's PUT succeeds. Only the save/recovery
+      // owner may publish policy until the whole batch has settled.
+      if (!policyPending && !policyPendingRef.current) setGroups(g.data ?? [])
+      if (!settingsPending && !settingsPendingRef.current) { setSetup(status); setSettingsError('') }
       try { const list = await forwardsApi.list(); if (isCurrent()) { setForwards(list); setForwardsError('') } }
       catch (e) { if (isCurrent()) setForwardsError(e instanceof Error ? e.message : 'Unable to load forwards.') }
     } catch (e) { if (isCurrent()) setError(e instanceof Error ? e.message : 'Connection failed. Check the server.') }
@@ -90,7 +106,62 @@ export default function App() {
   }, [connected, setup?.configured])
   useEffect(() => { void load() }, [load])
   useEffect(() => { if (!policyDirty) return; const guard = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = '' }; window.addEventListener('beforeunload', guard); return () => window.removeEventListener('beforeunload', guard) }, [policyDirty])
+  useEffect(() => { if (!provision || provisionRetained) return; const guard = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = '' }; window.addEventListener('beforeunload', guard); return () => window.removeEventListener('beforeunload', guard) }, [provision, provisionRetained])
   useEffect(() => { if (toast) { const id = window.setTimeout(() => setToast(''), 2800); return () => window.clearTimeout(id) } }, [toast])
+
+  // The entire policy save (including reconciliation) belongs to the session,
+  // not the canvas mount. Parallel group writes settle before editing unlocks.
+  const reloadPolicy = async () => {
+    const session = sessionRef.current
+    invalidateLoads()
+    const epoch = mutationEpochRef.current
+    const r = await client.GET('/api/groups')
+    if (session !== sessionRef.current) throw new Error('Session ended.')
+    if (epoch !== mutationEpochRef.current) throw new Error('Policy changed while reloading. Reload again.')
+    if (r.error || !r.data) throw new Error('Unable to reload policy.')
+    setGroups(r.data)
+  }
+  const recoverPolicy = async () => {
+    if (policyPendingRef.current) throw new Error('Policy save in progress.')
+    const session = sessionRef.current
+    policyPendingRef.current = true; setPolicySaving(true)
+    try {
+      await reloadPolicy()
+      policyUncertainRef.current = false; setPolicyUncertain(false); setPolicyError('')
+    } catch (e) {
+      if (session === sessionRef.current) setPolicyError('Unable to reload policy. The canvas may differ from the server.')
+      throw e
+    } finally { if (session === sessionRef.current) { policyPendingRef.current = false; setPolicySaving(false) } }
+  }
+  const savePolicy = async (changes: { id: string; allowed: string[] }[]) => {
+    if (policyPendingRef.current || policyUncertainRef.current) throw new Error('Policy must settle before editing.')
+    const session = sessionRef.current, version = ++policyVersionRef.current
+    const current = () => session === sessionRef.current && version === policyVersionRef.current
+    policyPendingRef.current = true; setPolicySaving(true); setPolicyError(''); invalidateLoads()
+    try {
+      const results = await Promise.allSettled(changes.map(async ({ id, allowed }) => {
+        const r = await client.PUT('/api/groups/{id}/acl', { params: { path: { id } }, body: { allowed_groups: allowed } })
+        if (!current()) throw new Error('Policy save superseded.')
+        if (r.error || !r.data) throw new Error('Save unconfirmed.')
+        setGroups(v => v.map(g => g.id === id ? r.data! : g))
+      }))
+      if (!current()) return
+      invalidateLoads()
+      if (results.some(result => result.status === 'rejected')) {
+        policyUncertainRef.current = true; setPolicyUncertain(true)
+        try {
+          await reloadPolicy()
+          if (!current()) return
+          policyUncertainRef.current = false; setPolicyUncertain(false)
+          setPolicyError('Save incomplete. Server policy reloaded; review before editing.')
+        } catch {
+          if (current()) setPolicyError('Save unconfirmed. Reload server policy to continue.')
+        }
+      } else setToast('Policy saved')
+    } finally {
+      if (current()) { invalidateLoads(); policyPendingRef.current = false; setPolicySaving(false) }
+    }
+  }
 
   const enter = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -116,8 +187,21 @@ export default function App() {
       setLoginError(e instanceof Error ? e.message : 'Connection failed. Check the server and token.')
     } finally { if (session === sessionRef.current) setLoginBusy(false) }
   }
-  const signOut = () => { if (policyDirty && !confirm('Sign out and discard unsaved policy changes?')) return; ++sessionRef.current; setConnected(false); setToken(''); rememberToken(''); setPeers([]); setGroups([]); setForwards([]); setSetup(null); setModal(null); setProvision(null); setError(''); setForwardsError(''); setToast(''); setLoginError(''); setMobileNav(false); setQuery(''); setBusy(false); setUpdatedAt(null); pendingPeersRef.current.clear(); setPendingPeers(new Set()); settingsPendingRef.current = false; setSettingsSaving(false); setSettingsError(''); setPolicyDirty(false); setPage('overview') }
+  const signOut = () => {
+    if (policyDirty && !confirm('Sign out and discard unsaved policy changes?')) return
+    if (provision && !provisionRetained && !confirmDiscardConfig()) return
+    ++sessionRef.current; ++policyVersionRef.current
+    ++provisionGenerationRef.current
+    policyPendingRef.current = false; policyUncertainRef.current = false
+    setPolicySaving(false); setPolicyUncertain(false); setPolicyError('')
+    setConnected(false); setToken(''); rememberToken('')
+    setPeers([]); setGroups([]); setForwards([]); setSetup(null); setModal(null); setProvision(null); setProvisionRetained(false)
+    setError(''); setForwardsError(''); setToast(''); setLoginError(''); setMobileNav(false); setQuery(''); setBusy(false); setUpdatedAt(null)
+    pendingPeersRef.current.clear(); setPendingPeers(new Set())
+    settingsPendingRef.current = false; setSettingsSaving(false); setSettingsError(''); setSettingsVersion(0); setPolicyDirty(false); setPage('overview')
+  }
   const activeSession = sessionRef.current
+  const activeProvisionGeneration = provisionGenerationRef.current
   const filteredPeers = peers.filter(p => `${p.name} ${p.ipv4} ${groupName(groups, p.group_id)}`.toLowerCase().includes(query.toLowerCase()))
   const stats = useMemo(() => ({ online: peers.filter(p => Date.now() / 1000 - (p.last_handshake_unix ?? 0) < 180).length, sent: peers.reduce((s, p) => s + p.sent_bytes, 0), received: peers.reduce((s, p) => s + p.received_bytes, 0) }), [peers])
 
@@ -167,46 +251,33 @@ export default function App() {
           } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Unable to delete peer.')) }
           finally { if (session === sessionRef.current) finishPeerMutation(peer.id) }
         }} />}
-         {page === 'groups' && <GroupsPage onDirtyChange={setPolicyDirty} groups={groups} peers={peers} onCreate={() => setModal('group')} onSaved={() => { if (activeSession === sessionRef.current) setToast('Policy saved') }} onDelete={async g => { if (!confirm(`Delete group "${g.name}"?`)) return; try { const r = await client.DELETE('/api/groups/{id}', { params: { path: { id: g.id } } }); if (activeSession !== sessionRef.current) return; if (!r.error) { invalidateLoads(); setGroups(v => v.filter(x => x.id !== g.id).map(x => ({ ...x, allowed_groups: (x.allowed_groups ?? []).filter(id => id !== g.id) }))); setForwards(v => v.map(f => ({ ...f, allowed_group_ids: f.allowed_group_ids.filter(id => id !== g.id) }))); setToast('Group deleted') } else setError('Deletion unconfirmed. Refresh before retrying.') } catch (e) { if (activeSession === sessionRef.current) setError(mutationFailure(e, 'Unable to delete group.')) } }} onSaveAcl={async (id, allowed) => {
-           if (activeSession !== sessionRef.current) throw new Error('Session ended.')
-           invalidateLoads()
-           try {
-             const r = await client.PUT('/api/groups/{id}/acl', { params: { path: { id } }, body: { allowed_groups: allowed } })
-             if (activeSession !== sessionRef.current) throw new Error('Session ended.')
-             if (r.error || !r.data) throw new Error('Save unconfirmed. Reload the policy before retrying.')
-             setGroups(v => v.map(g => g.id === id ? r.data! : g))
-           } finally { if (activeSession === sessionRef.current) invalidateLoads() }
-         }} onReload={async () => {
-           if (activeSession !== sessionRef.current) throw new Error('Session ended.')
-           invalidateLoads()
-           const epoch = mutationEpochRef.current
-           const r = await client.GET('/api/groups')
-           if (activeSession !== sessionRef.current) throw new Error('Session ended.')
-           if (epoch !== mutationEpochRef.current) throw new Error('Policy changed while reloading. Reload again.')
-           if (r.error || !r.data) throw new Error('Unable to reload policy.')
-           setGroups(r.data)
-         }} />}
+          {page === 'groups' && <GroupsPage onDirtyChange={setPolicyDirty} groups={groups} peers={peers} saving={policySaving} uncertain={policyUncertain} error={policyError} onCreate={() => { if (!policyPendingRef.current && !policyUncertainRef.current) setModal('group') }} onDelete={async g => { if (policyPendingRef.current || policyUncertainRef.current) return; if (!confirm(`Delete group "${g.name}"?`)) return; try { const r = await client.DELETE('/api/groups/{id}', { params: { path: { id: g.id } } }); if (activeSession !== sessionRef.current) return; if (!r.error) { invalidateLoads(); setGroups(v => v.filter(x => x.id !== g.id).map(x => ({ ...x, allowed_groups: (x.allowed_groups ?? []).filter(id => id !== g.id) }))); setForwards(v => v.map(f => ({ ...f, allowed_group_ids: f.allowed_group_ids.filter(id => id !== g.id) }))); setToast('Group deleted') } else setError('Deletion unconfirmed. Refresh before retrying.') } catch (e) { if (activeSession === sessionRef.current) setError(mutationFailure(e, 'Unable to delete group.')) } }} onSavePolicy={savePolicy} onReload={recoverPolicy} />}
           {page === 'forwards' && <ForwardsPage forwards={forwards} subnet={setup?.settings?.subnet ?? ''} loadError={forwardsError} onRetry={() => void load()} peers={peers} groups={groups} onCreate={() => setModal('forward')} onDelete={async f => { if (!confirm(`Delete forward "${f.name}"?`)) return; const session = sessionRef.current; try { await forwardsApi.remove(f.id); if (session !== sessionRef.current) return; invalidateLoads(); setForwards(v => v.filter(x => x.id !== f.id)); setToast('Forward deleted') } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Deletion unconfirmed. Refresh before retrying.')) } }} />}
-          {page === 'settings' && setup?.settings && <SettingsPage settings={setup.settings} saving={settingsSaving} error={settingsError} onSave={async defaults => {
+          {page === 'settings' && setup?.settings && <SettingsPage settings={setup.settings} savedVersion={settingsVersion} saving={settingsSaving} error={settingsError} onSave={async defaults => {
             if (activeSession !== sessionRef.current || settingsPendingRef.current) return
-            settingsPendingRef.current = true; setSettingsSaving(true); setSettingsError('')
+             settingsPendingRef.current = true; setSettingsSaving(true); setSettingsError(''); invalidateLoads()
             try {
               const settings = await setupApi.update(defaults)
               if (activeSession !== sessionRef.current) return
-              setSetup({ configured: true, settings }); setToast('Settings saved')
+               setSetup({ configured: true, settings }); setSettingsVersion(v => v + 1); setToast('Settings saved')
             } catch (e) { if (activeSession === sessionRef.current) setSettingsError(mutationFailure(e, 'Unable to save settings.')) }
-            finally { if (activeSession === sessionRef.current) { settingsPendingRef.current = false; setSettingsSaving(false) } }
+             finally { if (activeSession === sessionRef.current) { invalidateLoads(); settingsPendingRef.current = false; setSettingsSaving(false) } }
           }} />}
       </div>
     </main>
     {modal && <Modal kind={modal} session={sessionRef.current} isSessionCurrent={session => session === sessionRef.current} groups={groups} peers={peers} forwards={forwards} subnet={setup?.settings?.subnet ?? ''} onClose={() => setModal(null)} onCreated={async value => {
       if (activeSession !== sessionRef.current) return
       invalidateLoads()
-      if (modal === 'peer') { setModal(null); setProvision(value as Provision); setPeers(v => [...v, (value as Provision).peer]) }
+      if (modal === 'peer') { ++provisionGenerationRef.current; setModal(null); setProvisionRetained(false); setProvision(value as Provision); setPeers(v => [...v, (value as Provision).peer]) }
       if (modal === 'group') { setGroups(v => [...v, value as Group]); setModal(null); setToast('Group created') }
       if (modal === 'forward') { setForwards(v => [...v, value as Forward]); setModal(null); setToast('Forward created') }
     }} />}
-    {provision && <ProvisionDialog data={provision} group={groupName(groups, provision.peer.group_id)} onClose={() => setProvision(null)} />}
+    {provision && <ProvisionDialog data={provision} retained={provisionRetained} onRetained={() => {
+      if (activeSession === sessionRef.current && activeProvisionGeneration === provisionGenerationRef.current) setProvisionRetained(true)
+    }} group={groupName(groups, provision.peer.group_id)} onClose={() => {
+      if (activeSession !== sessionRef.current || activeProvisionGeneration !== provisionGenerationRef.current) return
+      ++provisionGenerationRef.current; setProvision(null)
+    }} />}
     {toast && <div className="toast" role="status"><Check size={16} />{toast}</div>}
   </div>
 }
@@ -265,11 +336,18 @@ function SetupWizard({ onConfigured }: { onConfigured: (settings: NetworkSetting
     <button className="button button-primary auth-submit" disabled={saving}>{saving ? <LoaderCircle size={16} className="spin" /> : <Plus size={16} />}{saving ? 'Creating…' : 'Create network'}</button>
   </form></div></main>
 }
-function SettingsPage({ settings, saving, error, onSave }: { settings: NetworkSettings; saving: boolean; error: string; onSave: (defaults: Pick<NetworkSettings, 'endpoint' | 'persistent_keepalive'>) => Promise<void> }) {
+function SettingsPage({ settings, savedVersion, saving, error, onSave }: { settings: NetworkSettings; savedVersion: number; saving: boolean; error: string; onSave: (defaults: Pick<NetworkSettings, 'endpoint' | 'persistent_keepalive'>) => Promise<void> }) {
   const [endpoint, setEndpoint] = useState(settings.endpoint)
   const [keepalive, setKeepalive] = useState(String(settings.persistent_keepalive))
   const [validationError, setValidationError] = useState('')
-  useEffect(() => { setEndpoint(settings.endpoint); setKeepalive(String(settings.persistent_keepalive)) }, [settings])
+  const previous = useRef(settings), previousVersion = useRef(savedVersion)
+  useEffect(() => {
+    // A fresh read must not erase a draft. A save response (including one that
+    // finishes after remount) or a clean form may adopt authoritative defaults.
+    const wasClean = endpoint === previous.current.endpoint && keepalive === String(previous.current.persistent_keepalive)
+    if (savedVersion !== previousVersion.current || wasClean) { setEndpoint(settings.endpoint); setKeepalive(String(settings.persistent_keepalive)) }
+    previous.current = settings; previousVersion.current = savedVersion
+  }, [settings.endpoint, settings.persistent_keepalive, savedVersion])
   const submit = async (e: React.FormEvent) => {
     e.preventDefault(); const invalid = validateDefaults(endpoint, keepalive)
     if (saving) return
@@ -353,7 +431,14 @@ function Modal({ kind, groups, peers, forwards, subnet, session, isSessionCurren
       if (kind === 'peer') {
         const r = await client.POST('/api/peers', { body: { name: name.trim(), group_id: groupId } })
         const status = r.response.status
-        if (r.error || !r.data) throw new Error(status === 409 ? 'Peer name already exists.' : 'Creation unconfirmed. Refresh peers before retrying.')
+        const failure: unknown = r.error
+        if (r.error || !r.data) {
+          const detail = typeof failure === 'string' ? failure.trim() : ''
+          // Only recognized, non-secret server details are shown. A conflict
+          // status alone does not tell us whether the name or address pool failed.
+          const known = /^(address pool exhausted|peer conflict|peer name already exists\.?|name already exists\.?|setup required)$/i.test(detail)
+          throw new Error(known ? detail : status === 409 ? 'Unable to create peer. Refresh peers and check network settings before retrying.' : 'Creation unconfirmed. Refresh peers before retrying.')
+        }
         if (isSessionCurrent(session)) onCreated(r.data)
       }
       if (kind === 'group') {
@@ -377,12 +462,13 @@ function Modal({ kind, groups, peers, forwards, subnet, session, isSessionCurren
     </fieldset>{error && <div className="form-error" role="alert">{error}</div>}<div className="dialog-actions"><button type="button" className="button button-quiet" disabled={saving} onClick={onClose}>Cancel</button><button className="button button-primary" disabled={saving || (kind === 'peer' && !groups.length) || (kind === 'forward' && (!peers.length || duplicatePort))}>{saving && <LoaderCircle size={15} className="spin" />}{saving ? 'Creating…' : 'Create'}</button></div>
   </form></Dialog>
 }
-function ProvisionDialog({ data, group, onClose }: { data: Provision; group: string; onClose: () => void }) {
-  const [copied, setCopied] = useState(false), [error, setError] = useState('')
+function ProvisionDialog({ data, group, retained, onRetained, onClose }: { data: Provision; group: string; retained: boolean; onRetained: () => void; onClose: () => void }) {
+  const [copied, setCopied] = useState(false), [downloadStarted, setDownloadStarted] = useState(false), [error, setError] = useState('')
+  const close = () => { if (retained || confirmDiscardConfig()) onClose() }
   const download = () => {
     const a = document.createElement('a'), url = URL.createObjectURL(new Blob([data.config], { type: 'text/plain' }))
-    a.href = url; a.download = `${data.peer.name.replace(/[^a-z0-9-_]/gi, '-')}.conf`; a.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+    a.href = url; a.download = `${data.peer.name.replace(/[^a-z0-9-_]/gi, '-')}.conf`; a.click(); setDownloadStarted(true); onRetained(); window.setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
-  const copy = async () => { try { await navigator.clipboard.writeText(data.config); setCopied(true); setError('') } catch { setError('Copy failed. Download the configuration instead.') } }
-  return <Dialog title="Peer ready" onClose={onClose}><div className="secret-warning"><KeyRound size={18} /><div><b>Save your configuration.</b><span>The private key is shown once and cannot be recovered.</span></div></div><div className="provision-details"><span>Peer</span><b>{data.peer.name}</b><span>Address</span><b className="mono">{data.peer.ipv4}/32</b><span>Group</span><b>{group}</b></div><details className="config-details"><summary>WireGuard configuration</summary><pre>{data.config}</pre></details>{error && <div className="form-error" role="alert">{error}</div>}<div className="dialog-actions"><button className="button button-quiet" onClick={() => void copy()}><Copy size={15} />{copied ? 'Copied' : 'Copy'}</button><button className="button button-primary" onClick={download}><Download size={15} />Download</button></div><button className="done-link" onClick={onClose}>Saved. Close.</button></Dialog>
+  const copy = async () => { try { await navigator.clipboard.writeText(data.config); setCopied(true); onRetained(); setError('') } catch { setError('Copy failed. Download the configuration instead.') } }
+  return <Dialog title="Peer ready" onClose={close}><div className="secret-warning"><KeyRound size={18} /><div><b>Save your configuration.</b><span>The private key is shown once and cannot be recovered.</span></div></div><div className="provision-details"><span>Peer</span><b>{data.peer.name}</b><span>Address</span><b className="mono">{data.peer.ipv4}/32</b><span>Group</span><b>{group}</b></div><details className="config-details"><summary>WireGuard configuration</summary><pre>{data.config}</pre></details>{error && <div className="form-error" role="alert">{error}</div>}<div className="dialog-actions"><button className="button button-quiet" onClick={() => void copy()}><Copy size={15} />{copied ? 'Copied' : 'Copy'}</button><button className="button button-primary" onClick={download}><Download size={15} />Download</button></div>{downloadStarted && <p className="field-note" role="status">Download started. Check that the configuration file was saved before closing.</p>}<button className="done-link" onClick={() => { onRetained(); onClose() }}>Saved. Close.</button></Dialog>
 }
