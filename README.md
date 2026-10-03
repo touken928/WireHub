@@ -140,6 +140,21 @@ The backend's network kernel is organized under [`src/kernel/`](src/kernel/READM
 Each version tag publishes **Linux amd64 / arm64** binaries to GitHub Releases, along with **amd64 / arm64** Docker images. See [`v0`](https://github.com/touken928/WireHub/tree/v0) for the previous version.
 # Database and hub-key backups
 
+WireHub permits only one service instance per database, regardless of the
+configured UDP/HTTP port. The service holds an OS-released exclusive lock on
+`<database-path>.wirehub.lock`; the empty sidecar file is intentionally kept
+after shutdown or a crash and must not be deleted. Keep the database and lock
+in a trusted, stable directory on a local filesystem with stable file locking.
+Do not replace or move the database or lock while WireHub is running. Before
+upgrading from an older version that does not honor this lock, stop that old
+instance first. Hard-linked databases, SQLite URI and in-memory paths, and
+dangling database symlinks are unsupported. The lock identifies an active
+service instance; it is not part of the database/hub-key backup identity.
+
+Building the service requires Rust 1.89 or newer for the standard-library file
+locking API. This minimum requirement does not imply that every Rust release
+has been independently tested.
+
 This release uses strict schema version 4. Canonical version 3 databases are validated and upgraded atomically by adding a pending-provision journal; existing configuration and hub identity are preserved. Older or structurally drifted databases are rejected. Version 4 databases cannot be opened by an older version 3 binary. At startup, WireHub binds the hub private-key file to the public identity persisted in SQLite; network setup does not create or bind that identity. Back up the SQLite database and hub private-key file together as an immutable identity pair. Restoring only one half can make startup fail because the persisted public identity must match the private key. Schema drift detection includes unexpected SQLite statistics tables and index objects.
 
 Peer provisioning records its pending state without storing the private key. Pending peers are hidden from the peer inventory and cannot be forwarding targets. Cancelling an HTTP request during activation schedules peer removal and a cleanup reload; startup removes any remaining unfinished provisions before loading the router. Successful provisioning clears the pending marker before returning the one-time configuration. Save that response: delivery acknowledgement by the client is not tracked, so a lost response still requires deleting and recreating the peer.

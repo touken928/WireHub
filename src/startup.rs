@@ -37,7 +37,7 @@ pub(crate) async fn run() -> Result<()> {
         return Err("non-loopback HTTP bind requires WIREHUB_TRUSTED_PROXY_MODE=1 behind a trusted TLS/auth proxy".into());
     }
     let key_path = env::var("WIREHUB_HUB_KEY").unwrap_or_else(|_| "wirehub.key".into());
-    let store = Arc::new(Store::open(&path)?);
+    let store = Arc::new(Store::open_service(Path::new(&path))?);
     let private = hub_key::load_or_bind_hub_key(&store, Path::new(&key_path))?;
     store.recover_pending_provisions()?;
     let public = PublicKey::from(&StaticSecret::from(private));

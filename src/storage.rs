@@ -6,6 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use std::sync::Mutex;
 mod identity;
 mod schema;
+mod instance_lock;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -13,6 +14,7 @@ use schema::{SCHEMA_VERSION, TABLES};
 
 pub struct Store {
     db: Mutex<Connection>,
+    _instance_lock: Option<instance_lock::InstanceLock>,
 }
 
 #[cfg(test)]
@@ -44,8 +46,14 @@ fn test_busy_handler(_: i32) -> bool {
 }
 
 impl Store {
+    /// Open the service database while holding its process-wide instance lock.
+    pub fn open_service(path: &std::path::Path) -> std::io::Result<Self> {
+        let (normalized, lock) = instance_lock::InstanceLock::acquire(path)?;
+        schema::open(&normalized, Some(lock)).map_err(io_db)
+    }
+    #[cfg(test)]
     pub fn open(path: &str) -> rusqlite::Result<Self> {
-        schema::open(path)
+        schema::open(std::path::Path::new(path), None)
     }
     pub fn setup(
         &self,

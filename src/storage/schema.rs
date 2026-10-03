@@ -14,7 +14,7 @@ CREATE UNIQUE INDEX peers_name_unique ON peers(name);
 CREATE TABLE pending_provisions(peer_id TEXT PRIMARY KEY NOT NULL REFERENCES peers(id) ON DELETE CASCADE);
 ";
 
-pub(super) fn open(path: &str) -> rusqlite::Result<Store> {
+pub(super) fn open(path: &std::path::Path, instance_lock: Option<super::instance_lock::InstanceLock>) -> rusqlite::Result<Store> {
     let mut db = Connection::open(path)?;
     db.pragma_update(None, "foreign_keys", "ON")?;
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -58,6 +58,7 @@ pub(super) fn open(path: &str) -> rusqlite::Result<Store> {
     tx.commit()?;
     Ok(Store {
         db: std::sync::Mutex::new(db),
+        _instance_lock: instance_lock,
     })
 }
 

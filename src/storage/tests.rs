@@ -138,3 +138,276 @@ fn unfinished_provisions_are_hidden_unreferencable_and_recovered_after_restart()
     let mut retry=peer("pending");s.begin_peer_provision(&mut retry).unwrap();assert_eq!(retry.ipv4,pending.ipv4);
     s.finish_peer_provision(&retry.id).unwrap();assert_eq!(s.peers().unwrap().len(),2);
 }
+
+#[test]
+fn service_lock_serializes_canonical_paths_and_lives_through_last_arc() {
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("service.db");
+    let alias_dir = dir.path().join("alias");
+    std::os::unix::fs::symlink(dir.path(), &alias_dir).unwrap();
+    let store = Arc::new(Store::open_service(&path).unwrap());
+    let alias = alias_dir.join("service.db");
+    let err = Store::open_service(&alias).err().unwrap();
+    assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+    let other = Store::open_service(&dir.path().join("other.db")).unwrap();
+    drop(other);
+    let retained = store.clone();
+    drop(store);
+    assert_eq!(Store::open_service(&path).err().unwrap().kind(), std::io::ErrorKind::WouldBlock);
+    drop(retained);
+    drop(Store::open_service(&path).unwrap());
+}
+
+#[test]
+fn service_open_rejects_unsupported_paths_links_and_lock_symlinks() {
+    let dir = tempfile::tempdir().unwrap();
+    for path in [":memory:", "file:db?mode=memory&cache=shared", ""] {
+        assert!(Store::open_service(std::path::Path::new(path)).is_err());
+    }
+    let target = dir.path().join("target.db");
+    drop(Store::open_service(&target).unwrap());
+    let hardlink = dir.path().join("hardlink.db");
+    std::fs::hard_link(&target, &hardlink).unwrap();
+    assert!(Store::open_service(&hardlink).is_err());
+    let dangling = dir.path().join("dangling.db");
+    std::os::unix::fs::symlink(dir.path().join("missing"), &dangling).unwrap();
+    assert!(Store::open_service(&dangling).is_err());
+    let symlink_db = dir.path().join("linked.db");
+    let db_target = dir.path().join("real.db");
+    drop(Store::open_service(&db_target).unwrap());
+    std::os::unix::fs::symlink(&db_target, &symlink_db).unwrap();
+    // Existing database aliases resolve to the same canonical lock path.
+    assert!(Store::open_service(&symlink_db).is_ok());
+
+    let lock_db = dir.path().join("locked.db");
+    let lock = dir.path().join("locked.db.wirehub.lock");
+    std::os::unix::fs::symlink(&target, &lock).unwrap();
+    assert!(Store::open_service(&lock_db).is_err());
+}
+
+#[test]
+fn fifo_sidecar_is_rejected_without_creating_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("fifo.db");
+    let lock = dir.path().join("fifo.db.wirehub.lock");
+    let status = std::process::Command::new("mkfifo").arg(&lock).status().unwrap();
+    assert!(status.success());
+    assert!(Store::open_service(&database).is_err());
+    assert!(!database.exists());
+}
+
+#[test]
+fn service_lock_is_acquired_before_v3_migration() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v3-locked.db");
+    let seed = Store::open(path.to_str().unwrap()).unwrap();
+    drop(seed);
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch("DROP TABLE pending_provisions; PRAGMA user_version=3;").unwrap();
+    drop(db);
+    let lock_path = dir.path().join("v3-locked.db.wirehub.lock");
+    let holder = std::fs::OpenOptions::new().read(true).write(true).create(true).mode(0o600).open(&lock_path).unwrap();
+    holder.try_lock().unwrap();
+    assert_eq!(Store::open_service(&path).err().unwrap().kind(), std::io::ErrorKind::WouldBlock);
+    let db = Connection::open(&path).unwrap();
+    assert_eq!(db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE name='pending_provisions'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[test]
+fn schema_failure_releases_the_instance_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invalid-schema.db");
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TABLE old(value TEXT); PRAGMA user_version=1;").unwrap();
+    drop(db);
+    assert!(Store::open_service(&path).is_err());
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.path().join("invalid-schema.db.wirehub.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+}
+
+#[test]
+fn competing_service_cannot_recover_active_pending_peer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pending-service.db");
+    let store = Store::open_service(&path).unwrap();
+    store.bind_test_identity();
+    store.setup("10.77.0.0/24", "hub.example:51820", 25).unwrap();
+    store.add_group(&group("group")).unwrap();
+    let mut pending = peer("in-flight");
+    store.begin_peer_provision(&mut pending).unwrap();
+
+    assert_eq!(Store::open_service(&path).err().unwrap().kind(), std::io::ErrorKind::WouldBlock);
+    let db = Connection::open(&path).unwrap();
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM pending_provisions WHERE peer_id='in-flight'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM peers WHERE id='in-flight'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    drop(db);
+
+    assert_eq!(store.finish_peer_provision("in-flight").unwrap(), 1);
+    drop(store);
+    let restarted = Store::open_service(&path).unwrap();
+    assert_eq!(restarted.recover_pending_provisions().unwrap(), 0);
+    let mut interrupted = peer("interrupted");
+    restarted.begin_peer_provision(&mut interrupted).unwrap();
+    drop(restarted);
+    let restarted = Store::open_service(&path).unwrap();
+    assert_eq!(restarted.recover_pending_provisions().unwrap(), 1);
+    assert!(restarted.peers().unwrap().iter().all(|peer| peer.id != "interrupted"));
+}
+
+#[test]
+fn service_lock_child_helper() {
+    use std::io::{BufRead, Write};
+
+    let Ok(path) = std::env::var("WIREHUB_LOCK_CHILD_DB") else {
+        return;
+    };
+    println!("READY");
+    std::io::stdout().flush().unwrap();
+    let mut command = String::new();
+    std::io::stdin().lock().read_line(&mut command).unwrap();
+    assert_eq!(command.trim(), "GO");
+
+    match Store::open_service(std::path::Path::new(&path)) {
+        Ok(_store) => {
+            println!("LOCK_HELD");
+            std::io::stdout().flush().unwrap();
+            let mut command = String::new();
+            std::io::stdin().lock().read_line(&mut command).unwrap();
+            assert_eq!(command.trim(), "RELEASE");
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => println!("LOCK_BUSY"),
+        Err(error) => panic!("unexpected child lock error: {error}"),
+    }
+}
+
+struct LockChild(std::process::Child);
+
+impl Drop for LockChild {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+fn spawn_lock_child(path: &std::path::Path) -> (LockChild, std::sync::mpsc::Receiver<String>) {
+    use std::{io::{BufRead, BufReader}, process::{Command, Stdio}, sync::mpsc};
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "storage::tests::service_lock_child_helper", "--nocapture"])
+        .env("WIREHUB_LOCK_CHILD_DB", path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if tx.send(line.unwrap()).is_err() { break; }
+        }
+    });
+    (LockChild(child), rx)
+}
+
+fn wait_lock_child(child: &mut LockChild) -> std::process::ExitStatus {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.0.try_wait().unwrap() { return status; }
+        if Instant::now() >= deadline {
+            let _ = child.0.kill();
+            let _ = child.0.wait();
+            panic!("child process exit timed out");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn child_line(rx: &std::sync::mpsc::Receiver<String>, wanted: &str) {
+    use std::time::Duration;
+    loop {
+        let line = rx.recv_timeout(Duration::from_secs(5)).expect("child handshake timed out");
+        if line.trim() == wanted { return; }
+    }
+}
+
+fn child_command(child: &mut LockChild, command: &str) {
+    use std::io::Write;
+    writeln!(child.0.stdin.as_mut().unwrap(), "{command}").unwrap();
+    child.0.stdin.as_mut().unwrap().flush().unwrap();
+}
+
+#[test]
+fn active_pending_peer_survives_cross_process_symlink_contender() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("active.db");
+    let symlink = dir.path().join("active-alias.db");
+    let store = Store::open_service(&path).unwrap();
+    store.bind_test_identity();
+    store.setup("10.77.0.0/24", "hub.example:51820", 25).unwrap();
+    store.add_group(&group("group")).unwrap();
+    let mut pending = peer("in-flight");
+    store.begin_peer_provision(&mut pending).unwrap();
+    std::os::unix::fs::symlink(&path, &symlink).unwrap();
+
+    let (mut child, rx) = spawn_lock_child(&symlink);
+    child_line(&rx, "READY");
+    child_command(&mut child, "GO");
+    child_line(&rx, "LOCK_BUSY");
+    assert!(wait_lock_child(&mut child).success());
+
+    let db = Connection::open(&path).unwrap();
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM pending_provisions WHERE peer_id='in-flight'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM peers WHERE id='in-flight'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    drop(db);
+    assert_eq!(store.finish_peer_provision("in-flight").unwrap(), 1);
+}
+
+#[test]
+fn simultaneous_process_open_has_one_holder_and_reopens_after_release() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("race.db");
+    let (mut first, first_rx) = spawn_lock_child(&path);
+    let (mut second, second_rx) = spawn_lock_child(&path);
+    child_line(&first_rx, "READY");
+    child_line(&second_rx, "READY");
+    child_command(&mut first, "GO");
+    child_command(&mut second, "GO");
+    let first_result = first_rx.recv_timeout(std::time::Duration::from_secs(5)).expect("first contender timed out");
+    let second_result = second_rx.recv_timeout(std::time::Duration::from_secs(5)).expect("second contender timed out");
+    let (holder, loser) = match (first_result.trim(), second_result.trim()) {
+        ("LOCK_HELD", "LOCK_BUSY") => (&mut first, &mut second),
+        ("LOCK_BUSY", "LOCK_HELD") => (&mut second, &mut first),
+        other => panic!("unexpected contender results: {other:?}"),
+    };
+    assert!(wait_lock_child(loser).success());
+    child_command(holder, "RELEASE");
+    assert!(wait_lock_child(holder).success());
+
+    let store = Store::open_service(&path).unwrap();
+    assert_eq!(store.network_settings().unwrap(), None);
+}
+
+#[test]
+fn process_exit_releases_service_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("child-held.db");
+    let (mut child, rx) = spawn_lock_child(&path);
+    child_line(&rx, "READY");
+    child_command(&mut child, "GO");
+    child_line(&rx, "LOCK_HELD");
+    child.0.kill().unwrap();
+    let _ = wait_lock_child(&mut child);
+    drop(child);
+    drop(Store::open_service(&path).unwrap());
+}
