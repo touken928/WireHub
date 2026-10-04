@@ -20,7 +20,7 @@ Group positions are saved only in browser local storage. Auto layout and fit con
 
 ## UI regression tests
 
-Requires Node 20.11+ and an installed Google Chrome. After building:
+Requires Node.js 22 and an installed Google Chrome. After building:
 
 ```sh
 pnpm --dir frontend test:ui
@@ -28,4 +28,6 @@ pnpm --dir frontend test:ui
 
 The test serves the production bundle on a temporary loopback port and intercepts every API request with isolated fixtures. It covers actual handle dragging, direction, layout restoration, keyboard deletion, self-access, partial save recovery, CRUD, session reset, setup, English labels, and mobile layout. It does not access a live hub.
 
-Use `PLAYWRIGHT_CHANNEL` to select another installed browser channel. Set `WIREHUB_UI_SCREENSHOTS` to an output directory to save desktop/mobile screenshots.
+Every run includes the core suite and all conflict, race and recovery scenarios.
+Screenshots and failure diagnostics are saved automatically under the repository's
+ignored `artifacts/ui/` directory. No test environment variables are required.

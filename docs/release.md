@@ -46,7 +46,6 @@ pnpm --dir frontend audit --prod --audit-level high
 cargo audit
 actionlint
 pnpm --dir frontend test:ui
-WIREHUB_UI_REGRESSIONS=all pnpm --dir frontend test:ui
 target/release/wirehub export-openapi > /tmp/wirehub-openapi.json
 cmp openapi.json /tmp/wirehub-openapi.json
 python3 scripts/check-release.py --tag v1.0.0-rc.1 --binary target/release/wirehub
@@ -73,7 +72,6 @@ gofmt -w tests/client/main.go tests/client/main_test.go
 
 ```sh
 python3 tests/integration.py
-WIREHUB_NETWORK_REGRESSIONS=all python3 tests/integration.py
 python3 tests/linux_kernel.py --output /tmp/linux-kernel.json
 python3 tests/operations.py --binary target/release/wirehub --output /tmp/operations.json
 python3 tests/soak.py --binary target/release/wirehub --seconds 1800 --output /tmp/rc-endurance.json
@@ -94,6 +92,13 @@ acceptance introduces deterministic 5% encrypted data loss, 12 ms delay and
 uses real kernel WireGuard in disposable Docker network namespaces with
 NET_ADMIN/NET_RAW only on the clients, verifying direct/forwarded traffic,
 directional ACLs, MTU boundaries, fragmentation rejection and backend arrivals.
+
+Test environment switches are not part of the deployment configuration.
+The normal integration command always includes weak-network and 65-second idle
+recovery; the normal UI command runs the core suite and all regression scenarios
+in Chrome, saving screenshots and failure diagnostics under `artifacts/ui/`.
+The routing benchmark uses a fixed 50,000 iterations per case. Internal child
+process credentials and lock-test coordination are managed by the test runners.
 
 Endurance uses two wireguard-go peers, direct/forwarded TCP/UDP, periodic 1 MiB
 SHA-256 transfers, unrelated reloads, revoke/regrant, stale-write rejection,

@@ -109,11 +109,7 @@ fn baseline() {
         !black_box(cfg!(debug_assertions)),
         "Performance results require --release"
     );
-    let iterations: usize = std::env::var("WIREHUB_BENCH_ITERATIONS")
-        .unwrap_or_else(|_| "20000".into())
-        .parse()
-        .unwrap();
-    assert!(iterations >= 1000);
+    let iterations = 50_000;
     for peers in [1, 32, 128, 253] {
         for size in [64, 512, 1280, 1420] {
             for (name, protocol) in [("icmp", 1), ("tcp", 6), ("udp", 17)] {

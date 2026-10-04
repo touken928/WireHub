@@ -36,7 +36,7 @@ from support import (
 )
 
 
-def scenario(hub_url, clients, hub_token, tokens, endpoint, relays=None):
+def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
     a_url, b_url, c_url = clients
     check(request(hub_url + "/api/health")["ok"], "hub health check failed")
     check(
@@ -176,10 +176,9 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays=None):
     )
 
     for index, (url, token, config) in enumerate(zip(clients, tokens, configs)):
-        if relays:
-            config = config.replace(
-                "Endpoint = " + endpoint, "Endpoint = " + relays[index].endpoint
-            )
+        config = config.replace(
+            "Endpoint = " + endpoint, "Endpoint = " + relays[index].endpoint
+        )
         control_post(url, token, "/configure", {"config": config})
     control_post(b_url, tokens[1], "/serve", {"port": 18080})
     control_post(a_url, tokens[0], "/serve", {"port": 18080})
@@ -295,59 +294,56 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays=None):
         print(
             f"PASS: 4 MiB same-socket TCP integrity transfer ({transferred['seconds']:.3f}s) and MTU-safe TCP/UDP payloads"
         )
-        if relays:
-            relay = relays[0]
-            relay.enabled = True
-            impaired = request(
-                a_url + "/tcp/transfer",
-                tokens[0],
-                "POST",
-                {"id": persistent_id, "bytes": 1 << 20, "timeout_ms": 60000},
-                timeout=65,
-            )
-            check(
-                impaired.get("ok"),
-                "Loss/delay/reordering TCP integrity transfer failed",
-            )
-            relay.enabled = False
-            check(
-                relay.dropped > 0 and relay.reordered > 0,
-                "Impairment gates did not exercise loss and reordering",
-            )
-            relay.migrate()
-            migrated = persistent_exchange(
-                0, persistent_id, "nat-migrated-" + secrets.token_hex(8), 5000
-            )
-            check(
-                migrated.get("ok"),
-                "Same TCP socket did not recover after NAT endpoint migration",
-            )
-            # UDP flow timeout is tested deterministically in Rust; this checks actual
-            # idle encrypted-device recovery without restarting or reconfiguring it.
-            time.sleep(float(os.environ.get("WIREHUB_IDLE_SECONDS", "65")))
-            resumed = persistent_exchange(
-                0, persistent_id, "idle-resumed-" + secrets.token_hex(8), 5000
-            )
-            check(
-                resumed.get("ok"),
-                "Same established TCP socket did not resume after idle",
-            )
-            recovered_udp = probe(
-                0, "udp", "172.23.45.1:18080", "idle-udp-recovered", 5000
-            )
-            check(recovered_udp.get("ok"), "Fresh UDP flow did not recover after idle")
-            print(
-                f"PASS: deterministic 5% encrypted data loss, 12 ms delay and 30 ms reordering (drops={relay.dropped}, reordered={relay.reordered}), 1 MiB integrity, NAT migration, idle same-socket TCP and fresh UDP recovery"
-            )
-            # Re-establish event evidence after the long transfer evicted old records.
-            check(
-                probe(0, "tcp", "172.23.45.1:18080", nonce_tcp, 5000).get("ok"),
-                "TCP warm recovery failed",
-            )
-            check(
-                probe(0, "udp", "172.23.45.1:18080", nonce_udp, 5000).get("ok"),
-                "UDP warm recovery failed",
-            )
+        relay = relays[0]
+        relay.enabled = True
+        impaired = request(
+            a_url + "/tcp/transfer",
+            tokens[0],
+            "POST",
+            {"id": persistent_id, "bytes": 1 << 20, "timeout_ms": 60000},
+            timeout=65,
+        )
+        check(
+            impaired.get("ok"),
+            "Loss/delay/reordering TCP integrity transfer failed",
+        )
+        relay.enabled = False
+        check(
+            relay.dropped > 0 and relay.reordered > 0,
+            "Impairment gates did not exercise loss and reordering",
+        )
+        relay.migrate()
+        migrated = persistent_exchange(
+            0, persistent_id, "nat-migrated-" + secrets.token_hex(8), 5000
+        )
+        check(
+            migrated.get("ok"),
+            "Same TCP socket did not recover after NAT endpoint migration",
+        )
+        # UDP flow timeout is tested deterministically in Rust; this checks actual
+        # idle encrypted-device recovery without restarting or reconfiguring it.
+        time.sleep(65)
+        resumed = persistent_exchange(
+            0, persistent_id, "idle-resumed-" + secrets.token_hex(8), 5000
+        )
+        check(
+            resumed.get("ok"),
+            "Same established TCP socket did not resume after idle",
+        )
+        recovered_udp = probe(0, "udp", "172.23.45.1:18080", "idle-udp-recovered", 5000)
+        check(recovered_udp.get("ok"), "Fresh UDP flow did not recover after idle")
+        print(
+            f"PASS: deterministic 5% encrypted data loss, 12 ms delay and 30 ms reordering (drops={relay.dropped}, reordered={relay.reordered}), 1 MiB integrity, NAT migration, idle same-socket TCP and fresh UDP recovery"
+        )
+        # Re-establish event evidence after the long transfer evicted old records.
+        check(
+            probe(0, "tcp", "172.23.45.1:18080", nonce_tcp, 5000).get("ok"),
+            "TCP warm recovery failed",
+        )
+        check(
+            probe(0, "udp", "172.23.45.1:18080", nonce_udp, 5000).get("ok"),
+            "UDP warm recovery failed",
+        )
         persistent_before = "persistent-before-" + secrets.token_hex(8)
         result = persistent_exchange(0, persistent_id, persistent_before)
         check(
@@ -683,12 +679,10 @@ def run_scenario(directory, client_binary):
         clients = [
             launch_client(client_binary, directory, label, resources) for label in "ABC"
         ]
-        relays = None
-        if os.environ.get("WIREHUB_NETWORK_REGRESSIONS") == "all":
-            port = int(hub.environment["WIREHUB_PORT"])
-            relays = [Relay(("127.0.0.1", port)) for _ in clients]
-            for relay in relays:
-                resources.callback(relay.close)
+        port = int(hub.environment["WIREHUB_PORT"])
+        relays = [Relay(("127.0.0.1", port)) for _ in clients]
+        for relay in relays:
+            resources.callback(relay.close)
         scenario(
             hub.url,
             [client.url for client in clients],

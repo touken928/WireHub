@@ -18,10 +18,7 @@ def main():
     parser.add_argument(
         "--output", type=Path, default=Path("/tmp/wirehub-performance.json")
     )
-    parser.add_argument("--iterations", type=int, default=20000)
     args = parser.parse_args()
-    if args.iterations < 1000:
-        parser.error("iterations must be at least 1000")
     build = subprocess.run(
         ["cargo", "test", "--release", "--locked", "--no-run", "--message-format=json"],
         cwd=ROOT,
@@ -40,7 +37,6 @@ def main():
     import tempfile
 
     with tempfile.TemporaryFile(mode="w+") as output:
-        env = {**os.environ, "WIREHUB_BENCH_ITERATIONS": str(args.iterations)}
         started = time.monotonic()
         process = subprocess.Popen(
             [
@@ -51,7 +47,6 @@ def main():
                 "--nocapture",
             ],
             cwd=ROOT,
-            env=env,
             stdout=output,
             stderr=subprocess.STDOUT,
         )
@@ -74,6 +69,9 @@ def main():
     ]
     if len(rows) != 84:
         raise RuntimeError(f"Incomplete benchmark matrix: {len(rows)}/84")
+    iterations = {row["iterations"] for row in rows if row["kind"] == "routing"}
+    if len(iterations) != 1:
+        raise RuntimeError("Routing cases used inconsistent iteration counts")
     cpu = platform.processor()
     if sys.platform == "darwin":
         try:
@@ -97,7 +95,7 @@ def main():
         "system_cpu_seconds": usage.ru_stime,
         "cpu_percent_one_core": (usage.ru_utime + usage.ru_stime) / elapsed * 100,
         "peak_rss_bytes": usage.ru_maxrss * (1 if sys.platform == "darwin" else 1024),
-        "iterations_per_case": args.iterations,
+        "iterations_per_case": iterations.pop(),
         "results": rows,
     }
     write_report(args.output, report)

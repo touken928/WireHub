@@ -103,10 +103,8 @@ jobs:
           cache-dependency-path: tests/client/go.sum
       - name: Set up pnpm
         run: corepack enable && corepack prepare pnpm@9.15.9 --activate
-      - name: Run userspace integration and client tests
+      - name: Run userspace, weak-network and client tests
         run: python3 tests/integration.py
-      - name: Run network impairment and idle recovery gates
-        run: WIREHUB_NETWORK_REGRESSIONS=all python3 tests/integration.py
       - name: Run operations acceptance
         run: python3 tests/operations.py --output "$RUNNER_TEMP/operations.json"
       - name: Run release RC endurance gate
@@ -121,7 +119,7 @@ jobs:
       - name: Run Rust tests
         run: cargo test --locked
       - name: Run release routing and capacity baseline
-        run: python3 tests/performance.py --output "$RUNNER_TEMP/performance.json" --iterations 10000
+        run: python3 tests/performance.py --output "$RUNNER_TEMP/performance.json"
       - name: Upload performance measurements
         uses: actions/upload-artifact@v4
         with:
@@ -145,23 +143,12 @@ jobs:
         run: pnpm --dir frontend exec playwright install --with-deps chrome
       - name: Build production frontend
         run: pnpm --dir frontend build
-      - name: Run isolated UI regression tests
+      - name: Run complete isolated UI regression suite
         run: pnpm --dir frontend test:ui
-        env:
-          PLAYWRIGHT_CHANNEL: chrome
-          WIREHUB_UI_SCREENSHOTS: ${{ runner.temp }}/wirehub-ui-screenshots
-      - name: Run additional UI regression scenarios
-        run: pnpm --dir frontend test:ui
-        env:
-          PLAYWRIGHT_CHANNEL: chrome
-          WIREHUB_UI_REGRESSIONS: all
-          WIREHUB_UI_SCREENSHOTS: ${{ runner.temp }}/wirehub-ui-regressions
       - name: Upload UI screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: wirehub-ui-screenshots
-          path: |
-            ${{ runner.temp }}/wirehub-ui-screenshots
-            ${{ runner.temp }}/wirehub-ui-regressions
+          path: artifacts/ui
           if-no-files-found: ignore

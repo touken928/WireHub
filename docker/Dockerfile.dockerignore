@@ -1,5 +1,7 @@
 .git
 .github
+artifacts
+.ruff_cache
 .slim
 .pnpm-store
 **/node_modules

@@ -5,7 +5,7 @@ Run from the repository root:
 ```sh
 pnpm --dir frontend install --frozen-lockfile
 pnpm --dir frontend build
-python3 tests/performance.py --iterations 50000 --output /tmp/performance.json
+python3 tests/performance.py --output /tmp/performance.json
 ```
 
 The runner builds the release test executable, then measures only the benchmark
