@@ -19,8 +19,15 @@ Supported behavior and network limitations are in [operations](operations.md).
   the release commit SHA in binaries and containers and verifies their output.
   RC tags remain prereleases; formal 1.0.0 requires matching `v1.0.0` and packages.
 
-The reusable integration workflow gates publishing. Hosted CI and the two
-distribution architectures have not yet been verified for this candidate.
+The reusable integration workflow gates publishing. The
+[hosted RC preflight](https://github.com/touken928/WireHub/actions/runs/37187394418)
+passed on commit `3fcd5a2`: quality, minimum Rust, UI, real Linux kernel and
+userspace network checks, operations, five-minute endurance, Rust tests,
+performance and OpenAPI agreement. Native Linux amd64/arm64 binaries and both
+container architectures also passed version/build-ID, startup and embedded-UI
+checks. Its reports and binary artifacts are retained with that workflow run.
+The tag-triggered release workflow repeats the gates on the exact tagged commit
+before publishing binaries, checksums, containers and a GitHub prerelease.
 
 ## Local verification
 
@@ -115,4 +122,7 @@ local reports are preserved byte-for-byte in the ignored
 with a repository checkout. Regenerate reports with the commands above and retain
 binary/build IDs, hashes, hardware and test scope with the relevant release.
 The local Linux run used a temporary classic-builder Dockerfile because its
-Buildx connection was unavailable; hosted CI still uses the normal build path.
+Buildx connection was unavailable; the hosted RC preflight passed with the normal
+Buildx path. Hosted operations acceptance restored the schema-4 pair without
+executing an old binary; the local source-baseline rollback evidence remains
+distinct from acceptance against an external published previous release.
