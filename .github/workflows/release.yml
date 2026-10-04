@@ -16,9 +16,12 @@ env:
 jobs:
   release-contract:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - name: Verify exact tag and package version agreement
+        id: version
         env:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
@@ -28,6 +31,7 @@ jobs:
           else
             python3 scripts/check-release.py
           fi
+          python3 -c 'import tomllib; print("version=" + tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])' >> "$GITHUB_OUTPUT"
   verify:
     permissions:
       contents: read
@@ -322,7 +326,7 @@ jobs:
             ## Docker
 
             ```sh
-            docker pull ghcr.io/touken928/wirehub:${{ github.ref_name }}
+            docker pull ghcr.io/touken928/wirehub:${{ needs.release-contract.outputs.version }}
             ```
 
             Supports Linux amd64 and arm64. `SHA256SUMS` contains checksums for the binaries.
