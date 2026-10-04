@@ -66,7 +66,7 @@ fn tcp_checksum(src: [u8; 4], dst: [u8; 4], segment: &[u8]) -> u16 {
     pseudo.extend_from_slice(&(segment.len() as u16).to_be_bytes());
     pseudo.extend_from_slice(segment);
     let mut sum = 0u32;
-    for c in pseudo.chunks_exact(2) {
+    for c in pseudo.as_chunks::<2>().0 {
         sum += u16::from_be_bytes([c[0], c[1]]) as u32;
     }
     if pseudo.len() % 2 != 0 {

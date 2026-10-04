@@ -833,7 +833,7 @@ fn transport_checksum(src: [u8; 4], dst: [u8; 4], proto: u8, segment: &[u8]) -> 
     bytes.extend_from_slice(&(segment.len() as u16).to_be_bytes());
     bytes.extend_from_slice(segment);
     let mut sum = 0u32;
-    for c in bytes.chunks_exact(2) {
+    for c in bytes.as_chunks::<2>().0 {
         sum += u16::from_be_bytes([c[0], c[1]]) as u32;
     }
     if bytes.len() % 2 != 0 {
@@ -880,7 +880,7 @@ fn service_packet(
         p[26..28].copy_from_slice(&c.to_be_bytes());
     }
     let mut sum = 0u32;
-    for c in p[..20].chunks_exact(2) {
+    for c in p[..20].as_chunks::<2>().0 {
         sum += u16::from_be_bytes([c[0], c[1]]) as u32;
     }
     while sum >> 16 != 0 {
@@ -892,7 +892,7 @@ fn service_packet(
 
 fn assert_packet_checksums(p: &[u8]) {
     let mut sum = 0u32;
-    for c in p[..20].chunks_exact(2) {
+    for c in p[..20].as_chunks::<2>().0 {
         sum += u16::from_be_bytes([c[0], c[1]]) as u32;
     }
     while sum >> 16 != 0 {

@@ -63,16 +63,24 @@ pub(crate) async fn apply_policy(
     permit: ReloadPermit<'_>,
     expected: i64,
     changes: &[PolicyChange],
-) -> Result<PolicyResult, Response> {
+) -> Result<PolicyResult, Box<Response>> {
     let mut result = state
         .store
         .set_policy(expected, changes)
-        .map_err(policy_failure)?;
+        .map_err(|error| Box::new(policy_failure(error)))?;
     // Sending remains synchronous with the commit: request cancellation cannot
     // leave a persisted policy without its queued activation command.
     match permit.send_at(result.revision).wait_revision().await {
-        Ok(revision) => { result.applied_revision = Some(revision); Ok(result) }
-        Err(_) => Err(failure(StatusCode::SERVICE_UNAVAILABLE, "activation_unconfirmed", "Configuration saved; runtime activation is unconfirmed. Check runtime status before retrying.", Some(result.revision))),
+        Ok(revision) => {
+            result.applied_revision = Some(revision);
+            Ok(result)
+        }
+        Err(_) => Err(Box::new(failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "activation_unconfirmed",
+            "Configuration saved; runtime activation is unconfirmed. Check runtime status before retrying.",
+            Some(result.revision),
+        ))),
     }
 }
 
@@ -124,7 +132,7 @@ pub async fn put_policy(
     };
     match apply_policy(&state, permit, request.expected_revision, &request.changes).await {
         Ok(result) => Json(result).into_response(),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 

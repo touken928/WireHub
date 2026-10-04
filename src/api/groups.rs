@@ -121,6 +121,6 @@ pub async fn set_acl(
             );
             response
         }
-        Err(response) => response,
+        Err(response) => *response,
     }
 }

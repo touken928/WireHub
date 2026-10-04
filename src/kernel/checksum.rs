@@ -6,7 +6,7 @@ pub(super) fn read_u16(bytes: &[u8], at: usize) -> u16 {
 }
 pub(crate) fn checksum(bytes: &[u8]) -> u16 {
     let mut sum = 0u32;
-    for chunk in bytes.chunks_exact(2) {
+    for chunk in bytes.as_chunks::<2>().0 {
         sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
     }
     if !bytes.len().is_multiple_of(2) {
