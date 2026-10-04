@@ -15,7 +15,7 @@ use tokio::{
 };
 
 use super::{
-    control::{KernelHandle, PeerRuntimeStats, ReloadCommand, ReloadError},
+    control::{ActivationStatus, KernelHandle, PeerRuntimeStats, ReloadCommand, ReloadError},
     wireguard,
 };
 
@@ -124,16 +124,7 @@ fn timers_enabled() -> bool {
 #[cfg(test)]
 #[derive(Debug)]
 struct QueueObservation {
-    queued: Vec<(
-        String,
-        String,
-        Option<String>,
-        Ipv4Addr,
-        Ipv4Addr,
-        Ipv4Addr,
-        u16,
-        u8,
-    )>,
+    queued: Vec<crate::kernel::dataplane::PendingObservation>,
     queued_bytes: usize,
     flow_counts: (usize, usize),
     source_counters: (u64, u64),
@@ -158,21 +149,22 @@ pub struct Kernel {
     socket: UdpSocket,
     loader: Box<dyn FnMut() -> Result<crate::kernel::CompiledSnapshot, SnapshotLoadError> + Send>,
     commands: mpsc::Receiver<ReloadCommand>,
-    stats: Arc<RwLock<HashMap<String, PeerRuntimeStats>>>,
+    stats: super::control::SharedStats,
     readiness: Arc<AtomicBool>,
+    status: Arc<RwLock<ActivationStatus>>,
     state: RuntimeState,
     _lifecycle: LifecycleGuard,
 }
 
 struct LifecycleGuard {
     readiness: Arc<AtomicBool>,
-    stats: Arc<RwLock<HashMap<String, PeerRuntimeStats>>>,
+    stats: super::control::SharedStats,
 }
 impl Drop for LifecycleGuard {
     fn drop(&mut self) {
         self.readiness.store(false, Ordering::Release);
         if let Ok(mut stats) = self.stats.try_write() {
-            stats.clear();
+            *stats = Arc::default();
         }
     }
 }
@@ -188,12 +180,17 @@ impl Kernel {
     {
         let initial = load().map_err(StartError::Snapshot)?;
         let readiness = Arc::new(AtomicBool::new(false));
-        let stats = Arc::new(RwLock::new(HashMap::new()));
+        let stats = Arc::new(RwLock::new(Arc::default()));
+        let status = Arc::new(RwLock::new(ActivationStatus {
+            applied_revision: Some(initial.revision),
+            last_error: None,
+        }));
         let (commands, receiver) = mpsc::channel(16);
         let handle = KernelHandle {
             commands,
             readiness: readiness.clone(),
             stats: stats.clone(),
+            status: status.clone(),
         };
         let mut state = RuntimeState {
             wireguard: wireguard::WireGuard::new(hub_private),
@@ -211,6 +208,7 @@ impl Kernel {
                 commands: receiver,
                 stats: stats.clone(),
                 readiness: readiness.clone(),
+                status,
                 state,
                 _lifecycle: LifecycleGuard { readiness, stats },
             },
@@ -221,35 +219,48 @@ impl Kernel {
     pub async fn run(mut self) -> Result<(), RunError> {
         let mut datagram = [0u8; 65535];
         let mut out = vec![0u8; 65535];
-        let mut timers = time::interval(TIMER);
+        let mut timers = time::interval_at(time::Instant::now() + TIMER, TIMER);
+        timers.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         let mut retry = SnapshotRetry::new();
         let mut retry_at = None;
+        let mut minimum_revision = self.status.read().await.applied_revision.unwrap_or(0);
         loop {
             tokio::select! { biased;
                 command=self.commands.recv()=>{
                     let Some(command)=command else{self.readiness.store(false,Ordering::Release);return Err(RunError::Stopped)};
-                    let result=(self.loader)().map_err(|_|()).and_then(|snapshot|install_snapshot(snapshot,&mut self.state));
+                    minimum_revision = minimum_revision.max(command.minimum_revision);
+                    let result=(self.loader)().map_err(|_|()).and_then(|snapshot| {
+                        let revision = snapshot.revision;
+                        if revision < minimum_revision { return Err(()); }
+                        install_snapshot(snapshot,&mut self.state).map(|_| revision)
+                    });
                     if result.is_err(){eprintln!("runtime reload snapshot failed; runtime remains fail-closed");self.readiness.store(false,Ordering::Release);self.state.fail_closed();retry.succeeded();retry_at=Some(retry.failed_at(Instant::now()));}
                     else{retry.succeeded();retry_at=None;}
                     publish_stats(&self.state,&self.stats).await;
-                    if result.is_ok(){self.readiness.store(true,Ordering::Release);}
+                    match result {
+                        Ok(revision) => { minimum_revision = revision; *self.status.write().await = ActivationStatus { applied_revision: Some(revision), last_error: None }; self.readiness.store(true,Ordering::Release); }
+                        Err(()) => { self.status.write().await.last_error = Some("snapshot_rejected".into()); }
+                    }
                     let _=command.ack.send(result.map_err(|_|ReloadError::Rejected));
                 }
                 _=timers.tick(),if timers_enabled()=>{
                     self.state.dataplane.expire(Instant::now());self.state.wireguard.tick(&self.socket,&mut out).await;drain_pending(&self.socket,&mut self.state,&mut out).await;publish_stats(&self.state,&self.stats).await;
-                    if retry_at.is_some_and(|at|Instant::now()>=at){match (self.loader)().map_err(|_|()).and_then(|snapshot|install_snapshot(snapshot,&mut self.state)){Ok(())=>{publish_stats(&self.state,&self.stats).await;self.readiness.store(true,Ordering::Release);retry_at=None;retry.succeeded();},Err(())=>{self.readiness.store(false,Ordering::Release);retry_at=Some(retry.failed_at(Instant::now()));eprintln!("runtime snapshot recovery failed; remaining fail-closed");}}}
+                    if retry_at.is_some_and(|at|Instant::now()>=at){match (self.loader)().map_err(|_|()).and_then(|snapshot|{let revision=snapshot.revision;if revision<minimum_revision{return Err(());}install_snapshot(snapshot,&mut self.state).map(|_|revision)}){Ok(revision)=>{minimum_revision=revision;publish_stats(&self.state,&self.stats).await;*self.status.write().await=ActivationStatus{applied_revision:Some(revision),last_error:None};self.readiness.store(true,Ordering::Release);retry_at=None;retry.succeeded();},Err(())=>{self.readiness.store(false,Ordering::Release);retry_at=Some(retry.failed_at(Instant::now()));eprintln!("runtime snapshot recovery failed; remaining fail-closed");}}}
                 }
                 received=self.socket.recv_from(&mut datagram)=>{
                      let (len,endpoint)=match classify_udp_receive(received,&self.readiness){Ok(Some(x))=>x,Ok(None)=>continue,Err(error)=>return Err(RunError::Socket(error))};
                     let Some(event)=self.state.wireguard.receive(&self.socket,endpoint,&datagram[..len],&mut out).await else{continue};
                     let id=event.identity.id.clone();let authenticated=event.authenticated;
-                    if let Some(runtime)=self.state.stats.get_mut(&id){if event.handshake_authenticated{runtime.last_handshake_unix=Some(unix_now());}if event.data_authenticated{runtime.last_data_unix=Some(unix_now());}}
+                    if let Some(runtime)=self.state.stats.get_mut(&id){
+                        if event.handshake_authenticated{runtime.last_handshake_unix=Some(unix_now());}
+                        if event.data_authenticated{runtime.last_data_unix=Some(unix_now());}
+                    }
                     for raw in event.packets {let Some(authenticated_peer)=self.state.dataplane.authenticated_peer(&id)else{continue};let Some(ingress)=self.state.dataplane.ingress(&authenticated_peer,&raw)else{continue};if let Some(prepared)=self.state.dataplane.prepare(ingress,Instant::now()){
                         let outcome=map_transport_outcome(self.state.wireguard.deliver(&self.socket,prepared.target_id(),prepared.bytes(),&mut out).await);
                         account(&mut self.state.stats,self.state.dataplane.finish(prepared,outcome,Instant::now()));
                         #[cfg(test)] if outcome==crate::kernel::dataplane::EgressOutcome::NotReady{QUEUE_OBSERVER.try_with(|observer|{let counters=self.state.stats.get(&id).map(|p|(p.rx_bytes,p.tx_bytes)).unwrap_or_default();let _=observer.send(QueueObservation{queued:self.state.dataplane.test_pending_observation(),queued_bytes:self.state.dataplane.pending_queue_bytes(),flow_counts:self.state.dataplane.flow_counts(),source_counters:counters});}).ok();}
                     }}
-                    if authenticated{drain_pending(&self.socket,&mut self.state,&mut out).await;}publish_packet_stats(&self.state,&self.stats,authenticated).await;
+                    if authenticated{drain_pending(&self.socket,&mut self.state,&mut out).await;}
                     #[cfg(test)] PACKET_RESULT_OBSERVER.try_with(|observer|{let _=observer.send(authenticated);}).ok();
                 }
             }
@@ -272,7 +283,7 @@ fn install_snapshot(
         .collect();
     let retained = state.wireguard.install(identities)?;
     let mut next_stats = HashMap::new();
-    for (id, _) in &compiled.peers {
+    for id in compiled.peers.keys() {
         let prior = retained
             .get(id)
             .copied()
@@ -296,6 +307,7 @@ fn install_snapshot(
     let new = crate::kernel::dataplane::RoutingConfig {
         peers: compiled.peers.clone(),
         forwards: compiled.forwards.clone(),
+        forward_index: compiled.forward_index.clone(),
         hub_ip: compiled.hub_ip,
         by_ip: compiled.peer_by_ip.clone(),
     };
@@ -304,10 +316,7 @@ fn install_snapshot(
     Ok(())
 }
 
-async fn publish_stats(
-    state: &RuntimeState,
-    target: &Arc<RwLock<HashMap<String, PeerRuntimeStats>>>,
-) {
+async fn publish_stats(state: &RuntimeState, target: &super::control::SharedStats) {
     #[cfg(test)]
     STATS_PUBLISH_COUNT
         .try_with(|count| {
@@ -319,18 +328,7 @@ async fn publish_stats(
                 .ok();
         })
         .ok();
-    let mut published = target.write().await;
-    published.clear();
-    published.extend(state.stats.iter().map(|(id, s)| (id.clone(), *s)));
-}
-async fn publish_packet_stats(
-    state: &RuntimeState,
-    target: &Arc<RwLock<HashMap<String, PeerRuntimeStats>>>,
-    authenticated: bool,
-) {
-    if authenticated {
-        publish_stats(state, target).await;
-    }
+    *target.write().await = Arc::new(state.stats.clone());
 }
 fn unix_now() -> i64 {
     std::time::SystemTime::now()

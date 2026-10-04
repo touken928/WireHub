@@ -107,7 +107,7 @@ In **Groups**, drag from a connection handle on one group to another:
 - **Both ways**: allow both groups to access each other.
 - **Intra-group access**: enable this in the group details to allow peers in the same group to access each other.
 
-Click **Save** to apply changes. Select a connection and press **Delete** to remove access. Access between peers is denied until explicitly allowed.
+Click **Save** to commit the ACL changes as one versioned batch. If another session changes the configuration, your draft is retained for explicit review against the latest server policy. The runtime indicator distinguishes persisted configuration from active configuration. Select a connection and press **Delete** to remove access. Access between peers is denied until explicitly allowed.
 
 ### Forward a service
 
@@ -119,7 +119,7 @@ For example, forward a peer's TCP `8080` service so authorized peers can reach i
 
 Change Endpoint and Keepalive in **Settings**. Changes apply to configurations generated afterward.
 
-To update, pull the image, stop and remove the old container, then repeat the startup command with the same `wirehub-data` volume. Keep and back up this volume to preserve your network configuration.
+Before updating, stop the service and create a verified database/hub-key pair backup. Then replace the binary or image while preserving state. Schema upgrades can prevent an older executable from reopening the same database; rollback requires restoring the pre-upgrade pair. See [operations and release instructions](docs/operations.md).
 
 ### Runtime health and capacity
 
@@ -155,7 +155,7 @@ Building the service requires Rust 1.89 or newer for the standard-library file
 locking API. This minimum requirement does not imply that every Rust release
 has been independently tested.
 
-This release uses strict schema version 4. Canonical version 3 databases are validated and upgraded atomically by adding a pending-provision journal; existing configuration and hub identity are preserved. Older or structurally drifted databases are rejected. Version 4 databases cannot be opened by an older version 3 binary. At startup, WireHub binds the hub private-key file to the public identity persisted in SQLite; network setup does not create or bind that identity. Back up the SQLite database and hub private-key file together as an immutable identity pair. Restoring only one half can make startup fail because the persisted public identity must match the private key. Schema drift detection includes unexpected SQLite statistics tables and index objects.
+This release candidate (`1.0.0-rc.1`) uses strict schema version 5. Canonical version 3 and 4 databases are validated and upgraded atomically, including the pending-provision journal and monotonic configuration revision; existing configuration and hub identity are preserved. Older or structurally drifted databases are rejected. Version 5 databases cannot be opened by an older version 4 binary. At startup, WireHub binds the hub private-key file to the public identity persisted in SQLite; network setup does not create or bind that identity. Back up the SQLite database and hub private-key file together as an immutable identity pair. Restoring only one half can make startup fail because the persisted public identity must match the private key. Schema drift detection includes unexpected SQLite statistics tables and index objects.
 
 Peer provisioning records its pending state without storing the private key. Pending peers are hidden from the peer inventory and cannot be forwarding targets. Cancelling an HTTP request during activation schedules peer removal and a cleanup reload; startup removes any remaining unfinished provisions before loading the router. Successful provisioning clears the pending marker before returning the one-time configuration. Save that response: delivery acknowledgement by the client is not tracked, so a lost response still requires deleting and recreating the peer.
 
@@ -173,3 +173,7 @@ readiness, acknowledged configuration reload, and per-peer runtime statistics
 are exposed through that handle. The kernel is running while its `run` future is
 being polled. If that future stops or is cancelled, readiness is cleared
 automatically.
+
+## Release readiness and verification
+
+See [release verification](docs/release.md) for acceptance status and reproducible checks, [operations](docs/operations.md) for deployment, network compatibility and backup/restore, and [performance](docs/performance.md) for the routing baseline and measurement limits.

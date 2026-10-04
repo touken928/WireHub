@@ -4,11 +4,90 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
+  test-style:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: tests/client/go.sum
+      - name: Install development formatter
+        run: python3 -m pip install ruff==0.16.1
+      - name: Check Python style
+        run: ruff format --check tests scripts && ruff check tests scripts
+      - name: Check Go style and dependencies
+        working-directory: tests/client
+        run: |
+          GO_UNFORMATTED=$(gofmt -l main.go main_test.go)
+          test -z "$GO_UNFORMATTED"
+          go mod tidy -diff
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - name: Build embedded frontend
+        run: pnpm --dir frontend install --frozen-lockfile && pnpm --dir frontend build
+      - name: Check package version agreement
+        run: python3 scripts/check-release.py
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Audit frontend production dependencies
+        run: pnpm --dir frontend audit --prod --audit-level high
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit Rust dependencies
+        run: cargo audit
+  minimum-rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - name: Build embedded frontend
+        run: pnpm --dir frontend install --frozen-lockfile && pnpm --dir frontend build
+      - name: Check minimum supported Rust
+        run: cargo check --locked --all-targets
+  linux-kernel-interop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Run real Linux kernel WireGuard interoperability
+        run: python3 tests/linux_kernel.py --output "$RUNNER_TEMP/linux-kernel.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-kernel-interop
+          path: ${{ runner.temp }}/linux-kernel.json
   userspace-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -26,8 +105,28 @@ jobs:
         run: corepack enable && corepack prepare pnpm@9.15.9 --activate
       - name: Run userspace integration and client tests
         run: python3 tests/integration.py
+      - name: Run network impairment and idle recovery gates
+        run: WIREHUB_NETWORK_REGRESSIONS=all python3 tests/integration.py
+      - name: Run operations acceptance
+        run: python3 tests/operations.py --output "$RUNNER_TEMP/operations.json"
+      - name: Run release RC endurance gate
+        run: cargo build --release --locked && python3 tests/soak.py --binary target/release/wirehub --seconds 300 --output "$RUNNER_TEMP/rc-endurance.json"
+      - name: Upload operations and endurance evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: operations-and-endurance
+          path: |
+            ${{ runner.temp }}/operations.json
+            ${{ runner.temp }}/rc-endurance.json
       - name: Run Rust tests
         run: cargo test --locked
+      - name: Run release routing and capacity baseline
+        run: python3 tests/performance.py --output "$RUNNER_TEMP/performance.json" --iterations 10000
+      - name: Upload performance measurements
+        uses: actions/upload-artifact@v4
+        with:
+          name: routing-performance
+          path: ${{ runner.temp }}/performance.json
       - name: Verify checked-in OpenAPI contract
         run: cargo run --locked -- export-openapi > "$RUNNER_TEMP/openapi.json" && cmp openapi.json "$RUNNER_TEMP/openapi.json"
   frontend-ui:
@@ -51,10 +150,18 @@ jobs:
         env:
           PLAYWRIGHT_CHANNEL: chrome
           WIREHUB_UI_SCREENSHOTS: ${{ runner.temp }}/wirehub-ui-screenshots
+      - name: Run additional UI regression scenarios
+        run: pnpm --dir frontend test:ui
+        env:
+          PLAYWRIGHT_CHANNEL: chrome
+          WIREHUB_UI_REGRESSIONS: all
+          WIREHUB_UI_SCREENSHOTS: ${{ runner.temp }}/wirehub-ui-regressions
       - name: Upload UI screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: wirehub-ui-screenshots
-          path: ${{ runner.temp }}/wirehub-ui-screenshots
+          path: |
+            ${{ runner.temp }}/wirehub-ui-screenshots
+            ${{ runner.temp }}/wirehub-ui-regressions
           if-no-files-found: ignore

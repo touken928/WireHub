@@ -18,6 +18,18 @@ const PENDING_TTL: Duration = Duration::from_secs(3);
 const PENDING_LIMIT: usize = 256;
 const PENDING_BYTES: usize = 1024 * 1024;
 
+#[cfg(test)]
+pub(crate) type PendingObservation = (
+    String,
+    String,
+    Option<String>,
+    Ipv4Addr,
+    Ipv4Addr,
+    Ipv4Addr,
+    u16,
+    u8,
+);
+
 struct PendingPacket {
     ingress: IngressPacket,
     stamp: RouteStamp,
@@ -33,6 +45,7 @@ struct PendingQueue {
 pub(crate) struct RoutingConfig {
     pub peers: HashMap<String, PeerConfig>,
     pub forwards: Vec<ForwardConfig>,
+    pub forward_index: crate::kernel::snapshot::ForwardIndex,
     pub hub_ip: Option<Ipv4Addr>,
     pub by_ip: HashMap<Ipv4Addr, String>,
 }
@@ -103,19 +116,11 @@ pub(crate) struct DeliveryAccounting {
     pub bytes: u64,
 }
 
+#[derive(Default)]
 pub(crate) struct DataPlane {
     pub config: RoutingConfig,
     flows: Flows,
     pending: PendingQueue,
-}
-impl Default for DataPlane {
-    fn default() -> Self {
-        Self {
-            config: RoutingConfig::default(),
-            flows: Flows::default(),
-            pending: PendingQueue::default(),
-        }
-    }
 }
 impl DataPlane {
     pub(crate) fn authenticated_peer(&self, id: &str) -> Option<AuthenticatedPeer> {
@@ -261,7 +266,14 @@ impl DataPlane {
                 return None;
             }
             if packet.dst() == self.config.hub_ip.unwrap_or(Ipv4Addr::UNSPECIFIED) {
-                for forward in &self.config.forwards {
+                let candidates = packet.dst_port().and_then(|port| {
+                    self.config
+                        .forward_index
+                        .by_service
+                        .get(&(packet.protocol(), port))
+                });
+                for position in candidates.into_iter().flatten() {
+                    let forward = &self.config.forwards[*position];
                     let Some(target) = self.config.peers.get(&forward.target_peer_id) else {
                         continue;
                     };
@@ -405,21 +417,28 @@ impl DataPlane {
                 id,
                 protocol,
                 target_port,
-            }) => self.config.forwards.iter().any(|f| {
-                &f.id == id
-                    && f.protocol == *protocol
-                    && f.target_port == *target_port
-                    && f.target_peer_id == target.id
-                    && ingress.packet.protocol() == protocol.number()
-                    && ingress.packet.dst() == self.config.hub_ip.unwrap_or(Ipv4Addr::UNSPECIFIED)
-                    && ingress.packet.dst_port() == Some(*target_port)
-                    && policy::forward_allowed(
-                        f,
-                        &source.group_id,
-                        source.group.as_ref(),
-                        &target.group_id,
-                    )
-            }),
+            }) => self
+                .config
+                .forward_index
+                .by_id
+                .get(id)
+                .and_then(|position| self.config.forwards.get(*position))
+                .is_some_and(|f| {
+                    &f.id == id
+                        && f.protocol == *protocol
+                        && f.target_port == *target_port
+                        && f.target_peer_id == target.id
+                        && ingress.packet.protocol() == protocol.number()
+                        && ingress.packet.dst()
+                            == self.config.hub_ip.unwrap_or(Ipv4Addr::UNSPECIFIED)
+                        && ingress.packet.dst_port() == Some(*target_port)
+                        && policy::forward_allowed(
+                            f,
+                            &source.group_id,
+                            source.group.as_ref(),
+                            &target.group_id,
+                        )
+                }),
         }
     }
     #[cfg(test)]
@@ -435,18 +454,7 @@ impl DataPlane {
         self.pending.bytes
     }
     #[cfg(test)]
-    pub(crate) fn test_pending_observation(
-        &self,
-    ) -> Vec<(
-        String,
-        String,
-        Option<String>,
-        Ipv4Addr,
-        Ipv4Addr,
-        Ipv4Addr,
-        u16,
-        u8,
-    )> {
+    pub(crate) fn test_pending_observation(&self) -> Vec<PendingObservation> {
         self.pending
             .entries
             .iter()

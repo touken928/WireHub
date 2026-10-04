@@ -13,6 +13,24 @@ async fn initialize_store_runtime(
     })
     .await
 }
+async fn sampled_after_rx(
+    handle: &KernelHandle,
+    peer: &str,
+    minimum: u64,
+) -> Arc<HashMap<String, PeerRuntimeStats>> {
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let stats = handle.stats().await;
+            if stats.get(peer).is_some_and(|s| s.rx_bytes >= minimum) {
+                return stats;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("periodic statistics did not include delivered traffic")
+}
+
 use crate::kernel::checksum::checksum;
 use crate::model::Group;
 use base64::Engine;
@@ -25,6 +43,7 @@ fn create_forward_for_test(store: &Store, mut forward: Forward) {
 
 fn empty_compiled() -> crate::kernel::snapshot::CompiledSnapshot {
     crate::kernel::snapshot::CompiledSnapshot::try_from(crate::model::NetworkSnapshot {
+        revision: 0,
         settings: None,
         groups: vec![],
         peers: vec![],
@@ -1397,7 +1416,7 @@ async fn boringtun_nat_tcp_udp_roundtrip_and_live_policy_revocation() {
     }
     // Counters are plaintext IPv4 bytes delivered across the hub boundary:
     // ingress accounts on the source peer, egress on the destination peer.
-    let snapshot = handle.stats().await;
+    let snapshot = sampled_after_rx(&handle, "a", total_request_bytes).await;
     let a_rx = snapshot["a"].rx_bytes;
     let a_tx = snapshot["a"].tx_bytes;
     let b_rx = snapshot["b"].rx_bytes;
@@ -1825,7 +1844,7 @@ async fn only_authenticated_keepalive_can_migrate_peer_endpoint() {
 }
 
 #[tokio::test]
-async fn router_publishes_stats_only_for_authenticated_udp_packets() {
+async fn router_does_not_publish_stats_per_packet_and_ignores_unauthenticated_updates() {
     let dir = tempfile::tempdir().unwrap();
     let store =
         Arc::new(Store::open(dir.path().join("endpoint.sqlite").to_str().unwrap()).unwrap());
@@ -1872,7 +1891,6 @@ async fn router_publishes_stats_only_for_authenticated_udp_packets() {
         ),
     );
     // Initial statistics are published by initialize, before runtime task-local observers exist.
-    let startup_publications = 0;
     let hub_public = PublicKey::from(&StaticSecret::from(hub_private));
     let original = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let migrated = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -1907,12 +1925,9 @@ async fn router_publishes_stats_only_for_authenticated_udp_packets() {
             .unwrap(),
         "authenticated initiation must be accepted"
     );
-    assert_eq!(
-        timeout(Duration::from_secs(1), publish_rx.recv())
-            .await
-            .unwrap()
-            .unwrap(),
-        startup_publications + 1
+    assert!(
+        publish_rx.try_recv().is_err(),
+        "Packet processing does not publish a full stats map"
     );
     assert!(
         timeout(Duration::from_secs(1), packet_rx.recv())
@@ -1921,12 +1936,20 @@ async fn router_publishes_stats_only_for_authenticated_udp_packets() {
             .unwrap(),
         "authenticated client keepalive completing the handshake must be accepted"
     );
+    assert!(
+        publish_rx.try_recv().is_err(),
+        "Packet processing does not publish a full stats map"
+    );
+    handle.reload().await.unwrap();
     assert_eq!(
-        timeout(Duration::from_secs(1), publish_rx.recv())
-            .await
-            .unwrap()
-            .unwrap(),
-        startup_publications + 2
+        publish_rx.recv().await.unwrap(),
+        1,
+        "Reload publishes immediately"
+    );
+    let shared = handle.stats().await;
+    assert!(
+        Arc::ptr_eq(&shared, &handle.stats().await),
+        "Repeated API reads share a snapshot"
     );
     assert!(
         handle.stats().await["a"].last_handshake_unix.is_some(),
@@ -1943,13 +1966,12 @@ async fn router_publishes_stats_only_for_authenticated_udp_packets() {
         .await
         .unwrap()
         .unwrap());
-    assert_eq!(
-        timeout(Duration::from_secs(1), publish_rx.recv())
-            .await
-            .unwrap()
-            .unwrap(),
-        startup_publications + 3
+    assert!(
+        publish_rx.try_recv().is_err(),
+        "Packet processing does not publish a full stats map"
     );
+    handle.reload().await.unwrap();
+    assert_eq!(publish_rx.recv().await.unwrap(), 2);
     assert!(
         handle.stats().await["a"].last_data_unix.is_some(),
         "valid keepalive updates published data stats"
@@ -1965,12 +1987,9 @@ async fn router_publishes_stats_only_for_authenticated_udp_packets() {
         .await
         .unwrap()
         .unwrap());
-    assert_eq!(
-        timeout(Duration::from_secs(1), publish_rx.recv())
-            .await
-            .unwrap()
-            .unwrap(),
-        startup_publications + 4
+    assert!(
+        publish_rx.try_recv().is_err(),
+        "Packet processing does not publish a full stats map"
     );
 
     // Bad tag and exact replay both reach the indexed peer but must not publish.
@@ -2001,12 +2020,9 @@ async fn router_publishes_stats_only_for_authenticated_udp_packets() {
         .await
         .unwrap()
         .unwrap());
-    assert_eq!(
-        timeout(Duration::from_secs(1), publish_rx.recv())
-            .await
-            .unwrap()
-            .unwrap(),
-        startup_publications + 5
+    assert!(
+        publish_rx.try_recv().is_err(),
+        "Packet processing does not publish a full stats map"
     );
     original.send_to(&replay, address).await.unwrap();
     assert!(
@@ -2019,6 +2035,18 @@ async fn router_publishes_stats_only_for_authenticated_udp_packets() {
     assert!(
         publish_rx.try_recv().is_err(),
         "exact replay must not publish stats"
+    );
+    let before = handle.stats().await;
+    handle.reload().await.unwrap();
+    assert_eq!(publish_rx.recv().await.unwrap(), 3);
+    let after = handle.stats().await;
+    assert_eq!(
+        before["a"].rx_bytes, after["a"].rx_bytes,
+        "Dropped traffic never increases delivered counters"
+    );
+    assert!(
+        !Arc::ptr_eq(&before, &after),
+        "Publishing replaces the snapshot, preserving old readers"
     );
     drop(handle);
 }
@@ -2126,7 +2154,8 @@ async fn unrelated_reload_preserves_established_client_tunnels_and_direct_udp_fl
         "unrelated reload retains receiver index, tunnel session, and established direct UDP flow"
     );
     assert_eq!(&delivered.unwrap()[28..], b"after-reload");
-    let snapshot = handle.stats().await;
+    let snapshot =
+        sampled_after_rx(&handle, "a", (request.len() + continuation.len()) as u64).await;
     assert!(
         snapshot["a"].rx_bytes >= (request.len() + continuation.len()) as u64,
         "application counters remain cumulative over reload"
@@ -2267,7 +2296,7 @@ async fn boringtun_clients_handshake_and_route_only_authorized_ipv4() {
         first_inner[8], 63,
         "pending forwarding decrements TTL only once"
     );
-    let after_data = handle.stats().await;
+    let after_data = sampled_after_rx(&handle, "a", packet.len() as u64).await;
     assert_eq!(after_data["a"].rx_bytes, packet.len() as u64);
     assert_eq!(after_data["b"].tx_bytes, packet.len() as u64);
     drop(after_data);
@@ -2544,7 +2573,7 @@ async fn unrelated_reload_preserves_established_forward_tcp_tunnel_and_nat_tuple
     assert_eq!(u16::from_be_bytes([restored[22], restored[23]]), 12345);
     assert_eq!(&restored[40..], b"backend-data");
     assert_packet_checksums(&restored);
-    let snapshot = handle.stats().await;
+    let snapshot = sampled_after_rx(&handle, "a", (request.len() + ack.len()) as u64).await;
     assert!(snapshot["a"].rx_bytes >= (request.len() + ack.len()) as u64);
     assert!(snapshot["b"].tx_bytes >= (delivered.len() + after_reload.len()) as u64);
 }
@@ -2759,7 +2788,8 @@ async fn cold_forward_two_syns_deliver_after_handshake_with_exact_reverse_mappin
         "independent source tuples receive distinct SNAT ports"
     );
     assert_eq!(
-        handle.stats().await["a"].rx_bytes,
+        sampled_after_rx(&handle, "a", (requests[0].len() + requests[1].len()) as u64).await["a"]
+            .rx_bytes,
         (requests[0].len() + requests[1].len()) as u64,
         "source accounting occurs only on actual delivery"
     );
@@ -2791,7 +2821,8 @@ async fn cold_forward_two_syns_deliver_after_handshake_with_exact_reverse_mappin
         replies.push(reply);
     }
     assert_no_inner(&b_socket, address, &mut b, &mut rx, &mut tx).await;
-    let snapshot = handle.stats().await;
+    let snapshot =
+        sampled_after_rx(&handle, "b", (replies[0].len() + replies[1].len()) as u64).await;
     assert_eq!(
         snapshot["a"].rx_bytes,
         (requests[0].len() + requests[1].len()) as u64
@@ -3122,4 +3153,49 @@ async fn reload_revocation_blocks_established_direct_flow_requests_and_replies()
         request.len() as u64,
         "revoked traffic is not counted as delivered egress"
     );
+}
+
+#[tokio::test]
+async fn statistics_are_sampled_once_per_second_and_shared_between_reads() {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let (kernel, handle) = Kernel::initialize(socket, [25; 32], || Ok(empty_compiled()))
+        .await
+        .unwrap();
+    let initial = handle.stats().await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let task = tokio::spawn(STATS_PUBLISH_COUNT.scope(
+        std::cell::Cell::new(0),
+        STATS_PUBLISH_OBSERVER.scope(tx, kernel.run()),
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        rx.try_recv().is_err(),
+        "No duplicate publication immediately after initialization"
+    );
+    assert!(Arc::ptr_eq(&initial, &handle.stats().await));
+    assert_eq!(
+        timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        1
+    );
+    let sample = handle.stats().await;
+    assert!(!Arc::ptr_eq(&initial, &sample));
+    assert!(Arc::ptr_eq(&sample, &handle.stats().await));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        rx.try_recv().is_err(),
+        "No publication between one-second samples"
+    );
+    assert_eq!(
+        timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        2
+    );
+    assert!(!Arc::ptr_eq(&sample, &handle.stats().await));
+    drop(handle);
+    assert!(matches!(task.await.unwrap(), Err(RunError::Stopped)));
 }

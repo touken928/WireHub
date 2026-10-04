@@ -384,3 +384,12 @@ h2 { font-size: 14px; font-weight: 600; letter-spacing: -.2px; }
 @media (prefers-reduced-motion: reduce) {
   *, *:before, *:after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
 }
+
+.runtime-strip { display: flex; align-items: center; gap: 9px; margin-bottom: 20px; color: #64748b; font-size: 12px; flex-wrap: wrap; }
+.runtime-strip b { color: #334155; font-weight: 600; }
+.runtime-strip > span:last-child { margin-left: auto; }
+.policy-conflict { padding: 20px; margin-bottom: 18px; }
+.policy-conflict h2 { font-size: 16px; margin: 0 0 10px; }
+.policy-conflict p { font-size: 13px; color: #64748b; }
+.conflict-changes p { display: flex; gap: 14px; flex-wrap: wrap; }
+@media (max-width: 600px) { .runtime-strip > span:last-child { margin-left: 0; width: 100%; } }

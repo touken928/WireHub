@@ -16,7 +16,9 @@ impl InstanceLock {
         }
         let raw = path.to_string_lossy();
         if raw == ":memory:" || raw.starts_with("file:") {
-            return Err(input("memory and SQLite URI database paths are unsupported"));
+            return Err(input(
+                "memory and SQLite URI database paths are unsupported",
+            ));
         }
 
         let db_path = normalize(path)?;
@@ -37,7 +39,9 @@ impl InstanceLock {
         // The data directory is trusted and must remain stable while WireHub runs.
         let after = normalize(path)?;
         if after != db_path {
-            return Err(input("database path changed while acquiring its instance lock"));
+            return Err(input(
+                "database path changed while acquiring its instance lock",
+            ));
         }
         validate_db_path(&after)?;
         validate_lock_path(&lock_path, &file, None)?;
@@ -53,8 +57,13 @@ fn normalize(path: &Path) -> io::Result<PathBuf> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => std::fs::canonicalize(path),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let name = path.file_name().ok_or_else(|| input("database path must name a file"))?;
-            let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+            let name = path
+                .file_name()
+                .ok_or_else(|| input("database path must name a file"))?;
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
             Ok(std::fs::canonicalize(parent)?.join(name))
         }
         Err(error) => Err(error),
@@ -65,7 +74,9 @@ fn validate_db_path(path: &Path) -> io::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
             if !metadata.file_type().is_file() || metadata.nlink() != 1 {
-                return Err(input("database must be a regular file with exactly one hard link"));
+                return Err(input(
+                    "database must be a regular file with exactly one hard link",
+                ));
             }
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -104,7 +115,9 @@ fn open_lock(path: &Path) -> io::Result<File> {
 
 fn validate_lock_metadata(metadata: &std::fs::Metadata) -> io::Result<()> {
     if !metadata.file_type().is_file() || metadata.nlink() != 1 {
-        return Err(input("instance lock must be a regular file with exactly one hard link"));
+        return Err(input(
+            "instance lock must be a regular file with exactly one hard link",
+        ));
     }
     Ok(())
 }
@@ -121,7 +134,9 @@ fn validate_lock_path(
         || path_meta.ino() != opened.ino()
         || existing.is_some_and(|meta| meta.dev() != opened.dev() || meta.ino() != opened.ino())
     {
-        return Err(input("instance lock path does not identify the opened regular file"));
+        return Err(input(
+            "instance lock path does not identify the opened regular file",
+        ));
     }
     Ok(())
 }

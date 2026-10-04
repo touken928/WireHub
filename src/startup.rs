@@ -8,6 +8,7 @@ use std::{
 };
 
 pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 pub(crate) async fn run() -> Result<()> {
     let port: u16 = match env::var("WIREHUB_PORT") {
@@ -63,20 +64,80 @@ pub(crate) async fn run() -> Result<()> {
     let app = api::router(state);
     let tcp = tokio::net::TcpListener::bind(SocketAddr::from((bind, port))).await?;
     let kernel_task = tokio::spawn(kernel.run());
-    supervise_kernel_and_http(kernel_task, async move { axum::serve(tcp, app).await }).await
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    supervise(
+        kernel_task,
+        async move {
+            axum::serve(tcp, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+        },
+        termination_signal(),
+        shutdown_tx,
+        SHUTDOWN_TIMEOUT,
+    )
+    .await
 }
 
+async fn termination_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
+}
+
+#[cfg(test)]
 async fn supervise_kernel_and_http<F>(
-    mut kernel_task: tokio::task::JoinHandle<std::result::Result<(), kernel::RunError>>,
+    kernel_task: tokio::task::JoinHandle<std::result::Result<(), kernel::RunError>>,
     http: F,
 ) -> Result<()>
 where
     F: std::future::Future<Output = std::io::Result<()>>,
 {
-    tokio::pin!(http);
+    let (tx, _) = tokio::sync::oneshot::channel();
+    supervise(
+        kernel_task,
+        http,
+        std::future::pending(),
+        tx,
+        SHUTDOWN_TIMEOUT,
+    )
+    .await
+}
+
+async fn supervise<F, S>(
+    mut kernel_task: tokio::task::JoinHandle<std::result::Result<(), kernel::RunError>>,
+    http: F,
+    shutdown: S,
+    trigger: tokio::sync::oneshot::Sender<()>,
+    deadline: std::time::Duration,
+) -> Result<()>
+where
+    F: std::future::Future<Output = std::io::Result<()>>,
+    S: std::future::Future<Output = std::io::Result<()>>,
+{
+    tokio::pin!(http, shutdown);
     tokio::select! {
         result=&mut kernel_task=>match result{Ok(Ok(()))|Ok(Err(_))=>Err("kernel exited unexpectedly".into()),Err(_)=>Err("kernel task panicked".into())},
-        result=&mut http=>{kernel_task.abort();let _=kernel_task.await;result?;Ok(())}
+        result=&mut http=>{kernel_task.abort();let _=kernel_task.await;result?;Ok(())},
+        signal=&mut shutdown=>{
+            let _ = trigger.send(());
+            // UDP must remain alive until acknowledged management writes finish.
+            let drained = tokio::time::timeout(deadline, &mut http).await;
+            kernel_task.abort(); let _ = kernel_task.await;
+            signal?;
+            drained.map_err(|_| "HTTP graceful shutdown exceeded the drain deadline")??;
+            Ok(())
+        }
     }
 }
 
@@ -84,10 +145,7 @@ where
 mod supervision_tests {
     use super::*;
     use crate::kernel::{ReloadError, RunError, SnapshotLoadError, StartError};
-    use std::{
-        future::{pending, Future},
-        io,
-    };
+    use std::{future::pending, io};
     use tokio::sync::oneshot;
     struct DropSignal(Option<oneshot::Sender<()>>);
     impl Drop for DropSignal {
@@ -97,11 +155,9 @@ mod supervision_tests {
             }
         }
     }
-    fn pending_http(tx: oneshot::Sender<()>) -> impl Future<Output = io::Result<()>> {
-        async move {
-            let _dropped = DropSignal(Some(tx));
-            pending().await
-        }
+    async fn pending_http(tx: oneshot::Sender<()>) -> io::Result<()> {
+        let _dropped = DropSignal(Some(tx));
+        pending().await
     }
     async fn assert_kernel_exit(
         task: tokio::task::JoinHandle<std::result::Result<(), kernel::RunError>>,
@@ -186,6 +242,7 @@ mod supervision_tests {
 
     fn empty_snapshot() -> crate::kernel::CompiledSnapshot {
         crate::kernel::CompiledSnapshot::try_from(crate::model::NetworkSnapshot {
+            revision: 0,
             settings: None,
             groups: vec![],
             peers: vec![],
@@ -265,5 +322,56 @@ mod supervision_tests {
             .expect("HTTP future was not dropped")
             .unwrap();
         assert!(!handle.is_ready(), "panicked kernel must clear readiness");
+    }
+    #[tokio::test]
+    async fn shutdown_keeps_kernel_alive_until_http_drains_then_clears_readiness() {
+        let (kernel, handle) = initialized_kernel(false).await;
+        let task = tokio::spawn(kernel.run());
+        let (trigger, receiver) = oneshot::channel();
+        let observed = handle.clone();
+        let http = async move {
+            receiver.await.unwrap();
+            assert!(observed.is_ready(), "UDP stays active during HTTP drain");
+            observed.reload().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            assert!(observed.is_ready());
+            Ok(())
+        };
+        supervise(
+            task,
+            http,
+            async { Ok(()) },
+            trigger,
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert!(!handle.is_ready());
+    }
+
+    #[tokio::test]
+    async fn shutdown_deadline_bounds_stuck_http_and_stops_kernel() {
+        let (kernel, handle) = initialized_kernel(false).await;
+        let task = tokio::spawn(kernel.run());
+        let (trigger, _) = oneshot::channel();
+        let (dropped, dropped_rx) = oneshot::channel();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            supervise(
+                task,
+                pending_http(dropped),
+                async { Ok(()) },
+                trigger,
+                std::time::Duration::from_millis(20),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "HTTP graceful shutdown exceeded the drain deadline"
+        );
+        assert!(!handle.is_ready());
+        dropped_rx.await.unwrap();
     }
 }

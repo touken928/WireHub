@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -94,7 +95,7 @@ func main() {
 	}
 	c := &client{}
 	mux := httpMux(c, token)
-	s := &http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
+	s := &http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 65 * time.Second, IdleTimeout: 30 * time.Second}
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {
 		log.Fatal("control listener failed")
@@ -116,6 +117,7 @@ func httpMux(c *client, token string) http.Handler {
 	m.HandleFunc("POST /probe", c.probeHTTP)
 	m.HandleFunc("POST /tcp/open", c.tcpOpenHTTP)
 	m.HandleFunc("POST /tcp/exchange", c.tcpExchangeHTTP)
+	m.HandleFunc("POST /tcp/transfer", c.tcpTransferHTTP)
 	m.HandleFunc("POST /tcp/close", c.tcpCloseHTTP)
 	m.HandleFunc("GET /status", c.statusHTTP)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -182,10 +184,13 @@ func (c *client) configureHTTP(w http.ResponseWriter, r *http.Request) {
 	jsonReply(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-type parsedConfig struct{ private, peer, endpoint, address, allowed string }
+type parsedConfig struct {
+	private, peer, endpoint, address, allowed string
+	mtu, keepalive                            int
+}
 
 func parseConfig(text string) (parsedConfig, error) {
-	var out parsedConfig
+	out := parsedConfig{mtu: 1420}
 	if len(text) == 0 || len(text) > maxBody || strings.ContainsRune(text, '\x00') {
 		return out, errors.New("invalid config")
 	}
@@ -225,7 +230,19 @@ func parseConfig(text string) (parsedConfig, error) {
 			out.private = v
 		case "interface.address":
 			out.address = v
-		case "interface.dns", "interface.listenport", "interface.mtu", "peer.persistentkeepalive": // accepted but unused
+		case "interface.mtu":
+			value, err := strconv.Atoi(v)
+			if err != nil || value < 576 || value > 1420 {
+				return out, errors.New("bad MTU")
+			}
+			out.mtu = value
+		case "peer.persistentkeepalive":
+			value, err := strconv.Atoi(v)
+			if err != nil || value < 0 || value > 65535 {
+				return out, errors.New("bad keepalive")
+			}
+			out.keepalive = value
+		case "interface.dns", "interface.listenport": // not needed by the isolated netstack
 		case "peer.publickey":
 			out.peer = v
 		case "peer.endpoint":
@@ -279,12 +296,12 @@ func newDevice(config string) (netip.Addr, *netstack.Net, *device.Device, error)
 	if err != nil {
 		return netip.Addr{}, nil, nil, err
 	}
-	tun, stack, err := netstack.CreateNetTUN([]netip.Addr{addr.Addr()}, nil, 1420)
+	tun, stack, err := netstack.CreateNetTUN([]netip.Addr{addr.Addr()}, nil, p.mtu)
 	if err != nil {
 		return netip.Addr{}, nil, nil, err
 	}
 	dev := device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
-	ipc := fmt.Sprintf("private_key=%s\npublic_key=%s\nendpoint=%s\nallowed_ip=%s\n", hex.EncodeToString(priv), hex.EncodeToString(peer), outer.String(), allowed.String())
+	ipc := fmt.Sprintf("private_key=%s\npublic_key=%s\nendpoint=%s\nallowed_ip=%s\npersistent_keepalive_interval=%d\n", hex.EncodeToString(priv), hex.EncodeToString(peer), outer.String(), allowed.String(), p.keepalive)
 	err = dev.IpcSet(ipc)
 	if err == nil {
 		err = dev.Up()
@@ -348,9 +365,9 @@ func (c *client) tcpEcho(s *server, l net.Listener) {
 		case sem <- struct{}{}:
 			go func(n net.Conn) {
 				defer func() { <-sem; n.Close() }()
-				_ = n.SetDeadline(time.Now().Add(30 * time.Second))
 				buf := make([]byte, maxPayload)
 				for {
+					_ = n.SetDeadline(time.Now().Add(5 * time.Minute))
 					nr, e := n.Read(buf)
 					if nr > 0 {
 						p := bytes.Clone(buf[:nr])
@@ -568,6 +585,47 @@ func (c *client) tcpExchangeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonReply(w, http.StatusOK, probeResponse{OK: bytes.Equal(reply, []byte(q.Payload))})
+}
+
+// Transfer bytes on an existing socket, verifying the entire echo without logging payloads.
+func (c *client) tcpTransferHTTP(w http.ResponseWriter, r *http.Request) {
+	var q struct {
+		ID        string `json:"id"`
+		Bytes     int    `json:"bytes"`
+		TimeoutMS int    `json:"timeout_ms"`
+	}
+	if !decodeBody(w, r, &q) {
+		return
+	}
+	if q.ID == "" || q.Bytes < 1 || q.Bytes > 16<<20 || q.TimeoutMS < 1 || q.TimeoutMS > 60000 {
+		http.Error(w, "invalid transfer limits", 400)
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	conn := c.tcpConns[q.ID]
+	if conn == nil {
+		jsonReply(w, 200, probeResponse{Error: "connection unavailable"})
+		return
+	}
+	payload := make([]byte, q.Bytes)
+	for i := range payload {
+		payload[i] = byte(i*31 + 17)
+	}
+	expected := sha256.Sum256(payload)
+	_ = conn.SetDeadline(time.Now().Add(time.Duration(q.TimeoutMS) * time.Millisecond))
+	started := time.Now()
+	written := make(chan error, 1)
+	go func() { _, err := io.Copy(conn, bytes.NewReader(payload)); written <- err }()
+	hash := sha256.New()
+	received, err := io.CopyN(hash, conn, int64(q.Bytes))
+	if err != nil {
+		_ = conn.SetDeadline(time.Now())
+	}
+	writeErr := <-written
+	duration := time.Since(started)
+	ok := err == nil && writeErr == nil && received == int64(q.Bytes) && bytes.Equal(hash.Sum(nil), expected[:])
+	jsonReply(w, 200, map[string]any{"ok": ok, "bytes": received, "seconds": duration.Seconds(), "sha256": hex.EncodeToString(hash.Sum(nil))})
 }
 
 func (c *client) tcpCloseHTTP(w http.ResponseWriter, r *http.Request) {

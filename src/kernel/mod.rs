@@ -27,3 +27,6 @@ pub use control::{PeerRuntimeStats, ReloadError};
 pub use runtime::StartError;
 pub use runtime::{Kernel, RunError, SnapshotLoadError};
 pub use snapshot::CompiledSnapshot;
+
+#[cfg(test)]
+mod benchmark;

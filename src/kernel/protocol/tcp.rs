@@ -147,18 +147,14 @@ impl TcpFlowState {
                     initiator_next,
                     responder_next,
                     responder_end,
-                } if !from_initiator
-                    && tcp.flags & 0x12 == 0x10
-                    && tcp.payload_len > 0 =>
-                {
+                } if !from_initiator && tcp.flags & 0x12 == 0x10 && tcp.payload_len > 0 => {
                     let span = responder_end.wrapping_sub(responder_next);
                     let offset = tcp.seq.wrapping_sub(responder_next);
                     let candidate = offset.checked_add(tcp.payload_len);
                     let end = if span < (1 << 31)
                         && offset <= span
-                        && candidate.is_some_and(|candidate| {
-                            candidate < (1 << 31) && candidate > span
-                        })
+                        && candidate
+                            .is_some_and(|candidate| candidate < (1 << 31) && candidate > span)
                     {
                         responder_next.wrapping_add(candidate.unwrap())
                     } else {
@@ -218,7 +214,12 @@ mod tfo_tests {
 
     fn deliver_data(state: &mut TcpFlowState, seq: u32, len: u32) {
         state.on_delivered(
-            TcpSegment { flags: 0x18, seq, ack: 110, payload_len: len },
+            TcpSegment {
+                flags: 0x18,
+                seq,
+                ack: 110,
+                payload_len: len,
+            },
             false,
             std::time::Instant::now(),
         );
@@ -243,15 +244,42 @@ mod tfo_tests {
         deliver_data(&mut state, 361, 10);
         assert_eq!(responder_end(state), 351);
 
-        state.on_delivered(TcpSegment { flags: 0x10, seq: 110, ack: 371, payload_len: 0 }, true, std::time::Instant::now());
+        state.on_delivered(
+            TcpSegment {
+                flags: 0x10,
+                seq: 110,
+                ack: 371,
+                payload_len: 0,
+            },
+            true,
+            std::time::Instant::now(),
+        );
         assert!(matches!(state.handshake, TcpState::SynReceived { .. }));
         deliver_data(&mut state, 351, 10);
         assert_eq!(responder_end(state), 361);
-        state.on_delivered(TcpSegment { flags: 0x10, seq: 110, ack: 371, payload_len: 0 }, true, std::time::Instant::now());
+        state.on_delivered(
+            TcpSegment {
+                flags: 0x10,
+                seq: 110,
+                ack: 371,
+                payload_len: 0,
+            },
+            true,
+            std::time::Instant::now(),
+        );
         assert!(matches!(state.handshake, TcpState::SynReceived { .. }));
         deliver_data(&mut state, 361, 10);
         assert_eq!(responder_end(state), 371);
-        state.on_delivered(TcpSegment { flags: 0x10, seq: 110, ack: 371, payload_len: 0 }, true, std::time::Instant::now());
+        state.on_delivered(
+            TcpSegment {
+                flags: 0x10,
+                seq: 110,
+                ack: 371,
+                payload_len: 0,
+            },
+            true,
+            std::time::Instant::now(),
+        );
         assert_eq!(state.handshake, TcpState::Established);
     }
 
@@ -261,9 +289,27 @@ mod tfo_tests {
         let mut wrapped = state(base, base);
         deliver_data(&mut wrapped, base, 100);
         assert_eq!(responder_end(wrapped), 50);
-        wrapped.on_delivered(TcpSegment { flags: 0x10, seq: 110, ack: 51, payload_len: 0 }, true, std::time::Instant::now());
+        wrapped.on_delivered(
+            TcpSegment {
+                flags: 0x10,
+                seq: 110,
+                ack: 51,
+                payload_len: 0,
+            },
+            true,
+            std::time::Instant::now(),
+        );
         assert!(matches!(wrapped.handshake, TcpState::SynReceived { .. }));
-        wrapped.on_delivered(TcpSegment { flags: 0x10, seq: 110, ack: 50, payload_len: 0 }, true, std::time::Instant::now());
+        wrapped.on_delivered(
+            TcpSegment {
+                flags: 0x10,
+                seq: 110,
+                ack: 50,
+                payload_len: 0,
+            },
+            true,
+            std::time::Instant::now(),
+        );
         assert_eq!(wrapped.handshake, TcpState::Established);
 
         let base = 500u32;
@@ -283,7 +329,12 @@ mod tfo_tests {
         for (flags, payload_len) in [(0x10, 0), (0x12, 100), (0x11, 100), (0x14, 100)] {
             let mut state = state(201, 201);
             state.on_delivered(
-                TcpSegment { flags, seq: 201, ack: 110, payload_len },
+                TcpSegment {
+                    flags,
+                    seq: 201,
+                    ack: 110,
+                    payload_len,
+                },
                 false,
                 std::time::Instant::now(),
             );

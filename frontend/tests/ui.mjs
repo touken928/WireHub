@@ -7,7 +7,7 @@ import { chromium } from 'playwright'
 // Exercise the production bundle against isolated API fixtures; never touch a running hub.
 const dist = resolve(import.meta.dirname, '../dist')
 const screenshots = process.env.WIREHUB_UI_SCREENSHOTS
-// Opt-in, independently reported gates for the five remaining review defects.
+// Opt-in, independently reported race, conflict and recovery gates.
 // WIREHUB_UI_REGRESSIONS=all (or comma-separated scenario names) leaves the
 // original suite unchanged when unset. Every scenario starts a fresh UI session.
 const regressions = process.env.WIREHUB_UI_REGRESSIONS
@@ -47,6 +47,7 @@ try {
   ]
   let forwards = [{ id: 'docs', name: 'Internal docs', protocol: 'tcp', target_port: 8080, target_peer_id: 'server', allowed_group_ids: ['engineering'] }]
   let settings = { subnet: '10.77.0.0/24', endpoint: 'vpn.example.com:51820', persistent_keepalive: 25 }
+  let revision = 0, appliedRevision = 0, runtimeReady = true, failStatus = false
   let configured = true, failSave = false, failReload = false, partialSave = false, commitAclThenFail = false
   let failSettings = false
   let loseSettingsResponse = false, peerCreateError = ''
@@ -76,15 +77,14 @@ try {
   // Unlike a held acknowledgement, this barrier prevents the server mutation
   // itself. GET snapshots taken before release therefore contain the old ACL.
   const holdAclCommit = id => {
-    const path = `/api/groups/${id}/acl`
+    const path = '/api/policy'
     assert.ok(!heldAclCommits.has(path))
     let seen, release
     const requested = new Promise(resolve => { seen = resolve })
     const released = new Promise(resolve => { release = resolve })
     heldAclCommits.set(path, { seen, released }); pendingReleases.add(release)
     return { requested, release: async () => {
-      const response = page.waitForResponse(r => r.request().method() === 'PUT' && new URL(r.url()).pathname === path)
-      release(); await (await response).finished(); pendingReleases.delete(release)
+      release(); pendingReleases.delete(release)
     } }
   }
   await page.route('**/api/**', async route => {
@@ -94,6 +94,7 @@ try {
       if (held) { heldResponses.delete(key); held.seen(); await held.released }
       return route.fulfill(response)
     }
+    const commitConfig = () => { revision++; appliedRevision = revision }
     const reply = (json, status = 200) => respond({ status, contentType: 'application/json', body: JSON.stringify(json) })
     const textError = (text, status) => respond({ status, contentType: 'text/plain; charset=utf-8', body: text })
     if (req.headers().authorization !== 'Bearer ui-test-token') return textError('unauthorized', 401)
@@ -106,35 +107,40 @@ try {
           if (setupCreateStatus === 503) { configured = true; settings = body }
           return textError(setupCreateError, setupCreateStatus)
         }
-        settings = body; configured = true; return reply(settings)
+        settings = body; configured = true; commitConfig(); return reply(settings)
       }
       return reply({ configured, settings: configured ? settings : null })
     }
     if (path === '/api/settings') {
       if (failSettings) return textError('setup required', 409)
-      settings = { ...settings, ...body }
+      settings = { ...settings, ...body }; commitConfig()
       if (loseSettingsResponse) return route.abort('failed')
       return reply(settings)
     }
-    if (path === '/api/groups' && method === 'GET') return failReload ? reply({}, 503) : reply(groups)
-    if (path.endsWith('/acl')) {
-      if (failSave || (partialSave && path.includes('/operations/'))) return reply({}, 503)
+    if (path === '/api/config') return failReload ? reply({}, 503) : reply({ revision, groups, peers, forwards, settings: configured ? settings : null })
+    if (path === '/api/status') return failStatus ? reply({ message: 'Status unavailable' }, 503) : reply({ ready: runtimeReady, persisted_revision: revision, applied_revision: appliedRevision, last_activation_error: runtimeReady ? null : 'snapshot_rejected' })
+        if (path === '/api/policy') {
+      if (failSave || partialSave) return reply({ code: 'runtime_unavailable', message: 'Save failed' }, 503)
       const commit = heldAclCommits.get(path)
       if (commit) { heldAclCommits.delete(path); commit.seen(); await commit.released }
-      const group = groups.find(g => g.id === path.split('/')[3])
-      group.allowed_groups = body.allowed_groups
-      if (commitAclThenFail) return reply({}, 503)
-      return reply(group)
+      if (body.expected_revision !== revision) return reply({ code: 'revision_conflict', message: 'Configuration changed', persisted_revision: revision }, 409)
+      assert.ok(body.changes.length > 0)
+      assert.equal(new Set(body.changes.map(change => change.group_id)).size, body.changes.length)
+      for (const change of body.changes) assert.ok(groups.some(group => group.id === change.group_id), 'All batch sources exist')
+      groups = groups.map(group => { const change = body.changes.find(change => change.group_id === group.id); return change ? { ...group, allowed_groups: [...new Set(change.allowed_groups)].sort() } : group })
+      revision++; appliedRevision = revision
+      if (commitAclThenFail) return reply({ code: 'activation_unconfirmed', message: 'Activation unconfirmed', persisted_revision: revision }, 503)
+      return reply({ revision, applied_revision: appliedRevision, groups })
     }
-    if (path === '/api/groups' && method === 'POST') { const group = { id: 'new-group', ...body, allowed_groups: [] }; groups.push(group); return reply(group) }
-    if (path.startsWith('/api/groups/') && method === 'DELETE') { const id = path.split('/')[3]; groups = groups.filter(g => g.id !== id); groups.forEach(g => { g.allowed_groups = g.allowed_groups.filter(to => to !== id) }); forwards = forwards.map(f => ({ ...f, allowed_group_ids: f.allowed_group_ids.filter(to => to !== id) })); return route.fulfill({ status: 204 }) }
+    if (path === '/api/groups' && method === 'POST') { const group = { id: 'new-group', ...body, allowed_groups: [] }; groups.push(group); commitConfig(); return reply(group) }
+    if (path.startsWith('/api/groups/') && method === 'DELETE') { const id = path.split('/')[3]; groups = groups.filter(g => g.id !== id); groups.forEach(g => { g.allowed_groups = g.allowed_groups.filter(to => to !== id) }); forwards = forwards.map(f => ({ ...f, allowed_group_ids: f.allowed_group_ids.filter(to => to !== id) })); commitConfig(); return route.fulfill({ status: 204 }) }
     if (path === '/api/peers' && method === 'GET') return reply(peers)
-    if (path === '/api/peers' && method === 'POST') { if (peerCreateError) return textError(peerCreateError, 409); const id = peers.some(p => p.id === 'new-peer') ? `new-peer-${peers.length}` : 'new-peer'; const peer = { ...peers[0], ...body, id, ipv4: '10.77.0.4' }; peers.push(peer); return reply({ peer, config: '[Interface]\nPrivateKey = fixture-only\nAddress = 10.77.0.4/32' }) }
-    if (path.endsWith('/group')) { const peer = peers.find(p => p.id === path.split('/')[3]); peer.group_id = body.group_id; return reply(peer) }
-    if (path.startsWith('/api/peers/') && method === 'DELETE') { const id = path.split('/')[3]; peers = peers.filter(p => p.id !== id); forwards = forwards.filter(f => f.target_peer_id !== id); return route.fulfill({ status: 204 }) }
+    if (path === '/api/peers' && method === 'POST') { if (peerCreateError) return textError(peerCreateError, 409); const id = peers.some(p => p.id === 'new-peer') ? `new-peer-${peers.length}` : 'new-peer'; const peer = { ...peers[0], ...body, id, ipv4: '10.77.0.4' }; peers.push(peer); commitConfig(); return reply({ peer, config: '[Interface]\nPrivateKey = fixture-only\nAddress = 10.77.0.4/32' }) }
+    if (path.endsWith('/group')) { const peer = peers.find(p => p.id === path.split('/')[3]); peer.group_id = body.group_id; commitConfig(); return reply(peer) }
+    if (path.startsWith('/api/peers/') && method === 'DELETE') { const id = path.split('/')[3]; peers = peers.filter(p => p.id !== id); forwards = forwards.filter(f => f.target_peer_id !== id); commitConfig(); return route.fulfill({ status: 204 }) }
     if (path === '/api/forwards' && method === 'GET') return reply(forwards)
-    if (path === '/api/forwards' && method === 'POST') { const forward = { id: 'new-forward', ...body }; forwards.push(forward); return reply(forward) }
-    if (path.startsWith('/api/forwards/') && method === 'DELETE') { forwards = forwards.filter(f => f.id !== path.split('/')[3]); return route.fulfill({ status: 204 }) }
+    if (path === '/api/forwards' && method === 'POST') { const forward = { id: 'new-forward', ...body }; forwards.push(forward); commitConfig(); return reply(forward) }
+    if (path.startsWith('/api/forwards/') && method === 'DELETE') { forwards = forwards.filter(f => f.id !== path.split('/')[3]); commitConfig(); return route.fulfill({ status: 204 }) }
     return reply({}, 404)
   })
   const screenshot = async name => { if (screenshots) { await mkdir(screenshots, { recursive: true }); await page.screenshot({ path: resolve(screenshots, `${name}.png`), fullPage: true }) } }
@@ -200,10 +206,10 @@ try {
     // Register before clicking, and match this save's PUT payload, never an old
     // GET or a toast left over from a previous successful save.
     const responses = changed.map(g => page.waitForResponse(r => r.request().method() === 'PUT'
-      && new URL(r.url()).pathname === `/api/groups/${g.id}/acl`
-      && JSON.stringify(sorted(r.request().postDataJSON().allowed_groups)) === JSON.stringify(expected[g.id])))
+      && new URL(r.url()).pathname === '/api/policy'
+      && JSON.stringify(sorted(r.request().postDataJSON().changes.find(change => change.group_id === g.id)?.allowed_groups ?? [])) === JSON.stringify(expected[g.id])))
     const toast = checkToast ? page.getByText('Policy saved', { exact: true }).waitFor() : null
-    const held = expireToast ? changed.map(g => holdNext('PUT', `/api/groups/${g.id}/acl`)) : []
+    const held = expireToast ? [holdNext('PUT', '/api/policy')] : []
     const [_, ...confirmed] = await Promise.all([
       (async () => {
         await page.getByRole('button', { name: 'Save', exact: true }).click()
@@ -220,7 +226,8 @@ try {
     for (const [index, response] of confirmed.entries()) {
       assert.equal(await response.finished(), null, 'ACL response completes without network error')
       assert.equal(response.status(), 200, 'This ACL mutation succeeded')
-      const group = await response.json()
+      const payload = await response.json()
+      const group = payload.groups.find(group => group.id === changed[index].id)
       assert.equal(group.id, changed[index].id)
       assert.deepEqual(sorted(group.allowed_groups), expected[group.id], 'Mutation response confirms intended ACL')
     }
@@ -262,6 +269,7 @@ try {
       ]
       peers = structuredClone(initialPeers); forwards = []
       settings = { subnet: '10.77.0.0/24', endpoint: 'vpn.example.com:51820', persistent_keepalive: 25 }
+      revision = appliedRevision = 0; runtimeReady = true; failStatus = false
       failSave = failReload = partialSave = commitAclThenFail = failSettings = loseSettingsResponse = false
       peerCreateError = ''; acceptDialog = true; configured = true
       mutations.length = 0; reads.length = 0; runtimeErrors.length = 0
@@ -273,37 +281,106 @@ try {
       await page.getByRole('button', { name: 'Create', exact: true }).click()
     }
     const scenarios = {
+      'acl-conflict-revocation': async () => {
+        await navigate('Groups'); await page.getByLabel('Source group').selectOption('engineering')
+        await page.getByLabel('Target group').selectOption('operations'); await page.locator('.policy-link-fields select').nth(2).selectOption('one')
+        await page.getByRole('button', { name: 'Add link', exact: true }).click(); await save({ engineering: ['operations'] })
+        await page.getByLabel('Target group').selectOption('services'); await page.getByRole('button', { name: 'Add link', exact: true }).click()
+        // Another administrator revokes A→B while our draft adds unrelated A→C.
+        groups[0].allowed_groups = []; revision++; appliedRevision = revision
+        const before = mutations.filter(m => m.path === '/api/policy').length
+        await page.getByRole('button', { name: 'Save', exact: true }).click()
+        await page.getByLabel('Policy conflict review').waitFor()
+        await screenshot('policy-conflict-review')
+        assert.ok(await page.getByRole('button', { name: 'Save', exact: true }).isDisabled())
+        assert.deepEqual((await graphAcl()).engineering, ['operations', 'services'], '409 retains complete draft')
+        await page.getByRole('button', { name: 'Reapply my edits for review', exact: true }).click()
+        await poll(async () => JSON.stringify((await graphAcl()).engineering) === JSON.stringify(['services']), 'Rebase preserves unrelated server revocation')
+        assert.equal(mutations.filter(m => m.path === '/api/policy').length, before + 1, 'Review never automatically submits')
+        await save({ engineering: ['services'] })
+        assert.deepEqual(groups[0].allowed_groups, ['services'], 'Explicit subsequent save never regrants revoked access')
+      },
+      'acl-own-crud-revision': async () => {
+        await navigate('Settings'); await page.getByLabel('Endpoint').fill('changed.example.com:51820')
+        await page.getByRole('button', { name: 'Save changes', exact: true }).click()
+        await poll(async () => await page.getByRole('button', { name: 'Save changes', exact: true }).isDisabled(), 'Settings saved')
+        await navigate('Groups'); await node('engineering').click(); await page.getByRole('switch', { name: 'Intra-group access' }).check()
+        await save({ engineering: ['engineering'] })
+        assert.equal(await page.getByLabel('Policy conflict review').count(), 0, 'Own settings change refreshes the policy revision without false conflict')
+      },
+      'acl-conflict-deleted-group': async () => {
+        await navigate('Groups'); await connect('engineering', 'services')
+        groups = groups.filter(group => group.id !== 'services'); revision++; appliedRevision = revision
+        await page.getByRole('button', { name: 'Save', exact: true }).click(); await page.getByLabel('Policy conflict review').waitFor()
+        await page.getByRole('button', { name: 'Reapply my edits for review', exact: true }).click()
+        await poll(async () => await node('services').count() === 0 && await edge().count() === 0, 'Rebase removes deleted endpoints')
+        assert.ok(await page.getByRole('button', { name: 'Save', exact: true }).isDisabled(), 'No dangling policy change can be saved')
+      },
+      'acl-conflict-discard': async () => {
+        await navigate('Groups'); await node('engineering').click(); await page.getByRole('switch', { name: 'Intra-group access' }).check()
+        groups[1].allowed_groups = ['services']; revision++; appliedRevision = revision
+        await page.getByRole('button', { name: 'Save', exact: true }).click(); await page.getByLabel('Policy conflict review').waitFor()
+        await page.getByRole('button', { name: 'Use server policy', exact: true }).click()
+        await poll(async () => await page.getByLabel('Policy conflict review').count() === 0, 'Conflict discarded')
+        await poll(async () => JSON.stringify(await graphAcl()) === JSON.stringify(fixtureAcl()), 'Server policy adopted without draft')
+        assert.ok(await page.getByRole('button', { name: 'Save', exact: true }).isDisabled())
+      },
+      'acl-activation-pending': async () => {
+        await navigate('Groups'); await node('engineering').click(); await page.getByRole('switch', { name: 'Intra-group access' }).check()
+        failSave = true; runtimeReady = false
+        await page.getByRole('button', { name: 'Save', exact: true }).click(); await page.getByRole('button', { name: 'Reload policy', exact: true }).waitFor()
+        assert.ok(await page.getByRole('switch', { name: 'Intra-group access' }).isDisabled(), 'Successful config read cannot unlock unready runtime')
+        runtimeReady = true; revision++; appliedRevision = revision - 1
+        await page.getByRole('button', { name: 'Reload policy', exact: true }).click(); await poll(async () => await page.getByRole('button', { name: 'Reload policy', exact: true }).isEnabled(), 'Reload attempt settled')
+        assert.ok(await page.getByRole('switch', { name: 'Intra-group access' }).isDisabled(), 'Lagging installed revision remains locked')
+        appliedRevision = revision; failSave = false
+        await page.getByRole('button', { name: 'Reload policy', exact: true }).click(); await poll(async () => await page.getByRole('switch', { name: 'Intra-group access' }).isEnabled(), 'Confirmed activation unlocks')
+      },
+      'runtime-polling': async () => {
+        await page.getByText('Runtime ready', { exact: true }).waitFor()
+        await page.clock.pauseAt(new Date())
+        const statusReads = () => reads.filter(path => path === '/api/status').length
+        let before = statusReads()
+        await page.clock.runFor(5001); await poll(() => statusReads() > before, 'Visible page polls status')
+        await page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
+        await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => window.__hidden }); window.__hidden = true; document.dispatchEvent(new Event('visibilitychange')) })
+        before = statusReads(); await page.clock.runFor(60001)
+        assert.equal(statusReads(), before, 'Background page pauses polling')
+        await page.evaluate(() => { window.__hidden = false; document.dispatchEvent(new Event('visibilitychange')) })
+        await poll(() => statusReads() > before, 'Foreground resumes immediately'); await page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
+        failStatus = true; before = statusReads(); await page.clock.runFor(5001)
+        await page.getByText('Status unavailable', { exact: true }).first().waitFor(); assert.equal(statusReads(), before + 1)
+        before = statusReads(); await page.clock.runFor(9999); assert.equal(statusReads(), before, 'First failure backs off to ten seconds')
+        await page.clock.runFor(2); await poll(() => statusReads() > before, 'Backoff retries'); await page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
+        failStatus = false; await page.clock.runFor(20001); await page.getByText('Runtime ready', { exact: true }).waitFor()
+        await page.evaluate(() => { delete document.hidden }); await page.clock.resume()
+      },
       'acl-mid-batch-get': async () => {
         await navigate('Groups'); await node('engineering').click()
         await page.getByRole('switch', { name: 'Intra-group access' }).check(); await save({ engineering: ['engineering'] })
         await page.getByRole('switch', { name: 'Intra-group access' }).uncheck()
         await connect('engineering', 'operations'); await poll(async () => await edge().count() === 1, 'Two-group batch draft exists')
-        const a = holdAclCommit('engineering'), b = holdNext('PUT', '/api/groups/operations/acl')
-        await page.getByRole('button', { name: 'Save', exact: true }).click(); await Promise.all([a.requested, b.requested])
-        assert.deepEqual(groups[0].allowed_groups, ['engineering'], 'A is blocked before commit, not just before response')
-        const old = holdNext('GET', '/api/groups')
+        const commit = holdAclCommit('batch'), ack = holdNext('PUT', '/api/policy')
+        await page.getByRole('button', { name: 'Save', exact: true }).click(); await commit.requested
+        assert.deepEqual(fixtureAcl(), { engineering: ['engineering'], operations: [], services: [] }, 'Whole policy remains old before commit')
+        const old = holdNext('GET', '/api/config')
         await refresh.click(); await old.requested
-        await a.release()
-        assert.deepEqual(groups[0].allowed_groups, ['operations'], 'A confirmed self revoke while B acknowledgement is pending')
-        assert.ok(await page.getByRole('button', { name: 'Saving', exact: true }).isDisabled())
+        await commit.release(); await ack.requested
+        assert.deepEqual(fixtureAcl(), { engineering: ['operations'], operations: ['engineering'], services: [] }, 'Both groups change atomically')
         await old.release(); await refreshSettled(); await flushFrames()
-        await b.release()
-        await poll(async () => await page.getByRole('button', { name: 'Save', exact: true }).isDisabled() && await page.getByRole('button', { name: 'Saving', exact: true }).count() === 0, 'Whole batch settles')
-        const restored = await page.getByRole('switch', { name: 'Intra-group access' }).isChecked()
-        console.log(`EVIDENCE acl-mid-batch-get: after old GET + batch settlement server=${JSON.stringify(fixtureAcl())}, UI=${JSON.stringify(await graphAcl())}`)
-        await connect('engineering', 'services'); await poll(async () => await edge().count() >= 2, 'Unrelated link draft exists')
-        const written = page.waitForResponse(r => r.request().method() === 'PUT' && new URL(r.url()).pathname === '/api/groups/engineering/acl')
-        await page.getByRole('button', { name: 'Save', exact: true }).click(); await (await written).finished()
-        await poll(async () => await page.getByRole('button', { name: 'Save', exact: true }).isDisabled(), 'Follow-up save settles')
-        console.log(`EVIDENCE acl-mid-batch-get: unrelated link save server=${JSON.stringify(fixtureAcl())}`)
-        assert.deepEqual({ restored, regranted: groups[0].allowed_groups.includes('engineering') }, { restored: false, regranted: false }, 'Mid-batch old GET cannot restore revoked UI permission or regrant it in a later write')
+        assert.ok(await page.getByRole('button', { name: 'Saving', exact: true }).isDisabled())
+        await ack.release()
+        await poll(async () => await page.getByRole('button', { name: 'Saving', exact: true }).count() === 0, 'Batch settles')
+        assert.equal(await page.getByRole('switch', { name: 'Intra-group access' }).isChecked(), false)
+        await connect('engineering', 'services'); await save({ engineering: ['operations', 'services'], services: ['engineering'] })
+        assert.ok(!groups[0].allowed_groups.includes('engineering'), 'Following save cannot regrant revoked self-access')
       },
       'acl-navigation': async () => {
         const failures = []
         const check = (value, message) => { if (!value) failures.push(message) }
         await navigate('Groups'); await node('engineering').click()
         await page.getByRole('switch', { name: 'Intra-group access' }).check()
-        const old = holdNext('PUT', '/api/groups/engineering/acl')
+        const old = holdNext('PUT', '/api/policy')
         await page.getByRole('button', { name: 'Save', exact: true }).click(); await old.requested
         assert.deepEqual(groups[0].allowed_groups, ['engineering'], 'Old grant committed, acknowledgement held')
         {
@@ -329,7 +406,7 @@ try {
           }
           await page.getByRole('group', { name: 'New link direction' }).getByRole('button', { name: 'Both ways', exact: true }).click()
           await connect('engineering', 'operations'); await poll(async () => await edge().count() === 1, 'Subsequent link draft exists')
-          const written = page.waitForResponse(r => r.request().method() === 'PUT' && new URL(r.url()).pathname === '/api/groups/engineering/acl')
+          const written = page.waitForResponse(r => r.request().method() === 'PUT' && new URL(r.url()).pathname === '/api/policy')
           await page.getByRole('button', { name: 'Save', exact: true }).click(); await (await written).finished()
           await poll(async () => await page.getByRole('button', { name: 'Save', exact: true }).isDisabled(), 'Follow-up save settles')
           console.log(`EVIDENCE acl-navigation: subsequent A↔B save server=${JSON.stringify(fixtureAcl())}`)
@@ -375,13 +452,13 @@ try {
       'acl-session': async () => {
         await navigate('Groups'); await node('engineering').click()
         await page.getByRole('switch', { name: 'Intra-group access' }).check()
-        const old = holdNext('PUT', '/api/groups/engineering/acl')
+        const old = holdNext('PUT', '/api/policy')
         await page.getByRole('button', { name: 'Save', exact: true }).click(); await old.requested
         await page.getByRole('button', { name: 'Administrator Sign out' }).click()
         await page.getByLabel('Access token').waitFor(); await login(); await refreshSettled()
         await navigate('Groups'); await node('engineering').click()
         await page.getByRole('switch', { name: 'Intra-group access' }).uncheck()
-        const current = holdNext('PUT', '/api/groups/engineering/acl')
+        const current = holdNext('PUT', '/api/policy')
         await page.getByRole('button', { name: 'Save', exact: true }).click(); await current.requested
         await old.release(); await flushFrames()
         assert.ok(await page.getByRole('button', { name: 'Saving', exact: true }).isDisabled(), 'Old-session ACL response cannot unlock the new save')
@@ -588,7 +665,7 @@ try {
   assert.ok(await page.getByRole('switch', { name: 'Intra-group access' }).isChecked())
   // Regression: a refresh started with permission=true must not restore it after a confirmed revoke.
   await refreshSettled()
-  const oldAcl = holdNext('GET', '/api/groups')
+  const oldAcl = holdNext('GET', '/api/config')
   await refresh.click(); await oldAcl.requested
   assert.ok(await refresh.isDisabled(), 'Refresh remains busy while its response is held')
   await page.getByRole('switch', { name: 'Intra-group access' }).uncheck(); await save({ engineering: [] })
@@ -606,27 +683,27 @@ try {
   await page.getByRole('group', { name: 'New link direction' }).getByRole('button', { name: 'Both ways', exact: true }).click()
   await connect('engineering', 'operations'); await poll(async () => await edge().count() === 1, 'Connection after auto layout'); partialSave = true
   await page.getByRole('button', { name: 'Save', exact: true }).click(); await page.getByRole('alert').filter({ hasText: 'Server policy reloaded' }).waitFor()
-  assert.deepEqual(groups[0].allowed_groups, ['engineering', 'operations']); assert.deepEqual(groups[1].allowed_groups, [])
-  assert.match(await edge().getAttribute('aria-label'), /→/); partialSave = false
+  assert.deepEqual(groups[0].allowed_groups, ['engineering']); assert.deepEqual(groups[1].allowed_groups, [])
+  assert.match(await edge().getAttribute('aria-label'), /↔/); partialSave = false
+  await save({ engineering: ['engineering', 'operations'], operations: ['engineering'] })
+  await edge().click(); await page.getByRole('button', { name: 'One way', exact: true }).last().click(); await save({ operations: [] })
   // Every parallel PUT commits, but runtime acknowledgement fails for all of them.
   // Recovery must replace the draft without allowing an earlier full load to win.
-  const releaseUnconfirmedAclRead = await staleRefresh('/api/groups')
+  const releaseUnconfirmedAclRead = await staleRefresh('/api/config')
   await node('engineering').click(); await page.getByRole('switch', { name: 'Intra-group access' }).uncheck()
   await node('operations').click(); await page.getByRole('switch', { name: 'Intra-group access' }).check()
-  const failedAclWrites = ['engineering', 'operations'].map(id => holdNext('PUT', `/api/groups/${id}/acl`))
-  const recoveredAcl = holdNext('GET', '/api/groups')
-  const failedAclResponses = ['engineering', 'operations'].map(id => page.waitForResponse(r => r.request().method() === 'PUT' && new URL(r.url()).pathname === `/api/groups/${id}/acl`))
+  const failedAclWrites = [holdNext('PUT', '/api/policy')]
+  const recoveredAcl = holdNext('GET', '/api/config')
+  const failedAclResponses = [page.waitForResponse(r => r.request().method() === 'PUT' && new URL(r.url()).pathname === '/api/policy')]
   commitAclThenFail = true
   await page.getByRole('button', { name: 'Save', exact: true }).click()
   await Promise.all(failedAclWrites.map(h => h.requested))
   const committedAcl = { engineering: ['operations'], operations: ['operations'], services: [] }
   assert.deepEqual(fixtureAcl(), committedAcl, 'Both writes committed before their 503 responses')
-  await failedAclWrites[0].release(); await flushFrames()
-  assert.ok(await page.getByRole('button', { name: 'Saving', exact: true }).isDisabled(), 'Partial settlement keeps the parallel save locked')
-  await failedAclWrites[1].release(); await recoveredAcl.requested
+  await failedAclWrites[0].release(); await recoveredAcl.requested
   for (const response of await Promise.all(failedAclResponses)) assert.equal(response.status(), 503, 'Every committed ACL PUT returns 503')
   commitAclThenFail = false
-  await recoveredAcl.release(); await page.getByRole('alert').filter({ hasText: 'Server policy reloaded' }).waitFor()
+  await recoveredAcl.release(); await page.getByRole('alert').filter({ hasText: 'active server policy matches' }).waitFor()
   assert.deepEqual(await graphAcl(), committedAcl, 'Recovery GET displays the committed ACL after all PUTs failed')
   await releaseUnconfirmedAclRead(); await flushFrames()
   assert.deepEqual(await graphAcl(), committedAcl, 'Old GET cannot overwrite the recovered policy')
@@ -635,23 +712,23 @@ try {
   await node('engineering').click(); await page.getByRole('switch', { name: 'Intra-group access' }).check()
   await node('operations').click(); await page.getByRole('switch', { name: 'Intra-group access' }).uncheck()
   await save({ engineering: ['engineering', 'operations'], operations: [] })
-  console.log('PASS: all parallel ACL PUTs commit then return 503; recovery GET wins over delayed pre-write GET')
+  console.log('PASS: one atomic ACL batch commits then returns 503; recovery GET wins over delayed pre-write GET')
   // Unconfirmed saves lock editing until a successful reload.
   await connect('operations', 'engineering'); failSave = true; failReload = true
   await page.getByRole('button', { name: 'Save', exact: true }).click(); await page.getByRole('button', { name: 'Reload policy' }).waitFor()
   assert.ok(await page.getByRole('button', { name: 'New group', exact: true }).isDisabled())
   // A failed full read begun after write settlement is also superseded by recovery.
-  const releaseFailedRecoveryRead = await staleRefresh('/api/groups')
+  const releaseFailedRecoveryRead = await staleRefresh('/api/config')
   failSave = false; failReload = false
   await page.getByRole('button', { name: 'Reload policy' }).click(); await poll(async () => await page.getByRole('alert').count() === 0, 'Reload clears uncertainty')
   await releaseFailedRecoveryRead(); await flushFrames()
   assert.equal(await page.getByRole('alert').count(), 0, 'Successful policy recovery suppresses the older failed full load')
   assert.match(await edge().getAttribute('aria-label'), /→/)
   // Group creation and deletion use the existing API contract.
-  const releaseGroupCreate = await staleRefresh('/api/groups')
+  const releaseGroupCreate = await staleRefresh('/api/config')
   await page.getByRole('button', { name: 'New group', exact: true }).click(); assert.ok(await page.getByRole('dialog').getByLabel('Name', { exact: true }).evaluate(el => document.activeElement === el), 'New group focuses its name'); await page.getByRole('dialog').getByLabel('Name', { exact: true }).fill('Research'); await page.getByRole('button', { name: 'Create', exact: true }).click(); await node('new-group').waitFor()
   await releaseGroupCreate(); assert.equal(await node('new-group').count(), 1, 'Old groups GET cannot drop a confirmed creation')
-  const releaseGroupDelete = await staleRefresh('/api/groups')
+  const releaseGroupDelete = await staleRefresh('/api/config')
   await node('new-group').click(); await page.getByRole('button', { name: 'Delete group', exact: true }).click(); await poll(async () => await node('new-group').count() === 0, 'Group deleted')
   await releaseGroupDelete(); assert.equal(await node('new-group').count(), 0, 'Old groups GET cannot resurrect a deleted group')
   await english(); await screenshot('groups-connected')
@@ -739,10 +816,10 @@ try {
   // Settings errors use the backend's plain-text response contract too.
   failSettings = true; await page.getByLabel('Endpoint', { exact: true }).fill('vpn3.example.com:51820'); await page.getByRole('button', { name: 'Save changes', exact: true }).click(); await page.getByRole('alert').filter({ hasText: 'setup required' }).waitFor(); failSettings = false
   // The previous session's refresh must not clear the new session's busy state.
-  const oldSessionLoad = holdNext('GET', '/api/groups')
+  const oldSessionLoad = holdNext('GET', '/api/config')
   await refreshSettled(); await refresh.click(); await oldSessionLoad.requested
   await page.getByRole('button', { name: 'Administrator Sign out' }).click(); await page.getByLabel('Access token').waitFor()
-  const newSessionLoad = holdNext('GET', '/api/groups')
+  const newSessionLoad = holdNext('GET', '/api/config')
   await login(); await newSessionLoad.requested
   await oldSessionLoad.release(); await flushFrames()
   assert.ok(await refresh.isDisabled(), 'An old session response cannot clear the new refresh spinner')
@@ -825,7 +902,7 @@ try {
   assert.deepEqual(runtimeErrors, [], 'No runtime exceptions')
   assert.equal(heldResponses.size, 0, 'All deterministic response barriers were exercised')
   assert.ok(mutations.every(m => m.path.startsWith('/api/')), 'Existing API paths only')
-  console.log('PASS: group details closing, compact peer rows, graph direction, drag, persistence, deletion, self-access, partial saves, recovery, CRUD, English, mobile, setup, session reset, and stale-response regressions')
+  console.log('PASS: group details closing, compact peer rows, graph direction, drag, persistence, deletion, self-access, atomic rejection, recovery, CRUD, English, mobile, setup, session reset, and stale-response regressions')
   }
 } catch (error) {
   if (page && screenshots) {

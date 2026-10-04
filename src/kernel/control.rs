@@ -5,6 +5,8 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 const RELOAD_SEND_TIMEOUT: Duration = Duration::from_secs(3);
 const RELOAD_ACK_TIMEOUT: Duration = Duration::from_secs(3);
 
+pub(super) type SharedStats = Arc<RwLock<Arc<HashMap<String, PeerRuntimeStats>>>>;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PeerRuntimeStats {
     pub rx_bytes: u64,
@@ -24,25 +26,35 @@ pub enum ReloadError {
 }
 
 pub(super) struct ReloadCommand {
-    pub(super) ack: oneshot::Sender<Result<(), ReloadError>>,
+    pub(super) minimum_revision: i64,
+    pub(super) ack: oneshot::Sender<Result<i64, ReloadError>>,
 }
 
 pub(crate) struct ReloadPermit<'a> {
     permit: mpsc::Permit<'a, ReloadCommand>,
 }
 
-pub(crate) struct ReloadAck(oneshot::Receiver<Result<(), ReloadError>>);
+pub(crate) struct ReloadAck(oneshot::Receiver<Result<i64, ReloadError>>);
 
 impl ReloadPermit<'_> {
     pub(crate) fn send(self) -> ReloadAck {
+        self.send_at(0)
+    }
+    pub(crate) fn send_at(self, minimum_revision: i64) -> ReloadAck {
         let (ack, wait) = oneshot::channel();
-        self.permit.send(ReloadCommand { ack });
+        self.permit.send(ReloadCommand {
+            minimum_revision,
+            ack,
+        });
         ReloadAck(wait)
     }
 }
 
 impl ReloadAck {
     pub(crate) async fn wait(self) -> Result<(), ReloadError> {
+        self.wait_revision().await.map(|_| ())
+    }
+    pub(crate) async fn wait_revision(self) -> Result<i64, ReloadError> {
         match tokio::time::timeout(RELOAD_ACK_TIMEOUT, self.0).await {
             Err(_) => Err(ReloadError::Timeout),
             Ok(Err(_)) => Err(ReloadError::Stopped),
@@ -55,12 +67,22 @@ impl ReloadAck {
 pub struct KernelHandle {
     pub(super) commands: mpsc::Sender<ReloadCommand>,
     pub(super) readiness: Arc<std::sync::atomic::AtomicBool>,
-    pub(super) stats: Arc<RwLock<HashMap<String, PeerRuntimeStats>>>,
+    pub(super) stats: SharedStats,
+    pub(super) status: Arc<RwLock<ActivationStatus>>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ActivationStatus {
+    pub applied_revision: Option<i64>,
+    pub last_error: Option<String>,
 }
 
 impl KernelHandle {
     pub fn is_ready(&self) -> bool {
         self.readiness.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub async fn activation(&self) -> ActivationStatus {
+        self.status.read().await.clone()
     }
 
     pub(crate) async fn reserve_reload(&self) -> Result<ReloadPermit<'_>, ReloadError> {
@@ -83,7 +105,12 @@ impl KernelHandle {
     }
 
     pub async fn stats(&self) -> Arc<HashMap<String, PeerRuntimeStats>> {
-        Arc::new(self.stats.read().await.clone())
+        let stats = self.stats.read().await.clone();
+        if self.is_ready() {
+            stats
+        } else {
+            Arc::default()
+        }
     }
 }
 
@@ -96,7 +123,7 @@ pub(crate) struct TestReloadCommand(ReloadCommand);
 #[cfg(test)]
 impl TestReloadCommand {
     pub(crate) fn respond(self, result: Result<(), ReloadError>) {
-        let _ = self.0.ack.send(result);
+        let _ = self.0.ack.send(result.map(|_| self.0.minimum_revision));
     }
 }
 
@@ -114,7 +141,8 @@ pub(crate) fn test_harness() -> (KernelHandle, TestReceiver) {
         KernelHandle {
             commands,
             readiness: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            stats: Arc::new(RwLock::new(HashMap::new())),
+            stats: Arc::new(RwLock::new(Arc::default())),
+            status: Arc::new(RwLock::new(ActivationStatus::default())),
         },
         TestReceiver(receiver),
     )

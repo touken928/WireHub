@@ -18,6 +18,7 @@ const WAIT: Duration = Duration::from_secs(5);
 
 fn snapshot(id: &str, bytes: u64) -> CompiledSnapshot {
     let raw = NetworkSnapshot {
+        revision: 0,
         settings: Some(NetworkSettings {
             subnet: "10.9.0.0/24".into(),
             endpoint: "127.0.0.1:51820".into(),
@@ -246,7 +247,10 @@ async fn closed_command_channel_returns_stopped_and_clears_readiness() {
 
 #[tokio::test]
 async fn reserved_reload_can_be_sent_synchronously_at_cooperative_budget_boundary() {
-    use std::{future::{poll_fn, Future}, task::Poll};
+    use std::{
+        future::{poll_fn, Future},
+        task::Poll,
+    };
 
     let (handle, mut receiver) = super::test_harness();
     let permit = handle.reserve_reload().await.unwrap();
@@ -273,4 +277,67 @@ fn public_control_errors_implement_error_send_sync_static() {
     assert_error_traits::<SnapshotLoadError>();
     assert_error_traits::<StartError>();
     assert_error_traits::<RunError>();
+}
+
+#[tokio::test]
+async fn activation_ack_reports_installed_revision_and_rejects_stale_snapshot() {
+    let revision = Arc::new(AtomicUsize::new(1));
+    let current = revision.clone();
+    let (kernel, handle) = kernel(move || {
+        let revision = current.load(Ordering::Acquire) as i64;
+        let mut compiled = snapshot("peer", 7);
+        compiled.revision = revision;
+        Ok(compiled)
+    })
+    .await;
+    assert_eq!(handle.activation().await.applied_revision, Some(1));
+    let task = tokio::spawn(kernel.run());
+    revision.store(3, Ordering::Release);
+    assert_eq!(
+        handle
+            .reserve_reload()
+            .await
+            .unwrap()
+            .send_at(2)
+            .wait_revision()
+            .await
+            .unwrap(),
+        3
+    );
+    assert_eq!(handle.activation().await.applied_revision, Some(3));
+    revision.store(2, Ordering::Release);
+    assert_eq!(
+        handle
+            .reserve_reload()
+            .await
+            .unwrap()
+            .send_at(3)
+            .wait_revision()
+            .await,
+        Err(ReloadError::Rejected)
+    );
+    assert!(!handle.is_ready());
+    assert_eq!(
+        handle.activation().await.last_error.as_deref(),
+        Some("snapshot_rejected")
+    );
+    // A retry may not make an older snapshot ready after the rejected command.
+    time::sleep(Duration::from_millis(1200)).await;
+    assert!(!handle.is_ready());
+    revision.store(4, Ordering::Release);
+    assert_eq!(
+        handle
+            .reserve_reload()
+            .await
+            .unwrap()
+            .send_at(3)
+            .wait_revision()
+            .await
+            .unwrap(),
+        4
+    );
+    assert!(handle.is_ready());
+    assert!(handle.activation().await.last_error.is_none());
+    drop(handle);
+    assert!(matches!(task.await.unwrap(), Err(RunError::Stopped)));
 }

@@ -1,0 +1,51 @@
+name: Extended RC endurance
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Encrypted endurance duration
+        required: true
+        default: '1800'
+        type: choice
+        options:
+          - '1800'
+          - '7200'
+
+permissions:
+  contents: read
+
+jobs:
+  endurance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: tests/client/go.sum
+      - name: Build release candidate
+        env:
+          WIREHUB_BUILD_ID: ${{ github.sha }}
+        run: |
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend build
+          cargo build --release --locked
+          python3 scripts/check-release.py --binary target/release/wirehub --build-id "$WIREHUB_BUILD_ID"
+      - name: Run isolated encrypted endurance
+        env:
+          DURATION: ${{ inputs.seconds }}
+        run: python3 tests/soak.py --binary target/release/wirehub --seconds "$DURATION" --output "$RUNNER_TEMP/rc-endurance.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extended-rc-endurance
+          path: ${{ runner.temp }}/rc-endurance.json
+          if-no-files-found: error

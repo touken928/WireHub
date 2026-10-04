@@ -1,0 +1,14 @@
+.git
+artifacts
+.ruff_cache
+.codex
+.agents
+.aws
+target
+frontend/node_modules
+frontend/dist
+*.sqlite*
+*.db
+*.key
+*.log
+.env*

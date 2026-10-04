@@ -33,6 +33,16 @@ fn test_state(configured: bool) -> (AppState, TestReceiver, HeaderMap) {
     headers.insert("authorization", "Bearer secret".parse().unwrap());
     (state, reload_rx, headers)
 }
+async fn legacy_acl(
+    state: State<AppState>,
+    mut headers: HeaderMap,
+    path: Path<String>,
+    acl: Json<SetAcl>,
+) -> impl IntoResponse {
+    let revision = state.0.store.revision().unwrap();
+    headers.insert(header::IF_MATCH, format!("\"{revision}\"").parse().unwrap());
+    super::set_acl(state, headers, path, acl).await
+}
 async fn response_text(response: axum::response::Response) -> (StatusCode, String) {
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -86,6 +96,7 @@ async fn readiness_is_separate_from_compatible_liveness_health() {
     let (kernel, handle) = crate::kernel::Kernel::initialize(socket, [0; 32], || {
         Ok(
             crate::kernel::CompiledSnapshot::try_from(crate::model::NetworkSnapshot {
+                revision: 0,
                 settings: None,
                 groups: vec![],
                 peers: vec![],
@@ -239,6 +250,36 @@ async fn failed_setup_activation_reports_persisted_settings() {
     );
 }
 #[tokio::test]
+async fn inventory_activation_errors_distinguish_committed_create_and_delete() {
+    let (state, mut receiver, headers) = test_state(true);
+    let before = state.store.revision().unwrap();
+    let create = tokio::spawn(create_group(
+        State(state.clone()),
+        headers.clone(),
+        Json(NewGroup {
+            name: "saved".into(),
+        }),
+    ));
+    let command = receiver.recv().await.unwrap();
+    let saved = state.store.groups().unwrap().pop().unwrap();
+    assert_eq!(state.store.revision().unwrap(), before + 1);
+    command.respond(Err(ReloadError::Rejected));
+    let (status, body) = response_text(create.await.unwrap().into_response()).await;
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error["code"], "activation_unconfirmed");
+    assert_eq!(error["persisted_revision"], before + 1);
+    let delete = tokio::spawn(delete_group(State(state.clone()), headers, Path(saved.id)));
+    let command = receiver.recv().await.unwrap();
+    assert!(state.store.groups().unwrap().is_empty());
+    command.respond(Err(ReloadError::Rejected));
+    let (status, body) = response_text(delete.await.unwrap().into_response()).await;
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error["code"], "activation_unconfirmed");
+    assert_eq!(error["persisted_revision"], before + 2);
+}
+#[tokio::test]
 async fn failed_peer_activation_removes_peer_and_waits_for_cleanup_reload() {
     let (state, mut reload_rx, headers) = test_state(true);
     state
@@ -380,7 +421,7 @@ async fn endpoint_validation_status_matrix_does_not_queue_reload_for_failures() 
     assert!(body.contains("forward conflict"));
     assert_no_reload(&mut rx).await;
     let (status, body) = response_text(
-        set_acl(
+        legacy_acl(
             State(s.clone()),
             h.clone(),
             Path("absent".into()),
@@ -517,7 +558,10 @@ async fn concurrent_peer_deletion_during_activation_never_returns_unusable_confi
 
 #[tokio::test]
 async fn cancel_acl_update_at_cooperative_reservation_leaves_database_unchanged() {
-    use std::{future::{poll_fn, Future}, task::Poll};
+    use std::{
+        future::{poll_fn, Future},
+        task::Poll,
+    };
 
     let (state, mut rx, headers) = test_state(true);
     for id in ["source", "allowed"] {
@@ -541,7 +585,7 @@ async fn cancel_acl_update_at_cooperative_reservation_leaves_database_unchanged(
     })
     .await;
 
-    let mut request = Box::pin(set_acl(
+    let mut request = Box::pin(legacy_acl(
         State(state.clone()),
         headers,
         Path("source".into()),
@@ -549,20 +593,16 @@ async fn cancel_acl_update_at_cooperative_reservation_leaves_database_unchanged(
             allowed_groups: vec!["allowed".into()],
         }),
     ));
-    let suspended_before_completion = poll_fn(|cx| {
-        Poll::Ready(request.as_mut().poll(cx).is_pending())
-    })
-    .await;
+    let suspended_before_completion =
+        poll_fn(|cx| Poll::Ready(request.as_mut().poll(cx).is_pending())).await;
     drop(request);
 
-    assert!(suspended_before_completion, "handler unexpectedly completed");
+    assert!(
+        suspended_before_completion,
+        "handler unexpectedly completed"
+    );
     assert_eq!(
-        state
-            .store
-            .group("source")
-            .unwrap()
-            .unwrap()
-            .allowed_groups,
+        state.store.group("source").unwrap().unwrap().allowed_groups,
         Vec::<String>::new(),
         "cancelled request must not commit before obtaining a reload permit"
     );
@@ -587,7 +627,7 @@ async fn cancel_acl_update_after_sync_send_keeps_reload_command_queued() {
             })
             .unwrap();
     }
-    let task = tokio::spawn(set_acl(
+    let task = tokio::spawn(legacy_acl(
         State(state.clone()),
         headers,
         Path("source".into()),
@@ -600,12 +640,7 @@ async fn cancel_acl_update_after_sync_send_keeps_reload_command_queued() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        state
-            .store
-            .group("source")
-            .unwrap()
-            .unwrap()
-            .allowed_groups,
+        state.store.group("source").unwrap().unwrap().allowed_groups,
         vec!["other"]
     );
     task.abort();
@@ -629,16 +664,18 @@ async fn no_op_and_database_error_release_reserved_reload_capacity() {
             })
             .unwrap();
     }
-    let missing = set_acl(
+    let missing = legacy_acl(
         State(state.clone()),
         headers.clone(),
         Path("missing".into()),
-        Json(SetAcl { allowed_groups: vec![] }),
+        Json(SetAcl {
+            allowed_groups: vec![],
+        }),
     )
     .await
     .into_response();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-    let invalid = set_acl(
+    let invalid = legacy_acl(
         State(state.clone()),
         headers.clone(),
         Path("source".into()),
@@ -670,7 +707,7 @@ async fn no_op_and_database_error_release_reserved_reload_capacity() {
     );
     drop(permits);
 
-    let task = tokio::spawn(set_acl(
+    let task = tokio::spawn(legacy_acl(
         State(state),
         headers,
         Path("source".into()),
@@ -699,7 +736,7 @@ async fn full_reload_queue_rejects_acl_and_setup_before_database_mutation() {
     }
 
     let (status, _) = response_text(
-        set_acl(
+        legacy_acl(
             State(state.clone()),
             headers.clone(),
             Path("source".into()),
@@ -792,29 +829,345 @@ async fn full_reload_queue_rejects_each_mutation_family_before_writing() {
         drop(state.kernel.reserve_reload().await.unwrap().send());
     }
 
-    let (create_group_status, delete_group_status, acl_status, create_forward_status,
-        delete_forward_status, create_peer_status, delete_peer_status, move_peer_status) = tokio::join!(
-        async { create_group(State(state.clone()), headers.clone(), Json(NewGroup { name: "new".into() })).await.into_response().status() },
-        async { delete_group(State(state.clone()), headers.clone(), Path("other".into())).await.into_response().status() },
-        async { set_acl(State(state.clone()), headers.clone(), Path("g".into()), Json(SetAcl { allowed_groups: vec!["other".into()] })).await.into_response().status() },
-        async { create_forward(State(state.clone()), headers.clone(), Json(NewForward { name: "new".into(), protocol: "tcp".into(), target_peer_id: "p".into(), target_port: 81, allowed_group_ids: vec!["g".into()] })).await.into_response().status() },
-        async { delete_forward(State(state.clone()), headers.clone(), Path("f".into())).await.into_response().status() },
-        async { create_peer(State(state.clone()), headers.clone(), Json(NewPeer { name: "new".into(), group_id: "g".into() })).await.into_response().status() },
-        async { delete_peer(State(state.clone()), headers.clone(), Path("p".into())).await.into_response().status() },
-        async { move_peer(State(state.clone()), headers.clone(), Path("p".into()), Json(MovePeer { group_id: "other".into() })).await.into_response().status() },
+    let (
+        create_group_status,
+        delete_group_status,
+        acl_status,
+        create_forward_status,
+        delete_forward_status,
+        create_peer_status,
+        delete_peer_status,
+        move_peer_status,
+    ) = tokio::join!(
+        async {
+            create_group(
+                State(state.clone()),
+                headers.clone(),
+                Json(NewGroup { name: "new".into() }),
+            )
+            .await
+            .into_response()
+            .status()
+        },
+        async {
+            delete_group(State(state.clone()), headers.clone(), Path("other".into()))
+                .await
+                .into_response()
+                .status()
+        },
+        async {
+            legacy_acl(
+                State(state.clone()),
+                headers.clone(),
+                Path("g".into()),
+                Json(SetAcl {
+                    allowed_groups: vec!["other".into()],
+                }),
+            )
+            .await
+            .into_response()
+            .status()
+        },
+        async {
+            create_forward(
+                State(state.clone()),
+                headers.clone(),
+                Json(NewForward {
+                    name: "new".into(),
+                    protocol: "tcp".into(),
+                    target_peer_id: "p".into(),
+                    target_port: 81,
+                    allowed_group_ids: vec!["g".into()],
+                }),
+            )
+            .await
+            .into_response()
+            .status()
+        },
+        async {
+            delete_forward(State(state.clone()), headers.clone(), Path("f".into()))
+                .await
+                .into_response()
+                .status()
+        },
+        async {
+            create_peer(
+                State(state.clone()),
+                headers.clone(),
+                Json(NewPeer {
+                    name: "new".into(),
+                    group_id: "g".into(),
+                }),
+            )
+            .await
+            .into_response()
+            .status()
+        },
+        async {
+            delete_peer(State(state.clone()), headers.clone(), Path("p".into()))
+                .await
+                .into_response()
+                .status()
+        },
+        async {
+            move_peer(
+                State(state.clone()),
+                headers.clone(),
+                Path("p".into()),
+                Json(MovePeer {
+                    group_id: "other".into(),
+                }),
+            )
+            .await
+            .into_response()
+            .status()
+        },
     );
     assert_eq!(
-        [create_group_status, delete_group_status, acl_status, create_forward_status,
-            delete_forward_status, create_peer_status, delete_peer_status, move_peer_status],
+        [
+            create_group_status,
+            delete_group_status,
+            acl_status,
+            create_forward_status,
+            delete_forward_status,
+            create_peer_status,
+            delete_peer_status,
+            move_peer_status
+        ],
         [StatusCode::SERVICE_UNAVAILABLE; 8]
     );
     let after = state.store.runtime_snapshot().unwrap();
-    assert_eq!(serde_json::to_value(after.settings).unwrap(), serde_json::to_value(before.settings).unwrap());
-    assert_eq!(serde_json::to_value(after.groups).unwrap(), serde_json::to_value(before.groups).unwrap());
-    assert_eq!(serde_json::to_value(after.peers).unwrap(), serde_json::to_value(before.peers).unwrap());
-    assert_eq!(serde_json::to_value(after.forwards).unwrap(), serde_json::to_value(before.forwards).unwrap());
+    assert_eq!(
+        serde_json::to_value(after.settings).unwrap(),
+        serde_json::to_value(before.settings).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(after.groups).unwrap(),
+        serde_json::to_value(before.groups).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(after.peers).unwrap(),
+        serde_json::to_value(before.peers).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(after.forwards).unwrap(),
+        serde_json::to_value(before.forwards).unwrap()
+    );
     for _ in 0..16 {
         assert!(rx.recv().await.is_some());
+    }
+    assert_no_reload(&mut rx).await;
+}
+
+fn policy_fixture() -> (AppState, TestReceiver, HeaderMap) {
+    let (state, rx, headers) = test_state(true);
+    for id in ["a", "b"] {
+        state
+            .store
+            .add_group(&Group {
+                id: id.into(),
+                name: id.into(),
+                allowed_groups: vec![],
+            })
+            .unwrap();
+    }
+    (state, rx, headers)
+}
+fn batch_request(revision: i64) -> PolicyRequest {
+    PolicyRequest {
+        expected_revision: revision,
+        changes: vec![
+            PolicyChange {
+                group_id: "a".into(),
+                allowed_groups: vec!["b".into()],
+            },
+            PolicyChange {
+                group_id: "b".into(),
+                allowed_groups: vec!["a".into()],
+            },
+        ],
+    }
+}
+
+#[tokio::test]
+async fn batch_policy_returns_one_revision_after_one_activation() {
+    let (state, mut rx, headers) = policy_fixture();
+    let before = state.store.revision().unwrap();
+    let task = tokio::spawn(put_policy(
+        State(state.clone()),
+        headers,
+        Json(batch_request(before)),
+    ));
+    let command = rx.recv().await.unwrap();
+    assert_eq!(state.store.revision().unwrap(), before + 1);
+    command.respond(Ok(()));
+    let (status, body) = response_text(task.await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let result: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(result["revision"], before + 1);
+    assert_eq!(result["applied_revision"], before + 1);
+    assert_no_reload(&mut rx).await;
+}
+
+#[tokio::test]
+async fn batch_policy_conflicts_and_invalid_references_never_queue_activation() {
+    let (state, mut rx, headers) = policy_fixture();
+    let revision = state.store.revision().unwrap();
+    let (status, body) = response_text(
+        put_policy(
+            State(state.clone()),
+            headers.clone(),
+            Json(batch_request(revision - 1)),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body.contains("revision_conflict"));
+    let mut request = batch_request(revision);
+    request.changes[1].allowed_groups = vec!["missing".into()];
+    let (status, _) =
+        response_text(put_policy(State(state.clone()), headers, Json(request)).await).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(state.store.revision().unwrap(), revision);
+    assert!(state
+        .store
+        .group("a")
+        .unwrap()
+        .unwrap()
+        .allowed_groups
+        .is_empty());
+    assert_no_reload(&mut rx).await;
+}
+
+#[tokio::test]
+async fn legacy_acl_requires_version_and_cannot_bypass_conflicts() {
+    let (state, mut rx, mut headers) = policy_fixture();
+    let request = || {
+        Json(SetAcl {
+            allowed_groups: vec!["b".into()],
+        })
+    };
+    let (status, _) = response_text(
+        super::set_acl(
+            State(state.clone()),
+            headers.clone(),
+            Path("a".into()),
+            request(),
+        )
+        .await
+        .into_response(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED);
+    headers.insert(header::IF_MATCH, "\"0\"".parse().unwrap());
+    let (status, body) = response_text(
+        super::set_acl(State(state.clone()), headers, Path("a".into()), request())
+            .await
+            .into_response(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body.contains("revision_conflict"));
+    assert!(state
+        .store
+        .group("a")
+        .unwrap()
+        .unwrap()
+        .allowed_groups
+        .is_empty());
+    assert_no_reload(&mut rx).await;
+}
+
+#[tokio::test]
+async fn batch_activation_failure_reports_committed_revision() {
+    let (state, mut rx, headers) = policy_fixture();
+    let before = state.store.revision().unwrap();
+    let task = tokio::spawn(put_policy(
+        State(state.clone()),
+        headers,
+        Json(batch_request(before)),
+    ));
+    rx.recv().await.unwrap().respond(Err(ReloadError::Rejected));
+    let (status, body) = response_text(task.await.unwrap()).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let result: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(result["code"], "activation_unconfirmed");
+    assert_eq!(result["persisted_revision"], before + 1);
+    assert_eq!(
+        state.store.group("a").unwrap().unwrap().allowed_groups,
+        vec!["b"]
+    );
+}
+
+#[tokio::test]
+async fn cancelled_batch_keeps_committed_activation_command() {
+    let (state, mut rx, headers) = policy_fixture();
+    let before = state.store.revision().unwrap();
+    let task = tokio::spawn(put_policy(
+        State(state.clone()),
+        headers,
+        Json(batch_request(before)),
+    ));
+    let command = rx.recv().await.unwrap();
+    task.abort();
+    let _ = task.await;
+    assert_eq!(state.store.revision().unwrap(), before + 1);
+    assert_eq!(
+        state.store.group("a").unwrap().unwrap().allowed_groups,
+        vec!["b"]
+    );
+    command.respond(Ok(()));
+    assert_no_reload(&mut rx).await;
+}
+
+#[tokio::test]
+async fn configuration_and_runtime_status_are_authenticated_and_noncacheable() {
+    let (state, _, headers) = policy_fixture();
+    assert_eq!(
+        get_config(State(state.clone()), HeaderMap::new())
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        get_status(State(state.clone()), HeaderMap::new())
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = get_config(State(state.clone()), headers.clone()).await;
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let (_, body) = response_text(response).await;
+    let config: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(config["revision"], state.store.revision().unwrap());
+    assert_eq!(config["groups"].as_array().unwrap().len(), 2);
+    let response = get_status(State(state), headers).await;
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let (_, body) = response_text(response).await;
+    let status: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status["ready"], false);
+    assert!(status["applied_revision"].is_null());
+}
+
+#[tokio::test]
+async fn full_queue_rejects_batch_before_any_database_change() {
+    let (state, mut rx, headers) = policy_fixture();
+    let revision = state.store.revision().unwrap();
+    for _ in 0..16 {
+        drop(state.kernel.reserve_reload().await.unwrap().send());
+    }
+    let response = put_policy(State(state.clone()), headers, Json(batch_request(revision))).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(state.store.revision().unwrap(), revision);
+    assert!(state
+        .store
+        .groups()
+        .unwrap()
+        .iter()
+        .all(|g| g.allowed_groups.is_empty()));
+    for _ in 0..16 {
+        rx.recv().await.unwrap().respond(Ok(()));
     }
     assert_no_reload(&mut rx).await;
 }

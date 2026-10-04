@@ -6,7 +6,7 @@ import {
 } from 'lucide-react'
 import GroupsPage from './components/groups/GroupsPage'
 import '@xyflow/react/dist/style.css'
-import { ApiError, client, forwardsApi, rememberToken, setupApi, type Forward, type NetworkSettings, type SetupStatus } from './api/client'
+import { ApiError, client, configApi, forwardsApi, rememberToken, setupApi, type Configuration, type RuntimeStatus, type Forward, type NetworkSettings, type SetupStatus } from './api/client'
 import type { components } from './api/schema'
 
 type Peer = components['schemas']['Peer']
@@ -32,7 +32,15 @@ export default function App() {
   const [token, setToken] = useState('')
   const [connected, setConnected] = useState(false)
   const [page, setPage] = useState<Page>('overview')
-  const [policyDirty, setPolicyDirty] = useState(false)
+  const [policyDirty, updatePolicyDirty] = useState(false)
+  const policyDirtyRef = useRef(false)
+  const setPolicyDirty = useCallback((value: boolean) => { policyDirtyRef.current = value; updatePolicyDirty(value) }, [])
+  const configRevisionRef = useRef<number | null>(null)
+  const revisionNeedsRefreshRef = useRef(false)
+  const [policyConflict, setPolicyConflict] = useState<Configuration | null>(null)
+  const [runtime, setRuntime] = useState<RuntimeStatus | null>(null)
+  const [runtimeError, setRuntimeError] = useState('')
+  const [sampledAt, setSampledAt] = useState<Date | null>(null)
   const navigate = (next: Page) => { if (next !== page && policyDirty && !confirm('Discard unsaved policy changes?')) return; setPage(next); setMobileNav(false) }
   const [peers, setPeers] = useState<Peer[]>([])
   const [groups, setGroups] = useState<Group[]>([])
@@ -69,6 +77,7 @@ export default function App() {
   const mutationEpochRef = useRef(0)
   const loadRef = useRef(0)
   const invalidateLoads = () => { ++mutationEpochRef.current }
+  const configurationChanged = () => { invalidateLoads(); revisionNeedsRefreshRef.current = true }
   const beginPeerMutation = (id: string) => {
     if (pendingPeersRef.current.has(id)) return false
     pendingPeersRef.current.add(id); setPendingPeers(new Set(pendingPeersRef.current))
@@ -88,14 +97,14 @@ export default function App() {
     try {
       const settingsPending = settingsPendingRef.current
       const policyPending = policyPendingRef.current
-      const [p, g, status] = await Promise.all([client.GET('/api/peers'), client.GET('/api/groups'), setupApi.get()])
+      const [p, config, status] = await Promise.all([client.GET('/api/peers'), configApi.get(), setupApi.get()])
       if (!isCurrent()) return
-      if (p.error || g.error) throw new Error('Unable to load data. Check your access token.')
+      if (p.error) throw new Error('Unable to load data. Check your access token.')
       setPeers(p.data ?? []); setUpdatedAt(new Date())
       // A read captured during a batch can still contain an earlier group's
       // pre-commit ACL after that group's PUT succeeds. Only the save/recovery
       // owner may publish policy until the whole batch has settled.
-      if (!policyPending && !policyPendingRef.current) setGroups(g.data ?? [])
+      if (!policyPending && !policyPendingRef.current && !policyDirtyRef.current) { setGroups(config.groups); configRevisionRef.current = config.revision; revisionNeedsRefreshRef.current = false }
       if (!settingsPending && !settingsPendingRef.current) { setSetup(status); setSettingsError('') }
       try { const list = await forwardsApi.list(); if (isCurrent()) { setForwards(list); setForwardsError('') } }
       catch (e) { if (isCurrent()) setForwardsError(e instanceof Error ? e.message : 'Unable to load forwards.') }
@@ -109,17 +118,17 @@ export default function App() {
   useEffect(() => { if (!provision || provisionRetained) return; const guard = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = '' }; window.addEventListener('beforeunload', guard); return () => window.removeEventListener('beforeunload', guard) }, [provision, provisionRetained])
   useEffect(() => { if (toast) { const id = window.setTimeout(() => setToast(''), 2800); return () => window.clearTimeout(id) } }, [toast])
 
-  // The entire policy save (including reconciliation) belongs to the session,
-  // not the canvas mount. Parallel group writes settle before editing unlocks.
-  const reloadPolicy = async () => {
+  const reloadPolicy = async (adopt = true) => {
     const session = sessionRef.current
     invalidateLoads()
     const epoch = mutationEpochRef.current
-    const r = await client.GET('/api/groups')
+    const [config, status] = await Promise.all([configApi.get(), configApi.status()])
     if (session !== sessionRef.current) throw new Error('Session ended.')
     if (epoch !== mutationEpochRef.current) throw new Error('Policy changed while reloading. Reload again.')
-    if (r.error || !r.data) throw new Error('Unable to reload policy.')
-    setGroups(r.data)
+    setRuntime(status); setRuntimeError('')
+    if (!status.ready || status.applied_revision == null || status.applied_revision < config.revision) throw new Error('Configuration is saved; runtime activation is pending.')
+    if (adopt) { setGroups(config.groups); configRevisionRef.current = config.revision; revisionNeedsRefreshRef.current = false }
+    return config
   }
   const recoverPolicy = async () => {
     if (policyPendingRef.current) throw new Error('Policy save in progress.')
@@ -127,41 +136,86 @@ export default function App() {
     policyPendingRef.current = true; setPolicySaving(true)
     try {
       await reloadPolicy()
-      policyUncertainRef.current = false; setPolicyUncertain(false); setPolicyError('')
+      policyUncertainRef.current = false; setPolicyUncertain(false); setPolicyError(''); setPolicyConflict(null)
     } catch (e) {
-      if (session === sessionRef.current) setPolicyError('Unable to reload policy. The canvas may differ from the server.')
+      if (session === sessionRef.current) setPolicyError(e instanceof Error ? e.message : 'Unable to reload policy.')
       throw e
     } finally { if (session === sessionRef.current) { policyPendingRef.current = false; setPolicySaving(false) } }
   }
   const savePolicy = async (changes: { id: string; allowed: string[] }[]) => {
-    if (policyPendingRef.current || policyUncertainRef.current) throw new Error('Policy must settle before editing.')
+    if (policyPendingRef.current || policyUncertainRef.current || configRevisionRef.current === null || policyConflict) throw new Error('Review server policy before saving.')
     const session = sessionRef.current, version = ++policyVersionRef.current
+    let expected = configRevisionRef.current
     const current = () => session === sessionRef.current && version === policyVersionRef.current
     policyPendingRef.current = true; setPolicySaving(true); setPolicyError(''); invalidateLoads()
     try {
-      const results = await Promise.allSettled(changes.map(async ({ id, allowed }) => {
-        const r = await client.PUT('/api/groups/{id}/acl', { params: { path: { id } }, body: { allowed_groups: allowed } })
-        if (!current()) throw new Error('Policy save superseded.')
-        if (r.error || !r.data) throw new Error('Save unconfirmed.')
-        setGroups(v => v.map(g => g.id === id ? r.data! : g))
-      }))
+      if (revisionNeedsRefreshRef.current) {
+        const latest = await configApi.get()
+        if (!current()) return
+        const policyKey = (items: Group[]) => JSON.stringify(items.map(group => [group.id, [...(group.allowed_groups ?? [])].sort()]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))))
+        if (policyKey(latest.groups) !== policyKey(groups)) throw new ApiError('Configuration changed', 409)
+        expected = latest.revision; configRevisionRef.current = expected; revisionNeedsRefreshRef.current = false
+      }
+      const result = await configApi.save(expected, changes)
+      if (!current()) return
+      configRevisionRef.current = result.revision; setGroups(result.groups); setToast('Policy saved')
+    } catch (e) {
       if (!current()) return
       invalidateLoads()
-      if (results.some(result => result.status === 'rejected')) {
-        policyUncertainRef.current = true; setPolicyUncertain(true)
-        try {
-          await reloadPolicy()
-          if (!current()) return
-          policyUncertainRef.current = false; setPolicyUncertain(false)
-          setPolicyError('Save incomplete. Server policy reloaded; review before editing.')
-        } catch {
-          if (current()) setPolicyError('Save unconfirmed. Reload server policy to continue.')
-        }
-      } else setToast('Policy saved')
+      if (e instanceof ApiError && e.status === 409) {
+        try { const config = await configApi.get(); if (current()) { setPolicyConflict(config); setPolicyError('Configuration changed elsewhere. Review server changes before saving.') } }
+        catch { if (current()) { policyUncertainRef.current = true; setPolicyUncertain(true); setPolicyError('Conflict detected. Reload server policy to continue.') } }
+        throw e
+      }
+      policyUncertainRef.current = true; setPolicyUncertain(true)
+      try {
+        const config = await reloadPolicy(false)
+        if (!current()) return
+        policyUncertainRef.current = false; setPolicyUncertain(false)
+        const matches = changes.every(change => {
+          const group = config.groups.find(group => group.id === change.id)
+          return group && JSON.stringify([...(group.allowed_groups ?? [])].sort()) === JSON.stringify([...new Set(change.allowed)].sort())
+        })
+        if (matches) { setGroups(config.groups); configRevisionRef.current = config.revision; setPolicyError('Response unconfirmed; active server policy matches your changes.'); return }
+        if (config.revision !== expected) setPolicyConflict(config)
+        setPolicyError('Save failed. Server policy reloaded; your draft is retained for review.')
+      } catch { if (current()) setPolicyError('Save unconfirmed. Reload server policy to continue.') }
+      throw e
     } finally {
       if (current()) { invalidateLoads(); policyPendingRef.current = false; setPolicySaving(false) }
     }
   }
+  const resolveConflict = () => {
+    if (!policyConflict) return
+    setGroups(policyConflict.groups); configRevisionRef.current = policyConflict.revision; revisionNeedsRefreshRef.current = false
+    setPolicyConflict(null); setPolicyError('Review the resulting policy, then Save to apply.')
+  }
+
+  useEffect(() => {
+    if (!connected || !setup?.configured) return
+    let stopped = false, timer: number | undefined, failures = 0, polling = false
+    const schedule = () => { if (!stopped && !document.hidden) timer = window.setTimeout(() => void poll(), Math.min(30_000, 5_000 * 2 ** failures)) }
+    const poll = async () => {
+      if (stopped || document.hidden || polling) return
+      polling = true
+      const session = sessionRef.current, epoch = mutationEpochRef.current
+      try {
+        const [status, result] = await Promise.all([configApi.status(), client.GET('/api/peers', { cache: 'no-store' })])
+        if (stopped || session !== sessionRef.current) return
+        setRuntime(status); setRuntimeError(''); failures = 0
+        if (result.error || !result.data) throw new Error('Unable to refresh peer statistics.')
+        if (epoch === mutationEpochRef.current) {
+          const fresh = new Map(result.data.map(peer => [peer.id, peer]))
+          setPeers(previous => previous.map(peer => { const stats = fresh.get(peer.id); return stats ? { ...peer, received_bytes: stats.received_bytes, sent_bytes: stats.sent_bytes, last_handshake_unix: stats.last_handshake_unix } : peer }))
+          setSampledAt(new Date())
+        }
+      } catch (e) { if (!stopped && session === sessionRef.current) { failures = Math.min(3, failures + 1); setRuntimeError(e instanceof Error ? e.message : 'Runtime status unavailable.') } }
+      finally { polling = false; schedule() }
+    }
+    const visibility = () => { window.clearTimeout(timer); if (!document.hidden) void poll() }
+    document.addEventListener('visibilitychange', visibility); void poll()
+    return () => { stopped = true; window.clearTimeout(timer); document.removeEventListener('visibilitychange', visibility) }
+  }, [connected, setup?.configured])
 
   const enter = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -194,7 +248,7 @@ export default function App() {
     ++provisionGenerationRef.current
     policyPendingRef.current = false; policyUncertainRef.current = false
     setPolicySaving(false); setPolicyUncertain(false); setPolicyError('')
-    setConnected(false); setToken(''); rememberToken('')
+    setConnected(false); setToken(''); rememberToken(''); configRevisionRef.current = null; revisionNeedsRefreshRef.current = false; setPolicyConflict(null); setRuntime(null); setRuntimeError(''); setSampledAt(null)
     setPeers([]); setGroups([]); setForwards([]); setSetup(null); setModal(null); setProvision(null); setProvisionRetained(false)
     setError(''); setForwardsError(''); setToast(''); setLoginError(''); setMobileNav(false); setQuery(''); setBusy(false); setUpdatedAt(null)
     pendingPeersRef.current.clear(); setPendingPeers(new Set())
@@ -226,6 +280,7 @@ export default function App() {
     <a className="skip-link" href="#main-content">Skip to content</a><main className="main-area">
       <header className="topbar"><button className="icon-button mobile-menu" aria-label="Open navigation" aria-controls="main-navigation" aria-expanded={mobileNav} onClick={() => setMobileNav(true)}><Menu size={19} /></button><div className="breadcrumbs"><span>WireHub</span><span className="crumb-slash">/</span><strong>{pageTitle}</strong></div><div className="top-actions"><div className="secure-label"><Shield size={14} /> Admin session</div><button className="icon-button" aria-label="Refresh data" onClick={() => void load()} disabled={busy}><RefreshCw size={17} className={busy ? 'spin' : ''} /></button><div className="top-avatar">W</div></div></header>
       <div className="content-wrap" id="main-content" tabIndex={-1}>
+        <div className="runtime-strip" role="status"><span className={`status-dot ${!runtime || runtimeError || !runtime.ready || runtime.applied_revision !== runtime.persisted_revision ? 'status-pending' : ''}`} /><b>{runtimeError ? 'Status unavailable' : !runtime ? 'Checking runtime' : !runtime.ready ? 'Runtime unavailable' : runtime.applied_revision !== runtime.persisted_revision ? 'Activating configuration' : 'Runtime ready'}</b><span>{runtimeError || (runtime?.last_activation_error ? 'Configuration activation failed; automatic recovery is running.' : sampledAt ? `Statistics updated ${sampledAt.toLocaleTimeString('en-US')}` : 'Awaiting statistics')}</span></div>
         {error && <div className="error-banner" role="alert"><CircleHelp size={18} /><span>{error}</span><button onClick={() => void load()}>Retry</button></div>}
         {page === 'overview' && <Overview peers={peers} groups={groups} forwards={forwards} stats={stats} busy={busy} settings={setup?.settings ?? null} updatedAt={updatedAt} setPage={navigate} />}
         {page === 'peers' && <PeersPage peers={filteredPeers} allCount={peers.length} groups={groups} query={query} setQuery={setQuery} onCreate={() => setModal('peer')} pendingPeers={pendingPeers} onCopied={() => setToast('IP copied')} onCopyError={() => setToast('Copy failed. Select the IP to copy it.')} onMove={async (peer, groupId) => {
@@ -235,7 +290,7 @@ export default function App() {
             const r = await client.PUT('/api/peers/{id}/group', { params: { path: { id: peer.id } }, body: { group_id: groupId } })
             if (session !== sessionRef.current) return
             if (r.error || !r.data) throw new Error('Move unconfirmed. Refresh to check the group.')
-            invalidateLoads(); setPeers(v => v.map(x => x.id === peer.id ? r.data! : x)); setToast('Group updated')
+            configurationChanged(); setPeers(v => v.map(x => x.id === peer.id ? r.data! : x)); setToast('Group updated')
           } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Unable to move peer.')) }
           finally { if (session === sessionRef.current) finishPeerMutation(peer.id) }
         }} onDelete={async peer => {
@@ -247,12 +302,12 @@ export default function App() {
             const r = await client.DELETE('/api/peers/{id}', { params: { path: { id: peer.id } } })
             if (session !== sessionRef.current) return
             if (r.error) throw new Error('Deletion unconfirmed. Refresh to check the current state.')
-            invalidateLoads(); setPeers(v => v.filter(x => x.id !== peer.id)); setForwards(v => v.filter(x => x.target_peer_id !== peer.id)); setToast('Peer removed')
+            configurationChanged(); setPeers(v => v.filter(x => x.id !== peer.id)); setForwards(v => v.filter(x => x.target_peer_id !== peer.id)); setToast('Peer removed')
           } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Unable to delete peer.')) }
           finally { if (session === sessionRef.current) finishPeerMutation(peer.id) }
         }} />}
-          {page === 'groups' && <GroupsPage onDirtyChange={setPolicyDirty} groups={groups} peers={peers} saving={policySaving} uncertain={policyUncertain} error={policyError} onCreate={() => { if (!policyPendingRef.current && !policyUncertainRef.current) setModal('group') }} onDelete={async g => { if (policyPendingRef.current || policyUncertainRef.current) return; if (!confirm(`Delete group "${g.name}"?`)) return; try { const r = await client.DELETE('/api/groups/{id}', { params: { path: { id: g.id } } }); if (activeSession !== sessionRef.current) return; if (!r.error) { invalidateLoads(); setGroups(v => v.filter(x => x.id !== g.id).map(x => ({ ...x, allowed_groups: (x.allowed_groups ?? []).filter(id => id !== g.id) }))); setForwards(v => v.map(f => ({ ...f, allowed_group_ids: f.allowed_group_ids.filter(id => id !== g.id) }))); setToast('Group deleted') } else setError('Deletion unconfirmed. Refresh before retrying.') } catch (e) { if (activeSession === sessionRef.current) setError(mutationFailure(e, 'Unable to delete group.')) } }} onSavePolicy={savePolicy} onReload={recoverPolicy} />}
-          {page === 'forwards' && <ForwardsPage forwards={forwards} subnet={setup?.settings?.subnet ?? ''} loadError={forwardsError} onRetry={() => void load()} peers={peers} groups={groups} onCreate={() => setModal('forward')} onDelete={async f => { if (!confirm(`Delete forward "${f.name}"?`)) return; const session = sessionRef.current; try { await forwardsApi.remove(f.id); if (session !== sessionRef.current) return; invalidateLoads(); setForwards(v => v.filter(x => x.id !== f.id)); setToast('Forward deleted') } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Deletion unconfirmed. Refresh before retrying.')) } }} />}
+          {page === 'groups' && <GroupsPage conflict={policyConflict} onResolveConflict={resolveConflict} onDirtyChange={setPolicyDirty} groups={groups} peers={peers} saving={policySaving} uncertain={policyUncertain} error={policyError} onCreate={() => { if (!policyPendingRef.current && !policyUncertainRef.current) setModal('group') }} onDelete={async g => { if (policyPendingRef.current || policyUncertainRef.current) return; if (!confirm(`Delete group "${g.name}"?`)) return; try { const r = await client.DELETE('/api/groups/{id}', { params: { path: { id: g.id } } }); if (activeSession !== sessionRef.current) return; if (!r.error) { configurationChanged(); setGroups(v => v.filter(x => x.id !== g.id).map(x => ({ ...x, allowed_groups: (x.allowed_groups ?? []).filter(id => id !== g.id) }))); setForwards(v => v.map(f => ({ ...f, allowed_group_ids: f.allowed_group_ids.filter(id => id !== g.id) }))); setToast('Group deleted') } else setError('Deletion unconfirmed. Refresh before retrying.') } catch (e) { if (activeSession === sessionRef.current) setError(mutationFailure(e, 'Unable to delete group.')) } }} onSavePolicy={savePolicy} onReload={recoverPolicy} />}
+          {page === 'forwards' && <ForwardsPage forwards={forwards} subnet={setup?.settings?.subnet ?? ''} loadError={forwardsError} onRetry={() => void load()} peers={peers} groups={groups} onCreate={() => setModal('forward')} onDelete={async f => { if (!confirm(`Delete forward "${f.name}"?`)) return; const session = sessionRef.current; try { await forwardsApi.remove(f.id); if (session !== sessionRef.current) return; configurationChanged(); setForwards(v => v.filter(x => x.id !== f.id)); setToast('Forward deleted') } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Deletion unconfirmed. Refresh before retrying.')) } }} />}
           {page === 'settings' && setup?.settings && <SettingsPage settings={setup.settings} savedVersion={settingsVersion} saving={settingsSaving} error={settingsError} onSave={async defaults => {
             if (activeSession !== sessionRef.current || settingsPendingRef.current) return
              settingsPendingRef.current = true; setSettingsSaving(true); setSettingsError(''); invalidateLoads()
@@ -261,13 +316,13 @@ export default function App() {
               if (activeSession !== sessionRef.current) return
                setSetup({ configured: true, settings }); setSettingsVersion(v => v + 1); setToast('Settings saved')
             } catch (e) { if (activeSession === sessionRef.current) setSettingsError(mutationFailure(e, 'Unable to save settings.')) }
-             finally { if (activeSession === sessionRef.current) { invalidateLoads(); settingsPendingRef.current = false; setSettingsSaving(false) } }
+             finally { if (activeSession === sessionRef.current) { configurationChanged(); settingsPendingRef.current = false; setSettingsSaving(false) } }
           }} />}
       </div>
     </main>
     {modal && <Modal kind={modal} session={sessionRef.current} isSessionCurrent={session => session === sessionRef.current} groups={groups} peers={peers} forwards={forwards} subnet={setup?.settings?.subnet ?? ''} onClose={() => setModal(null)} onCreated={async value => {
       if (activeSession !== sessionRef.current) return
-      invalidateLoads()
+      configurationChanged()
       if (modal === 'peer') { ++provisionGenerationRef.current; setModal(null); setProvisionRetained(false); setProvision(value as Provision); setPeers(v => [...v, (value as Provision).peer]) }
       if (modal === 'group') { setGroups(v => [...v, value as Group]); setModal(null); setToast('Group created') }
       if (modal === 'forward') { setForwards(v => [...v, value as Forward]); setModal(null); setToast('Forward created') }
@@ -433,7 +488,7 @@ function Modal({ kind, groups, peers, forwards, subnet, session, isSessionCurren
         const status = r.response.status
         const failure: unknown = r.error
         if (r.error || !r.data) {
-          const detail = typeof failure === 'string' ? failure.trim() : ''
+          const detail = typeof failure === 'string' ? failure.trim() : failure && typeof failure === 'object' && 'message' in failure ? String(failure.message) : ''
           // Only recognized, non-secret server details are shown. A conflict
           // status alone does not tell us whether the name or address pool failed.
           const known = /^(address pool exhausted|peer conflict|peer name already exists\.?|name already exists\.?|setup required)$/i.test(detail)

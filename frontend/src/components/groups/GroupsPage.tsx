@@ -5,11 +5,12 @@ import {
 } from '@xyflow/react'
 import { ArrowLeftRight, ArrowRight, Check, GitBranch, LayoutGrid, LoaderCircle, Plus, RotateCcw, Shield, Trash2, X } from 'lucide-react'
 import type { components } from '../../api/schema'
-import { autoLayout, buildEdges, connectionEnds, connectRules, disconnectRules, readLayout, readRules, sameRules, saveLayout, setLinkDirection, SIDES, type GroupEdge, type GroupNode, type Rule } from './graph'
+import { autoLayout, buildEdges, connectionEnds, connectRules, disconnectRules, readLayout, readRules, rebaseRules, sameRules, saveLayout, setLinkDirection, SIDES, type GroupEdge, type GroupNode, type Rule } from './graph'
 
 type Group = components['schemas']['Group']
 type Peer = components['schemas']['Peer']
 type Props = {
+  conflict: { revision: number; groups: Group[] } | null; onResolveConflict: () => void
   groups: Group[]; peers: Peer[]; onCreate: () => void
   saving: boolean; uncertain: boolean; error: string
   onDelete: (group: Group) => void; onSavePolicy: (changes: { id: string; allowed: string[] }[]) => Promise<void>
@@ -41,9 +42,10 @@ function FitCanvas({ groupIds }: { groupIds: string }) {
   return null
 }
 
-export default function GroupsPage({ groups, peers, onCreate, saving, uncertain, error, onDelete, onSavePolicy, onReload, onDirtyChange }: Props) {
+export default function GroupsPage({ groups, peers, onCreate, saving, uncertain, error, conflict, onResolveConflict, onDelete, onSavePolicy, onReload, onDirtyChange }: Props) {
   const serverRules = useMemo(() => readRules(groups), [groups])
   const [draft, setDraft] = useState<Rule[] | null>(null)
+  const draftBase = useRef<Rule[]>(serverRules)
   const rules = draft ?? serverRules
   const dirty = draft !== null && !sameRules(draft, serverRules)
   const [nodes, setNodes, onNodesChange] = useNodesState<GroupNode>([])
@@ -57,8 +59,8 @@ export default function GroupsPage({ groups, peers, onCreate, saving, uncertain,
   // Rebuild nearest-side handles from live positions during every drag.
   const edges = useMemo(() => buildEdges(rules, nodes).map(edge => ({ ...edge, selected: selectedEdges.includes(edge.id) })), [rules, nodes, selectedEdges])
   const selectedEdge = selectedEdges.length === 1 ? edges.find(e => e.id === selectedEdges[0]) : undefined
-  const locked = saving || uncertain
-  useEffect(() => { onDirtyChange(dirty || uncertain) }, [dirty, uncertain, onDirtyChange])
+  const locked = saving || uncertain || !!conflict
+  useEffect(() => { onDirtyChange(dirty || uncertain || !!conflict) }, [dirty, uncertain, conflict, onDirtyChange])
   useEffect(() => () => onDirtyChange(false), [onDirtyChange])
   useEffect(() => {
     const layout = autoLayout(groups.map(g => g.id))
@@ -77,7 +79,7 @@ export default function GroupsPage({ groups, peers, onCreate, saving, uncertain,
     setSource(value => groups.some(g => g.id === value) ? value : groups[0]?.id ?? '')
     setTarget(value => groups.some(g => g.id === value) ? value : groups[1]?.id ?? groups[0]?.id ?? '')
   }, [groupIds])
-  const edit = useCallback((next: Rule[]) => { if (!saving && !uncertain) setDraft(next) }, [saving, uncertain])
+  const edit = useCallback((next: Rule[]) => { if (!locked) { if (draft === null) draftBase.current = serverRules; setDraft(next) } }, [locked, draft, serverRules])
   const onConnect = (connection: Connection) => {
     const { from, to } = connectionEnds(connection, startNode.current)
     startNode.current = null
@@ -118,6 +120,10 @@ export default function GroupsPage({ groups, peers, onCreate, saving, uncertain,
   const selfAllowed = selectedGroup ? rules.some(r => r.from === selectedGroup.id && r.to === selectedGroup.id) : false
   return <div className="page-enter policy-page"><div className="page-heading"><div><h1>Groups</h1><span className="heading-count">{groups.length} groups</span></div><button className="button button-primary" onClick={onCreate} disabled={locked}><Plus size={16} />New group</button></div>
     {error && <div className="error-banner" role="alert"><span>{error}</span>{uncertain && <button onClick={() => void reload()} disabled={saving}>Reload policy</button>}</div>}
+    {conflict && <section className="policy-conflict panel" aria-label="Policy conflict review"><h2>Review server changes</h2><p>Your draft is retained. Server policy changed while you were editing.</p>
+      <div className="conflict-changes">{conflict.groups.filter(group => !sameRules(serverRules.filter(rule => rule.from === group.id), readRules(conflict.groups).filter(rule => rule.from === group.id))).map(group => <p key={group.id}><b>{group.name}</b><span>Server allows: {(group.allowed_groups ?? []).map(id => conflict.groups.find(group => group.id === id)?.name ?? id).join(', ') || 'None'}</span></p>)}{groups.filter(group => !conflict.groups.some(current => current.id === group.id)).map(group => <p key={group.id}><b>{group.name}</b><span>Deleted on server</span></p>)}</div>
+      <div className="dialog-actions"><button className="button button-quiet" onClick={() => { setDraft(null); onResolveConflict() }}>Use server policy</button><button className="button button-primary" onClick={() => { const next = rebaseRules(draftBase.current, rules, conflict.groups); draftBase.current = readRules(conflict.groups); setDraft(next); onResolveConflict() }}>Reapply my edits for review</button></div>
+    </section>}
     <div className="policy-workspace"><section className="graph-panel"><div className="graph-toolbar"><div className="graph-status"><span className={`status-dot ${dirty || uncertain ? 'status-pending' : ''}`} /><span>{uncertain ? 'Unconfirmed' : dirty ? 'Unsaved changes' : 'Policy canvas'}</span></div><div className="graph-actions"><button className="icon-button" title="Auto layout" aria-label="Auto layout" disabled={locked || !groups.length} onClick={arrange}><LayoutGrid size={16} /></button>{dirty && !uncertain && <button className="icon-button" title="Discard changes" aria-label="Discard changes" disabled={saving} onClick={() => { setDraft(null); setSelectedEdges([]) }}><RotateCcw size={16} /></button>}<button className="button button-primary compact" disabled={!dirty || locked} onClick={() => void save()}>{saving ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}{saving ? 'Saving' : 'Save'}</button></div></div>
       <div className="graph-canvas"><ReactFlow<GroupNode, GroupEdge> nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
         onInit={instance => { flow.current = instance }} onNodesChange={changes => {

@@ -19,7 +19,7 @@ readiness.
 | `dataplane.rs` / `dataplane/tests.rs` | Synchronous routing and pending-delivery state, with its unit tests |
 | `policy.rs` | Directed group ACLs, forward authorization and assigned source-address checks |
 | `runtime.rs` / `control.rs` | WireGuard packet routing, lifecycle readiness, acknowledged reload and peer statistics |
-| `snapshot.rs` | Typed runtime snapshot compilation |
+| `snapshot.rs` | Typed runtime snapshot compilation and service/identity forwarding indexes |
 | `../network.rs` | Shared subnet, endpoint and keepalive validation |
 
 ## Protocol contract
@@ -70,8 +70,23 @@ affected flows immediately. Authorized flows and authenticated tunnels survive
 unrelated reloads; failed snapshots clear routing state and trigger retries.
 
 Tests live beside their respective modules. HTTP management and persistence stay
-in `src/api` and `src/storage`; their public API and database schema are unchanged.
+in `src/api` and `src/storage`; configuration revision and activation contracts are documented in the main API specification.
 Reload commands are bounded and serialized with packet processing. A reload
 loads the newest persisted snapshot when the kernel handles it; rejected loads
 fail closed and retry with backoff. Readiness belongs to the kernel lifecycle
 and becomes false when its run future is dropped or terminates.
+
+## Statistics and performance
+
+The packet path updates private counters. Immutable `Arc<HashMap<...>>` snapshots
+are published once per second, with immediate publication on configuration
+installation or fail-closed transitions. Repeated management reads clone the Arc,
+not every peer entry. Authenticated packet arrival never triggers a full-map
+publication. Old readers retain an immutable sample; counters may lag delivery
+by up to one normal sampling interval. Service selection uses compiled
+(protocol, destination port) indexes, and queued forward provenance uses a
+forward ID index. Both indexes are replaced with the routing snapshot.
+
+Run `python3 tests/performance.py --output /tmp/performance.json` for the opt-in
+release-mode baseline. See [the baseline report](../../docs/performance.md) for
+scope and measured results. This benchmark requires no network or hub state.

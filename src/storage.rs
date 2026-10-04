@@ -1,12 +1,12 @@
 use crate::{
-    model::{Forward, Group, NetworkSnapshot, Peer},
+    model::{Configuration, Forward, Group, NetworkSnapshot, Peer, PolicyChange, PolicyResult},
     network::{self as network, NetworkSettings, Subnet24},
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::sync::Mutex;
 mod identity;
-mod schema;
 mod instance_lock;
+mod schema;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -15,6 +15,18 @@ use schema::{SCHEMA_VERSION, TABLES};
 pub struct Store {
     db: Mutex<Connection>,
     _instance_lock: Option<instance_lock::InstanceLock>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PolicyError {
+    #[error("configuration changed; reload before saving")]
+    Conflict { revision: i64 },
+    #[error("group not found")]
+    MissingGroup,
+    #[error("{0}")]
+    Invalid(String),
+    #[error("database error")]
+    Database(#[from] rusqlite::Error),
 }
 
 #[cfg(test)]
@@ -55,12 +67,31 @@ impl Store {
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         schema::open(std::path::Path::new(path), None)
     }
+    #[cfg(test)]
     pub fn setup(
         &self,
         subnet: &str,
         endpoint: &str,
         keepalive: u32,
     ) -> rusqlite::Result<NetworkSettings> {
+        self.setup_versioned(subnet, endpoint, keepalive)
+            .map(|(settings, _)| settings)
+    }
+    #[cfg(test)]
+    pub fn update_settings(
+        &self,
+        endpoint: &str,
+        keepalive: u32,
+    ) -> rusqlite::Result<NetworkSettings> {
+        self.update_settings_versioned(endpoint, keepalive)
+            .map(|(settings, _)| settings)
+    }
+    pub fn setup_versioned(
+        &self,
+        subnet: &str,
+        endpoint: &str,
+        keepalive: u32,
+    ) -> rusqlite::Result<(NetworkSettings, i64)> {
         let settings =
             network::validate_settings(subnet, endpoint, keepalive).map_err(sql_error)?;
         let mut db = self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
@@ -78,14 +109,15 @@ impl Store {
             return Err(sql_error("network setup has already been completed"));
         }
         tx.execute("INSERT INTO network_settings(id,subnet,endpoint,persistent_keepalive) VALUES(1,?1,?2,?3)",params![settings.subnet,settings.endpoint,settings.persistent_keepalive])?;
+        let revision = advance_revision(&tx)?;
         tx.commit()?;
-        Ok(settings)
+        Ok((settings, revision))
     }
-    pub fn update_settings(
+    pub fn update_settings_versioned(
         &self,
         endpoint: &str,
         keepalive: u32,
-    ) -> rusqlite::Result<NetworkSettings> {
+    ) -> rusqlite::Result<(NetworkSettings, i64)> {
         let current = self
             .network_settings()?
             .ok_or_else(|| sql_error("network setup is required"))?;
@@ -100,8 +132,9 @@ impl Store {
         if count != 1 {
             return Err(sql_error("network setup is required"));
         }
+        let revision = advance_revision(&tx)?;
         tx.commit()?;
-        Ok(settings)
+        Ok((settings, revision))
     }
     pub fn network_settings(&self) -> rusqlite::Result<Option<NetworkSettings>> {
         let db = self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
@@ -115,6 +148,7 @@ impl Store {
         let mut db = self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
         let tx = db.transaction()?;
         let snapshot = NetworkSnapshot {
+            revision: read_revision(&tx)?,
             settings: read_network_settings(&tx)?,
             groups: read_groups(&tx)?,
             peers: read_peers(&tx)?,
@@ -123,6 +157,92 @@ impl Store {
         tx.commit()?;
         Ok(snapshot)
     }
+    pub fn revision(&self) -> rusqlite::Result<i64> {
+        let db = self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+        read_revision(&db)
+    }
+    pub fn configuration(&self) -> rusqlite::Result<Configuration> {
+        let mut db = self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let tx = db.transaction()?;
+        let pending = tx
+            .prepare("SELECT peer_id FROM pending_provisions")?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+        let configuration = Configuration {
+            revision: read_revision(&tx)?,
+            settings: read_network_settings(&tx)?,
+            groups: read_groups(&tx)?,
+            peers: read_peers(&tx)?
+                .into_iter()
+                .filter(|p| !pending.contains(&p.id))
+                .collect(),
+            forwards: read_forwards(&tx)?,
+        };
+        tx.commit()?;
+        Ok(configuration)
+    }
+    pub fn set_policy(
+        &self,
+        expected: i64,
+        changes: &[PolicyChange],
+    ) -> Result<PolicyResult, PolicyError> {
+        if expected < 0 || changes.is_empty() {
+            return Err(PolicyError::Invalid(
+                "expected revision and nonempty changes are required".into(),
+            ));
+        }
+        let mut db = self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        after_begin_immediate();
+        let current = read_revision(&tx)?;
+        if current != expected {
+            return Err(PolicyError::Conflict { revision: current });
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut updates = Vec::new();
+        for change in changes {
+            if !seen.insert(&change.group_id) {
+                return Err(PolicyError::Invalid("duplicate source group".into()));
+            }
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM groups WHERE id=?1)",
+                [&change.group_id],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(PolicyError::MissingGroup);
+            }
+            validate_group_refs(&tx, &change.allowed_groups).map_err(|error| {
+                if matches!(&error, rusqlite::Error::ToSqlConversionFailure(_)) {
+                    PolicyError::Invalid("unknown group reference".into())
+                } else {
+                    PolicyError::Database(error)
+                }
+            })?;
+            let mut allowed = change.allowed_groups.clone();
+            allowed.sort();
+            allowed.dedup();
+            updates.push((
+                &change.group_id,
+                serde_json::to_string(&allowed).map_err(|_| rusqlite::Error::InvalidQuery)?,
+            ));
+        }
+        for (id, allowed) in updates {
+            tx.execute(
+                "UPDATE groups SET allowed=?2 WHERE id=?1",
+                params![id, allowed],
+            )?;
+        }
+        let revision = advance_revision(&tx)?;
+        let groups = read_groups(&tx)?;
+        tx.commit()?;
+        Ok(PolicyResult {
+            revision,
+            groups,
+            applied_revision: None,
+        })
+    }
+    #[cfg(test)]
     pub fn group(&self, id: &str) -> rusqlite::Result<Option<Group>> {
         Ok(self.groups()?.into_iter().find(|x| x.id == id))
     }
@@ -135,6 +255,7 @@ impl Store {
             "INSERT INTO groups(id,name,allowed) VALUES(?1,?2,'[]')",
             params![g.id, name],
         )?;
+        advance_revision(&tx)?;
         tx.commit()?;
         Ok(())
     }
@@ -154,9 +275,11 @@ impl Store {
         let updates = collect_group_reference_cleanup(&tx, id)?;
         apply_group_reference_cleanup(&tx, updates)?;
         let removed = tx.execute("DELETE FROM groups WHERE id=?1", [id])?;
+        advance_revision(&tx)?;
         tx.commit()?;
         Ok(removed)
     }
+    #[cfg(test)]
     pub fn set_acl(&self, id: &str, allowed: &[String]) -> rusqlite::Result<usize> {
         let encoded = serde_json::to_string(allowed).map_err(|_| rusqlite::Error::InvalidQuery)?;
         let mut db = self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
@@ -175,6 +298,9 @@ impl Store {
             "UPDATE groups SET allowed=?2 WHERE id=?1",
             params![id, encoded],
         )?;
+        if n != 0 {
+            advance_revision(&tx)?;
+        }
         tx.commit()?;
         Ok(n)
     }
@@ -212,7 +338,7 @@ impl Store {
         let mut db = self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let subnet = settings_subnet(&tx)?;
-        validate_group_refs(&tx, &[p.group_id.clone()])?;
+        validate_group_refs(&tx, std::slice::from_ref(&p.group_id))?;
         let name = normalized_name(&p.name)?;
         let Some(ip) = find_free_peer_ip(&tx, subnet)? else {
             return Ok(false);
@@ -228,6 +354,7 @@ impl Store {
                 [&p.id],
             )?;
         }
+        advance_revision(&tx)?;
         tx.commit()?;
         p.name = name;
         Ok(true)
@@ -241,28 +368,24 @@ impl Store {
     /// Startup recovery removes public-only records whose private configuration
     /// was never handed to the HTTP response. The journal never contains secrets.
     pub fn recover_pending_provisions(&self) -> rusqlite::Result<usize> {
-        self.db
-            .lock()
-            .map_err(|_| rusqlite::Error::InvalidQuery)?
-            .execute(
-                "DELETE FROM peers WHERE id IN (SELECT peer_id FROM pending_provisions)",
-                [],
-            )
+        self.delete_rows(
+            "DELETE FROM peers WHERE id IN (SELECT peer_id FROM pending_provisions)",
+            [],
+        )
     }
     pub fn move_peer(&self, id: &str, g: &str) -> rusqlite::Result<usize> {
         let mut db = self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         validate_group_refs(&tx, &[g.to_string()])?;
         let n = tx.execute("UPDATE peers SET group_id=?2 WHERE id=?1", params![id, g])?;
+        if n != 0 {
+            advance_revision(&tx)?;
+        }
         tx.commit()?;
         Ok(n)
     }
     pub fn remove_peer(&self, id: &str) -> rusqlite::Result<usize> {
-        Ok(self
-            .db
-            .lock()
-            .map_err(|_| rusqlite::Error::InvalidQuery)?
-            .execute("DELETE FROM peers WHERE id=?1", [id])?)
+        self.delete_rows("DELETE FROM peers WHERE id=?1", [id])
     }
     pub fn forwards(&self) -> rusqlite::Result<Vec<Forward>> {
         let db = self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
@@ -279,17 +402,37 @@ impl Store {
         validate_group_refs(&tx, &f.allowed_group_ids)?;
         ensure_forward_target_exists(&tx, &f.target_peer_id)?;
         insert_forward(&tx, f, &name, &allowed)?;
+        advance_revision(&tx)?;
         tx.commit()?;
         f.name = name;
         Ok(())
     }
     pub fn remove_forward(&self, id: &str) -> rusqlite::Result<usize> {
-        Ok(self
-            .db
-            .lock()
-            .map_err(|_| rusqlite::Error::InvalidQuery)?
-            .execute("DELETE FROM forwards WHERE id=?1", [id])?)
+        self.delete_rows("DELETE FROM forwards WHERE id=?1", [id])
     }
+    fn delete_rows(&self, sql: &str, values: impl rusqlite::Params) -> rusqlite::Result<usize> {
+        let mut db = self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let removed = tx.execute(sql, values)?;
+        if removed != 0 {
+            advance_revision(&tx)?;
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+}
+
+fn read_revision(db: &Connection) -> rusqlite::Result<i64> {
+    db.query_row("SELECT revision FROM config_state WHERE id=1", [], |r| {
+        r.get(0)
+    })
+}
+
+fn advance_revision(tx: &Transaction<'_>) -> rusqlite::Result<i64> {
+    if tx.execute("UPDATE config_state SET revision=revision+1 WHERE id=1", [])? != 1 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    read_revision(tx)
 }
 
 fn read_network_settings(db: &Connection) -> rusqlite::Result<Option<NetworkSettings>> {
@@ -467,5 +610,5 @@ fn sql_error(message: impl Into<String>) -> rusqlite::Error {
     )))
 }
 fn io_db(e: rusqlite::Error) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+    std::io::Error::other(e.to_string())
 }

@@ -1,5 +1,13 @@
-use axum::{extract::State, http::{HeaderMap, StatusCode}, response::IntoResponse, Json};
-use crate::{api::{auth, err, is_input_error, AppState}, model::{SetupRequest, SetupStatus, SettingsRequest}};
+use crate::{
+    api::{auth, err, is_input_error, AppState},
+    model::{SettingsRequest, SetupRequest, SetupStatus},
+};
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+    Json,
+};
 
 #[utoipa::path(get, path = "/api/setup", tag = "crate", responses((status = 200, body = SetupStatus), (status = 401)))]
 pub async fn get_setup(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
@@ -7,7 +15,11 @@ pub async fn get_setup(State(state): State<AppState>, headers: HeaderMap) -> imp
         return err(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
     match state.store.network_settings() {
-        Ok(settings) => Json(SetupStatus { configured: settings.is_some(), settings }).into_response(),
+        Ok(settings) => Json(SetupStatus {
+            configured: settings.is_some(),
+            settings,
+        })
+        .into_response(),
         Err(_) => err(StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     }
 }
@@ -23,10 +35,14 @@ pub async fn post_setup(
     }
     let permit = match state.kernel.reserve_reload().await {
         Ok(permit) => permit,
-        Err(_) => return err(StatusCode::SERVICE_UNAVAILABLE, "runtime reload failed").into_response(),
+        Err(_) => {
+            return err(StatusCode::SERVICE_UNAVAILABLE, "runtime reload failed").into_response()
+        }
     };
-    let settings = match state.store.setup(
-        &request.subnet, &request.endpoint, request.persistent_keepalive,
+    let (settings, revision) = match state.store.setup_versioned(
+        &request.subnet,
+        &request.endpoint,
+        request.persistent_keepalive,
     ) {
         Ok(settings) => settings,
         Err(error) => {
@@ -44,12 +60,12 @@ pub async fn post_setup(
         }
     };
 
-    let ack = permit.send();
+    let ack = permit.send_at(revision);
     if ack.wait().await.is_ok() {
         Json(settings).into_response()
     } else {
-        err(StatusCode::SERVICE_UNAVAILABLE,
-            "settings saved, but runtime activation was not acknowledged; inspect setup status and restart the service before provisioning")
+        super::configuration::failure(StatusCode::SERVICE_UNAVAILABLE, "activation_unconfirmed",
+            "settings saved, but runtime activation was not acknowledged; inspect runtime status before provisioning", Some(revision))
             .into_response()
     }
 }
@@ -63,8 +79,28 @@ pub async fn put_settings(
     if !auth(&headers, &state) {
         return err(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
-    match state.store.update_settings(&request.endpoint, request.persistent_keepalive) {
-        Ok(settings) => Json(settings).into_response(),
+    let permit = match state.kernel.reserve_reload().await {
+        Ok(permit) => permit,
+        Err(_) => {
+            return err(StatusCode::SERVICE_UNAVAILABLE, "runtime reload failed").into_response()
+        }
+    };
+    match state
+        .store
+        .update_settings_versioned(&request.endpoint, request.persistent_keepalive)
+    {
+        Ok((settings, revision)) => {
+            if permit.send_at(revision).wait_revision().await.is_ok() {
+                Json(settings).into_response()
+            } else {
+                super::configuration::failure(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "activation_unconfirmed",
+                    "Settings saved; activation is unconfirmed.",
+                    Some(revision),
+                )
+            }
+        }
         Err(error) if error.to_string().contains("network setup is required") => {
             err(StatusCode::CONFLICT, "setup required").into_response()
         }

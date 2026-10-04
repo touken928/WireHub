@@ -100,11 +100,7 @@ fn tcp_payload(packet: ValidatedPacket, len: usize) -> ValidatedPacket {
     let ip_sum = checksum(&raw[..20]);
     raw[10..12].copy_from_slice(&ip_sum.to_be_bytes());
     raw[36..38].fill(0);
-    let tcp_sum = tcp_checksum(
-        packet.src().octets(),
-        packet.dst().octets(),
-        &raw[20..],
-    );
+    let tcp_sum = tcp_checksum(packet.src().octets(), packet.dst().octets(), &raw[20..]);
     raw[36..38].copy_from_slice(&tcp_sum.to_be_bytes());
     ipv4::validate_forwarded(&raw).unwrap()
 }
@@ -223,92 +219,133 @@ fn tcp_tfo_responder_data_extends_syn_received_window_for_direct_and_forward() {
     let b = peer("b", "10.77.0.3");
     let now = t();
     for forwarded in [false, true] {
-      for responder_next in [201u32, u32::MAX - 49] {
-        let mut flows = Flows::default();
-        let f = forward("tcp", 443);
-        let frontend = if forwarded { flows.hub_ip } else { b.ipv4.parse().unwrap() };
-        let syn = tcp_numbers(
-            tcp_payload(packet(6, a.ipv4.parse().unwrap(), 1234, frontend, 443, 2), 9),
-            100,
-            0,
-        );
-        let (wire, reservation) = if forwarded {
-            flows.prepare_forward_packet_test(&syn, &a, &f, &b, now)
-        } else {
-            flows.prepare_direct_test(&syn, &a, &b, now)
-        }
-        .unwrap();
-        flows.complete(reservation, true, now);
-        let return_ip = if forwarded { flows.hub_ip } else { a.ipv4.parse().unwrap() };
-        let return_port = u16::from_be_bytes([wire[20], wire[21]]);
-        let syn_ack = tcp_numbers(
-            packet(6, b.ipv4.parse().unwrap(), 443, return_ip, return_port, 0x12),
-            responder_next.wrapping_sub(1),
-            110,
-        );
-        let (_, _, reservation) = flows.lookup_reply_test(&syn_ack, &b, now).unwrap();
-        flows.complete(reservation.unwrap(), true, now);
+        for responder_next in [201u32, u32::MAX - 49] {
+            let mut flows = Flows::default();
+            let f = forward("tcp", 443);
+            let frontend = if forwarded {
+                flows.hub_ip
+            } else {
+                b.ipv4.parse().unwrap()
+            };
+            let syn = tcp_numbers(
+                tcp_payload(
+                    packet(6, a.ipv4.parse().unwrap(), 1234, frontend, 443, 2),
+                    9,
+                ),
+                100,
+                0,
+            );
+            let (wire, reservation) = if forwarded {
+                flows.prepare_forward_packet_test(&syn, &a, &f, &b, now)
+            } else {
+                flows.prepare_direct_test(&syn, &a, &b, now)
+            }
+            .unwrap();
+            flows.complete(reservation, true, now);
+            let return_ip = if forwarded {
+                flows.hub_ip
+            } else {
+                a.ipv4.parse().unwrap()
+            };
+            let return_port = u16::from_be_bytes([wire[20], wire[21]]);
+            let syn_ack = tcp_numbers(
+                packet(
+                    6,
+                    b.ipv4.parse().unwrap(),
+                    443,
+                    return_ip,
+                    return_port,
+                    0x12,
+                ),
+                responder_next.wrapping_sub(1),
+                110,
+            );
+            let (_, _, reservation) = flows.lookup_reply_test(&syn_ack, &b, now).unwrap();
+            flows.complete(reservation.unwrap(), true, now);
 
-        let responder_data = tcp_numbers(
-            tcp_payload(packet(6, b.ipv4.parse().unwrap(), 443, return_ip, return_port, 0x18), 100),
-            responder_next,
-            110,
-        );
-        let key = flows.flows.keys().next().unwrap().clone();
-        let responder_end = responder_next.wrapping_add(100);
-        let final_ack = tcp_numbers(
-            packet(6, a.ipv4.parse().unwrap(), 1234, frontend, 443, 0x10),
-            110,
-            responder_end,
-        );
-        let reservation = if forwarded {
-            flows.prepare_forward_packet_test(&final_ack, &a, &f, &b, now)
-        } else {
-            flows.prepare_direct_test(&final_ack, &a, &b, now)
-        }
-        .unwrap()
-        .1;
-        flows.complete(reservation, true, now);
-        assert!(matches!(flows.flows[&key].state.tcp_state(), Some(TcpState::SynReceived { responder_end: end, .. }) if end == responder_next));
+            let responder_data = tcp_numbers(
+                tcp_payload(
+                    packet(
+                        6,
+                        b.ipv4.parse().unwrap(),
+                        443,
+                        return_ip,
+                        return_port,
+                        0x18,
+                    ),
+                    100,
+                ),
+                responder_next,
+                110,
+            );
+            let key = flows.flows.keys().next().unwrap().clone();
+            let responder_end = responder_next.wrapping_add(100);
+            let final_ack = tcp_numbers(
+                packet(6, a.ipv4.parse().unwrap(), 1234, frontend, 443, 0x10),
+                110,
+                responder_end,
+            );
+            let reservation = if forwarded {
+                flows.prepare_forward_packet_test(&final_ack, &a, &f, &b, now)
+            } else {
+                flows.prepare_direct_test(&final_ack, &a, &b, now)
+            }
+            .unwrap()
+            .1;
+            flows.complete(reservation, true, now);
+            assert!(
+                matches!(flows.flows[&key].state.tcp_state(), Some(TcpState::SynReceived { responder_end: end, .. }) if end == responder_next)
+            );
 
-        let (_, _, reservation) = flows.lookup_reply_test(&responder_data, &b, now).unwrap();
-        flows.complete(reservation.unwrap(), false, now);
-        let reservation = if forwarded {
-            flows.prepare_forward_packet_test(&final_ack, &a, &f, &b, now)
-        } else {
-            flows.prepare_direct_test(&final_ack, &a, &b, now)
-        }
-        .unwrap()
-        .1;
-        flows.complete(reservation, true, now);
-        assert!(matches!(flows.flows[&key].state.tcp_state(), Some(TcpState::SynReceived { responder_end: end, .. }) if end == responder_next));
+            let (_, _, reservation) = flows.lookup_reply_test(&responder_data, &b, now).unwrap();
+            flows.complete(reservation.unwrap(), false, now);
+            let reservation = if forwarded {
+                flows.prepare_forward_packet_test(&final_ack, &a, &f, &b, now)
+            } else {
+                flows.prepare_direct_test(&final_ack, &a, &b, now)
+            }
+            .unwrap()
+            .1;
+            flows.complete(reservation, true, now);
+            assert!(
+                matches!(flows.flows[&key].state.tcp_state(), Some(TcpState::SynReceived { responder_end: end, .. }) if end == responder_next)
+            );
 
-        let (_, _, reservation) = flows.lookup_reply_test(&responder_data, &b, now).unwrap();
-        flows.complete(reservation.unwrap(), true, now);
-        assert!(matches!(flows.flows[&key].state.tcp_state(), Some(TcpState::SynReceived { responder_next: base, responder_end: end, .. }) if base == responder_next && end == responder_end));
+            let (_, _, reservation) = flows.lookup_reply_test(&responder_data, &b, now).unwrap();
+            flows.complete(reservation.unwrap(), true, now);
+            assert!(
+                matches!(flows.flows[&key].state.tcp_state(), Some(TcpState::SynReceived { responder_next: base, responder_end: end, .. }) if base == responder_next && end == responder_end)
+            );
 
-        let oversized_ack = tcp_numbers(final_ack.clone(), 110, responder_end.wrapping_add(1));
-        let reservation = if forwarded {
-            flows.prepare_forward_packet_test(&oversized_ack, &a, &f, &b, now)
-        } else {
-            flows.prepare_direct_test(&oversized_ack, &a, &b, now)
-        }
-        .unwrap()
-        .1;
-        flows.complete(reservation, true, now);
-        assert!(matches!(flows.flows[&key].state.tcp_state(), Some(TcpState::SynReceived { .. })));
+            let oversized_ack = tcp_numbers(final_ack.clone(), 110, responder_end.wrapping_add(1));
+            let reservation = if forwarded {
+                flows.prepare_forward_packet_test(&oversized_ack, &a, &f, &b, now)
+            } else {
+                flows.prepare_direct_test(&oversized_ack, &a, &b, now)
+            }
+            .unwrap()
+            .1;
+            flows.complete(reservation, true, now);
+            assert!(matches!(
+                flows.flows[&key].state.tcp_state(),
+                Some(TcpState::SynReceived { .. })
+            ));
 
-        let reservation = if forwarded {
-            flows.prepare_forward_packet_test(&final_ack, &a, &f, &b, now)
-        } else {
-            flows.prepare_direct_test(&final_ack, &a, &b, now)
+            let reservation = if forwarded {
+                flows.prepare_forward_packet_test(&final_ack, &a, &f, &b, now)
+            } else {
+                flows.prepare_direct_test(&final_ack, &a, &b, now)
+            }
+            .unwrap()
+            .1;
+            flows.complete(reservation, true, now);
+            assert_eq!(
+                flows.flows[&key].state.tcp_state(),
+                Some(TcpState::Established)
+            );
+            flows.expire(now + Duration::from_secs(301));
+            assert!(flows.flows.contains_key(&key));
         }
-        .unwrap().1;
-        flows.complete(reservation, true, now);
-        assert_eq!(flows.flows[&key].state.tcp_state(), Some(TcpState::Established));
-        flows.expire(now + Duration::from_secs(301));
-        assert!(flows.flows.contains_key(&key));
-      }
     }
 }
 

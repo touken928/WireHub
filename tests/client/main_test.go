@@ -157,6 +157,14 @@ func TestPersistentTCPControlConnection(t *testing.T) {
 	if err := json.Unmarshal(exchanged.Body.Bytes(), &reply); err != nil || !reply.OK {
 		t.Fatalf("exchange response %s, err=%v", exchanged.Body.String(), err)
 	}
+	transferred := call("/tcp/transfer", fmt.Sprintf(`{"id":%q,"bytes":1048576,"timeout_ms":5000}`, open.ID))
+	var bulk struct {
+		OK    bool `json:"ok"`
+		Bytes int  `json:"bytes"`
+	}
+	if err := json.Unmarshal(transferred.Body.Bytes(), &bulk); err != nil || !bulk.OK || bulk.Bytes != 1048576 {
+		t.Fatalf("bulk response %s, err=%v", transferred.Body.String(), err)
+	}
 	call("/tcp/close", fmt.Sprintf(`{"id":%q}`, open.ID))
 	if _, exists := c.tcpConns[open.ID]; exists {
 		t.Fatal("close left persistent connection registered")
@@ -181,5 +189,22 @@ func TestConfigureClosesPersistentTCPConnections(t *testing.T) {
 	}
 	if len(c.tcpConns) != 0 {
 		t.Fatalf("device replacement retained %d persistent connections", len(c.tcpConns))
+	}
+}
+
+func TestConfiguredMTUAndKeepaliveAreValidated(t *testing.T) {
+	parsed, err := parseConfig(strings.Replace(validConfig(), "Address = 10.0.0.2/32", "Address = 10.0.0.2/32\nMTU = 1280", 1) + "PersistentKeepalive = 25\n")
+	if err != nil || parsed.mtu != 1280 || parsed.keepalive != 25 {
+		t.Fatalf("parsed settings %#v, %v", parsed, err)
+	}
+	for _, field := range []string{"MTU = 0", "MTU = 65536", "MTU = bad"} {
+		if _, err := parseConfig(strings.Replace(validConfig(), "Address = 10.0.0.2/32", "Address = 10.0.0.2/32\n"+field, 1)); err == nil {
+			t.Fatal("accepted invalid MTU")
+		}
+	}
+	for _, value := range []string{"-1", "65536", "bad"} {
+		if _, err := parseConfig(validConfig() + "PersistentKeepalive = " + value + "\n"); err == nil {
+			t.Fatal("accepted invalid keepalive")
+		}
 	}
 }

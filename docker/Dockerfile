@@ -10,7 +10,9 @@ RUN pnpm build
 
 FROM rust:1-bookworm AS backend
 WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
+ARG WIREHUB_BUILD_ID=unknown
+ENV WIREHUB_BUILD_ID=$WIREHUB_BUILD_ID
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ ./src/
 COPY --from=frontend /app/frontend/dist ./frontend/dist
 RUN cargo build --release --locked

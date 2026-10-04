@@ -331,3 +331,23 @@ fn ttl_decrements_once_and_ttl_one_is_rejected() {
     assert_eq!(emitted[8], 1);
     assert!(parse(&emitted).is_none());
 }
+
+#[test]
+fn first_middle_and_final_fragments_are_rejected_but_dont_fragment_is_allowed() {
+    for flags in [[0x20, 0], [0x20, 1], [0, 1], [0x1f, 0xff]] {
+        let mut fragment = test_packet([10, 77, 0, 2], [10, 77, 0, 3], false, false);
+        fragment[6..8].copy_from_slice(&flags);
+        fix_ip(&mut fragment);
+        assert!(
+            parse(&fragment).is_none(),
+            "Every fragment envelope is rejected"
+        );
+    }
+    let mut complete = test_packet([10, 77, 0, 2], [10, 77, 0, 3], false, false);
+    complete[6] = 0x40;
+    fix_ip(&mut complete);
+    assert!(
+        parse(&complete).is_some(),
+        "DF on a complete IPv4 packet is supported"
+    );
+}

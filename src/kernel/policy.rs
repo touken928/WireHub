@@ -32,9 +32,7 @@ pub fn forward_allowed(
         .allowed_group_ids
         .iter()
         .any(|id| id == source_group_id)
-        && source.map_or(false, |group| {
-            group.allowed_groups.iter().any(|id| id == target_group_id)
-        })
+        && source.is_some_and(|group| group.allowed_groups.iter().any(|id| id == target_group_id))
 }
 
 /// A peer may only originate packets from its assigned /32 address.

@@ -1,5 +1,8 @@
 use crate::{
-    api::{auth, creation_error, delete_result, err, is_input_error, uuid, AppState},
+    api::{
+        activation_failure, auth, creation_error, delete_result, err, is_input_error, uuid,
+        AppState,
+    },
     model::{MovePeer, NewPeer, Peer, PeerProvision, PeerStatus},
 };
 use axum::{
@@ -55,7 +58,7 @@ fn render_config(
     settings: &crate::model::NetworkSettings,
 ) -> String {
     format!(
-        "[Interface]\nPrivateKey = {private_key}\nAddress = {}/32\n\n[Peer]\nPublicKey = {}\nEndpoint = {}\nAllowedIPs = {}\nPersistentKeepalive = {}\n",
+        "[Interface]\nPrivateKey = {private_key}\nAddress = {}/32\nMTU = 1420\n\n[Peer]\nPublicKey = {}\nEndpoint = {}\nAllowedIPs = {}\nPersistentKeepalive = {}\n",
         peer.ipv4, state.hub_public, settings.endpoint, settings.subnet, settings.persistent_keepalive,
     )
 }
@@ -124,7 +127,9 @@ pub async fn create_peer(
 
     let permit = match state.kernel.reserve_reload().await {
         Ok(permit) => permit,
-        Err(_) => return err(StatusCode::SERVICE_UNAVAILABLE, "runtime reload failed").into_response(),
+        Err(_) => {
+            return err(StatusCode::SERVICE_UNAVAILABLE, "runtime reload failed").into_response()
+        }
     };
 
     let mut private = [0u8; 32];
@@ -212,9 +217,17 @@ pub async fn delete_peer(
     }
     let permit = match state.kernel.reserve_reload().await {
         Ok(permit) => permit,
-        Err(_) => return err(StatusCode::SERVICE_UNAVAILABLE, "runtime reload failed").into_response(),
+        Err(_) => {
+            return err(StatusCode::SERVICE_UNAVAILABLE, "runtime reload failed").into_response()
+        }
     };
-    delete_result(state.store.remove_peer(&id), permit, "peer not found").await
+    delete_result(
+        state.store.remove_peer(&id),
+        permit,
+        &state.store,
+        "peer not found",
+    )
+    .await
 }
 
 #[utoipa::path(put, path = "/api/peers/{id}/group", tag = "crate", request_body = MovePeer, responses((status = 200, body = Peer)))]
@@ -229,14 +242,15 @@ pub async fn move_peer(
     }
     let permit = match state.kernel.reserve_reload().await {
         Ok(permit) => permit,
-        Err(_) => return err(StatusCode::SERVICE_UNAVAILABLE, "runtime reload failed").into_response(),
+        Err(_) => {
+            return err(StatusCode::SERVICE_UNAVAILABLE, "runtime reload failed").into_response()
+        }
     };
     match state.store.move_peer(&id, &movement.group_id) {
         Ok(1) => {
             let ack = permit.send();
             if ack.wait().await.is_err() {
-                return err(StatusCode::SERVICE_UNAVAILABLE, "runtime reload failed")
-                    .into_response();
+                return activation_failure(&state.store);
             }
             match state.store.peers() {
                 Ok(peers) => match peers.into_iter().find(|peer| peer.id == id) {

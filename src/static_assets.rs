@@ -50,7 +50,10 @@ pub async fn handler(uri: Uri) -> Response<Body> {
     // Missing files and asset-like URLs must not be mistaken for client-side routes.
     // Only extensionless paths outside /api are eligible for the SPA entry point.
     if path.starts_with("/assets/")
-        || relative_path.rsplit('/').next().is_some_and(|name| name.contains('.'))
+        || relative_path
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.contains('.'))
     {
         return not_found();
     }
@@ -86,9 +89,14 @@ mod tests {
     async fn serves_embedded_frontend_and_spa_routes() {
         let index = handler("/".parse().unwrap()).await;
         assert_eq!(index.status(), 200);
-        assert_eq!(index.headers()[header::CONTENT_TYPE], "text/html; charset=utf-8");
+        assert_eq!(
+            index.headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
         assert_eq!(index.headers()[header::CACHE_CONTROL], "no-cache");
-        assert!(index.headers().contains_key(header::CONTENT_SECURITY_POLICY));
+        assert!(index
+            .headers()
+            .contains_key(header::CONTENT_SECURITY_POLICY));
 
         let javascript_asset = FrontendAssets::iter()
             .find(|path| path.starts_with("assets/") && path.ends_with(".js"))
@@ -96,9 +104,14 @@ mod tests {
         let asset = handler(format!("/{javascript_asset}").parse().unwrap()).await;
         assert_eq!(asset.status(), 200);
         assert_eq!(asset.headers()[header::CONTENT_TYPE], "text/javascript");
-        assert!(asset.headers()[header::CACHE_CONTROL].to_str().unwrap().contains("immutable"));
+        assert!(asset.headers()[header::CACHE_CONTROL]
+            .to_str()
+            .unwrap()
+            .contains("immutable"));
 
-        let policy = index.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+        let policy = index.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap();
         assert!(policy.contains("style-src-attr 'unsafe-inline'"));
         assert!(policy.contains("script-src 'self'"));
 
@@ -107,8 +120,16 @@ mod tests {
 
     #[tokio::test]
     async fn api_typos_and_missing_assets_are_not_spa_fallbacks() {
-        assert_eq!(handler("/api/healthty".parse().unwrap()).await.status(), 404);
-        assert_eq!(handler("/assets/missing.js".parse().unwrap()).await.status(), 404);
+        assert_eq!(
+            handler("/api/healthty".parse().unwrap()).await.status(),
+            404
+        );
+        assert_eq!(
+            handler("/assets/missing.js".parse().unwrap())
+                .await
+                .status(),
+            404
+        );
         assert_eq!(handler("/missing.css".parse().unwrap()).await.status(), 404);
     }
 }

@@ -17,6 +17,14 @@ export function sameRules(a: Rule[], b: Rule[]) {
   const keys = new Set(a.map(ruleKey)), other = new Set(b.map(ruleKey))
   return keys.size === other.size && [...other].every(key => keys.has(key))
 }
+export function rebaseRules(base: Rule[], draft: Rule[], serverGroups: Group[]): Rule[] {
+  const original = new Set(base.map(ruleKey)), desired = new Set(draft.map(ruleKey))
+  const removed = new Set([...original].filter(key => !desired.has(key)))
+  const ids = new Set(serverGroups.map(group => group.id))
+  const additions = draft.filter(rule => !original.has(ruleKey(rule)))
+  return [...new Map([...readRules(serverGroups).filter(rule => !removed.has(ruleKey(rule))), ...additions]
+    .filter(rule => ids.has(rule.from) && ids.has(rule.to)).map(rule => [ruleKey(rule), rule])).values()]
+}
 // Loose connections may report source/target by handle type. Policy follows the gesture.
 export function connectionEnds(connection: Pick<Connection, 'source' | 'target'>, start: string | null) {
   const from = start ?? connection.source

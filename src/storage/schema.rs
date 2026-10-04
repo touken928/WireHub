@@ -2,7 +2,7 @@ use super::{sql_error, Store};
 use crate::network;
 use rusqlite::{Connection, OptionalExtension};
 
-pub(super) const SCHEMA_VERSION: i64 = 4;
+pub(super) const SCHEMA_VERSION: i64 = 5;
 pub(super) const TABLES: &str = "
 CREATE TABLE groups(id TEXT PRIMARY KEY,name TEXT NOT NULL,allowed TEXT NOT NULL DEFAULT '[]');
 CREATE TABLE peers(id TEXT PRIMARY KEY,name TEXT NOT NULL,public_key TEXT NOT NULL UNIQUE,ipv4 TEXT NOT NULL UNIQUE,group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE RESTRICT,rx INTEGER NOT NULL DEFAULT 0,tx INTEGER NOT NULL DEFAULT 0,last_handshake INTEGER);
@@ -12,14 +12,19 @@ CREATE TABLE hub_identity(id INTEGER PRIMARY KEY CHECK(id=1),public_key BLOB NOT
 CREATE UNIQUE INDEX groups_name_unique ON groups(name);
 CREATE UNIQUE INDEX peers_name_unique ON peers(name);
 CREATE TABLE pending_provisions(peer_id TEXT PRIMARY KEY NOT NULL REFERENCES peers(id) ON DELETE CASCADE);
+CREATE TABLE config_state(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision BETWEEN 0 AND 9007199254740991));
+INSERT INTO config_state(id,revision) VALUES(1,0);
 ";
 
-pub(super) fn open(path: &std::path::Path, instance_lock: Option<super::instance_lock::InstanceLock>) -> rusqlite::Result<Store> {
+pub(super) fn open(
+    path: &std::path::Path,
+    instance_lock: Option<super::instance_lock::InstanceLock>,
+) -> rusqlite::Result<Store> {
     let mut db = Connection::open(path)?;
     db.pragma_update(None, "foreign_keys", "ON")?;
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version != 0 && version != 3 && version != SCHEMA_VERSION {
+    if version != 0 && version != 3 && version != 4 && version != SCHEMA_VERSION {
         return Err(sql_error("database schema version is unsupported (including v1/v2); export any needed data and create a fresh database; refusing to modify database"));
     }
     if version == 0 {
@@ -41,7 +46,6 @@ pub(super) fn open(path: &std::path::Path, instance_lock: Option<super::instance
         validate_current_data(&tx)?;
         if version == 3 {
             tx.execute_batch("CREATE TABLE pending_provisions(peer_id TEXT PRIMARY KEY NOT NULL REFERENCES peers(id) ON DELETE CASCADE);")?;
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         } else {
             let invalid: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM pending_provisions WHERE typeof(peer_id)!='text'",
@@ -51,6 +55,21 @@ pub(super) fn open(path: &std::path::Path, instance_lock: Option<super::instance
             if invalid != 0 {
                 return Err(sql_error(
                     "current database contains invalid pending provisions; refusing to start",
+                ));
+            }
+        }
+        if version < 5 {
+            tx.execute_batch(&format!(
+                "CREATE TABLE config_state{}",
+                TABLES.split_once("CREATE TABLE config_state").unwrap().1
+            ))?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        } else {
+            let valid: i64 = tx.query_row("SELECT COUNT(*) FROM config_state WHERE id=1 AND typeof(revision)='integer' AND revision BETWEEN 0 AND 9007199254740991", [], |r| r.get(0))?;
+            let total: i64 = tx.query_row("SELECT COUNT(*) FROM config_state", [], |r| r.get(0))?;
+            if valid != 1 || total != 1 {
+                return Err(sql_error(
+                    "current database contains invalid configuration revision; refusing to start",
                 ));
             }
         }
@@ -71,7 +90,9 @@ fn validate_current_schema(db: &Connection, version: i64) -> rusqlite::Result<()
     Ok(())
 }
 
-fn schema_rows(db: &Connection) -> rusqlite::Result<Vec<(String, String, String, Option<String>)>> {
+type SchemaObject = (String, String, String, Option<String>);
+
+fn schema_rows(db: &Connection) -> rusqlite::Result<Vec<SchemaObject>> {
     let mut q = db.prepare(
         "SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name,tbl_name,sql",
     )?;
@@ -88,6 +109,8 @@ fn validate_schema_exact(db: &Connection, version: i64) -> rusqlite::Result<()> 
             .split("CREATE TABLE pending_provisions")
             .next()
             .unwrap()
+    } else if version == 4 {
+        TABLES.split("CREATE TABLE config_state").next().unwrap()
     } else {
         TABLES
     };

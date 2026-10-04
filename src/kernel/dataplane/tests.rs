@@ -22,9 +22,10 @@ fn plane() -> DataPlane {
     config.by_ip.insert(a.ip, "a".into());
     config.peers.insert("a".into(), a);
     config.peers.insert("b".into(), b);
-    let mut dp = DataPlane::default();
-    dp.config = config;
-    dp
+    DataPlane {
+        config,
+        ..DataPlane::default()
+    }
 }
 fn request() -> Vec<u8> {
     ipv4::test_packet([10, 77, 0, 2], [10, 77, 0, 3], false, false)
@@ -584,6 +585,8 @@ fn forward_pending_provenance_changes_are_reconciled_without_retry_or_reservatio
             target_port: 5678,
             allowed_group_ids: vec!["g".into()],
         }];
+        dp.config.forward_index =
+            crate::kernel::snapshot::ForwardIndex::compile(&dp.config.forwards);
         let mut raw = ipv4::test_packet([10, 77, 0, 2], hub.octets(), false, false);
         raw[22..24].copy_from_slice(&5678u16.to_be_bytes());
         raw[10..12].fill(0);
@@ -671,4 +674,55 @@ fn pending_deadline_is_preserved_at_2999ms_and_expires_at_three_seconds() {
         .prepare_retry(&mut remaining, now + Duration::from_secs(3))
         .is_none());
     assert_eq!(dp.pending_counts(), (0, 0));
+}
+
+#[test]
+fn indexed_services_isolate_protocol_ports_and_recompile_on_policy_reload() {
+    let mut dp = plane();
+    let old = dp.config.clone();
+    let mut next = old.clone();
+    next.hub_ip = Some(Ipv4Addr::new(10, 77, 0, 1));
+    next.forwards = (0..1024)
+        .map(|i| ForwardConfig {
+            id: format!("f{i}"),
+            protocol: if i % 2 == 0 {
+                TransportProtocol::Udp
+            } else {
+                TransportProtocol::Tcp
+            },
+            target_peer_id: "b".into(),
+            target_port: 10000 + i,
+            allowed_group_ids: vec!["g".into()],
+        })
+        .collect();
+    next.forward_index = crate::kernel::snapshot::ForwardIndex::compile(&next.forwards);
+    dp.reconcile(&old, next);
+    let mut raw = ipv4::test_packet([10, 77, 0, 2], [10, 77, 0, 1], false, false);
+    raw[22..24].copy_from_slice(&11022u16.to_be_bytes());
+    let now = Instant::now();
+    let delivered = dp.prepare(ingress(&dp, &raw), now).unwrap();
+    assert_eq!(delivered.target_id(), "b");
+    assert!(dp
+        .finish(delivered, EgressOutcome::Delivered, now)
+        .is_some());
+    raw[22..24].copy_from_slice(&11023u16.to_be_bytes());
+    assert!(
+        dp.prepare(ingress(&dp, &raw), now).is_none(),
+        "UDP cannot select TCP service on an adjacent port"
+    );
+    let old = dp.config.clone();
+    let mut next = old.clone();
+    next.forwards[1022].target_port = 12000;
+    next.forward_index = crate::kernel::snapshot::ForwardIndex::compile(&next.forwards);
+    dp.reconcile(&old, next);
+    raw[22..24].copy_from_slice(&11022u16.to_be_bytes());
+    assert!(
+        dp.prepare(ingress(&dp, &raw), now).is_none(),
+        "Old service disappears on reload"
+    );
+    raw[22..24].copy_from_slice(&12000u16.to_be_bytes());
+    let delivered = dp.prepare(ingress(&dp, &raw), now).unwrap();
+    assert!(dp
+        .finish(delivered, EgressOutcome::Delivered, now)
+        .is_some());
 }

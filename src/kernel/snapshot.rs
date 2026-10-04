@@ -111,9 +111,31 @@ impl From<&crate::model::Forward> for ForwardConfig {
         }
     }
 }
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ForwardIndex {
+    pub(crate) by_service: HashMap<(u8, u16), Vec<usize>>,
+    pub(crate) by_id: HashMap<String, usize>,
+}
+impl ForwardIndex {
+    pub(crate) fn compile(forwards: &[ForwardConfig]) -> Self {
+        let mut index = Self::default();
+        for (position, forward) in forwards.iter().enumerate() {
+            index
+                .by_service
+                .entry((forward.protocol.number(), forward.target_port))
+                .or_default()
+                .push(position);
+            index.by_id.insert(forward.id.clone(), position);
+        }
+        index
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CompiledSnapshot {
+    pub(crate) revision: i64,
     pub(crate) forwards: Vec<ForwardConfig>,
+    pub(crate) forward_index: ForwardIndex,
     pub(crate) initial_stats: HashMap<String, (u64, u64, Option<i64>)>,
     pub(crate) hub_ip: Option<Ipv4Addr>,
     pub(crate) peers: HashMap<String, PeerConfig>,
@@ -122,6 +144,9 @@ pub struct CompiledSnapshot {
 impl TryFrom<NetworkSnapshot> for CompiledSnapshot {
     type Error = ();
     fn try_from(raw: NetworkSnapshot) -> Result<Self, Self::Error> {
+        if !(0..=9_007_199_254_740_991).contains(&raw.revision) {
+            return Err(());
+        }
         let subnet = raw
             .settings
             .as_ref()
@@ -192,6 +217,8 @@ impl TryFrom<NetworkSnapshot> for CompiledSnapshot {
             return Err(());
         }
         Ok(Self {
+            revision: raw.revision,
+            forward_index: ForwardIndex::compile(&forwards),
             forwards,
             initial_stats,
             hub_ip,
@@ -218,6 +245,7 @@ mod tests {
         use base64::Engine;
         let key = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
         let snapshot = NetworkSnapshot {
+            revision: 0,
             settings: Some(NetworkSettings {
                 subnet: "10.1.2.0/24".into(),
                 endpoint: "hub.example:51820".into(),

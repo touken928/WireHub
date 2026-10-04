@@ -25,12 +25,14 @@ dist/
 target/
 .pnpm-store/
 .cache/
+.ruff_cache/
 go-build/
 *.tsbuildinfo
 *.test
 /tests/client/client
 
 # Test reports, Python bytecode, and logs
+/artifacts/
 coverage/
 playwright-report/
 test-results/

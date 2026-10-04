@@ -340,7 +340,7 @@ impl WireGuard {
 }
 
 #[cfg(test)]
-thread_local! { pub(crate) static ANON_PARSE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0); }
+thread_local! { pub(crate) static ANON_PARSE_COUNT: std::sync::atomic::AtomicUsize = const { std::sync::atomic::AtomicUsize::new(0) }; }
 
 impl Session {
     pub(crate) fn new(

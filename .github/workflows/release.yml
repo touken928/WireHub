@@ -14,7 +14,26 @@ env:
   IMAGE_NAME: ghcr.io/touken928/wirehub
 
 jobs:
+  release-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify exact tag and package version agreement
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then
+            python3 scripts/check-release.py --tag "$REF_NAME"
+          else
+            python3 scripts/check-release.py
+          fi
+  verify:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/integration.yml
   binaries:
+    needs: [verify, release-contract]
     name: Build ${{ matrix.name }} binary
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -51,8 +70,10 @@ jobs:
           CC_x86_64_unknown_linux_musl: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
           VERSION: ${{ github.ref_name }}
+          WIREHUB_BUILD_ID: ${{ github.sha }}
         run: |
           cargo build --release --locked --target '${{ matrix.target }}'
+          python3 scripts/check-release.py --binary 'target/${{ matrix.target }}/release/wirehub' --build-id "$WIREHUB_BUILD_ID"
           mkdir -p dist
           cp 'target/${{ matrix.target }}/release/wirehub' \
             "dist/wirehub-${VERSION}-${{ matrix.name }}"
@@ -107,6 +128,7 @@ jobs:
           retention-days: 7
 
   build:
+    needs: [verify, release-contract]
     name: Build ${{ matrix.arch }} image
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -136,6 +158,7 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile
+          build-args: WIREHUB_BUILD_ID=${{ github.sha }}
           platforms: ${{ matrix.platform }}
           load: true
           tags: wirehub:smoke
@@ -144,12 +167,16 @@ jobs:
           cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}
       - name: Verify container startup and embedded UI
         run: |
+          docker run --rm wirehub:smoke --version > "$RUNNER_TEMP/container-version.txt"
+          EXPECTED_VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          test "$(cat "$RUNNER_TEMP/container-version.txt")" = "wirehub $EXPECTED_VERSION (${{ github.sha }})"
           trap 'docker rm --force wirehub-smoke >/dev/null 2>&1 || true' EXIT
           docker run --detach --name wirehub-smoke \
             --env WIREHUB_ADMIN_TOKEN=smoke-test-token \
             --env WIREHUB_TRUSTED_PROXY_MODE=1 \
             --publish 127.0.0.1::51820/tcp wirehub:smoke
-          export SMOKE_ADDRESS=$(docker port wirehub-smoke 51820/tcp)
+          SMOKE_ADDRESS=$(docker port wirehub-smoke 51820/tcp)
+          export SMOKE_ADDRESS
           python3 - <<'PY'
           import json, os, time, urllib.request
           url = 'http://' + os.environ['SMOKE_ADDRESS']
@@ -180,6 +207,7 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile
+          build-args: WIREHUB_BUILD_ID=${{ github.sha }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
@@ -201,7 +229,7 @@ jobs:
   publish:
     name: Publish multi-platform tags
     if: github.event_name == 'push'
-    needs: build
+    needs: [verify, release-contract, build]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -238,7 +266,7 @@ jobs:
   release:
     name: Publish GitHub Release
     if: github.event_name == 'push'
-    needs: [binaries, publish]
+    needs: [verify, release-contract, binaries, publish]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -261,6 +289,25 @@ jobs:
             dist/wirehub-*
             dist/SHA256SUMS
           body: |
+            ## Changes
+
+            - Atomic configuration revisions, stale-write rejection and safer live ACL activation.
+            - Management UI conflict recovery, retained drafts and clearer runtime status.
+            - Structured API errors, updated OpenAPI contract and bounded graceful shutdown.
+            - Paired database/Hub-key backup tooling and expanded network, operations and endurance checks.
+
+            ## Acceptance and upgrade
+
+            This release targets Linux servers with one Hub and a private IPv4 /24.
+            Mobile and desktop interoperability are outside this release's acceptance scope.
+            Review the [supported network behavior](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/operations.md#supported-scope)
+            and [release verification](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/release.md).
+
+            The database schema is now 5. Before upgrading, stop the service and preserve a
+            verified database/Hub-key pair. Rollback requires restoring the pre-upgrade pair;
+            do not open a migrated database with an older binary. See the
+            [backup and rollback procedure](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/operations.md#paired-backup-upgrade-and-rollback).
+
             ## Downloads
 
             | Platform | Binary |

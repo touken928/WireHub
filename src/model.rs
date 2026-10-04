@@ -93,10 +93,57 @@ pub struct Forward {
 }
 #[derive(Clone, Debug)]
 pub struct NetworkSnapshot {
+    pub revision: i64,
     pub settings: Option<NetworkSettings>,
     pub groups: Vec<Group>,
     pub peers: Vec<Peer>,
     pub forwards: Vec<Forward>,
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct Configuration {
+    pub revision: i64,
+    pub settings: Option<NetworkSettings>,
+    pub groups: Vec<Group>,
+    pub peers: Vec<Peer>,
+    pub forwards: Vec<Forward>,
+}
+
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyChange {
+    pub group_id: String,
+    pub allowed_groups: Vec<String>,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyRequest {
+    pub expected_revision: i64,
+    pub changes: Vec<PolicyChange>,
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct PolicyResult {
+    pub revision: i64,
+    pub groups: Vec<Group>,
+    pub applied_revision: Option<i64>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ErrorResponse {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persisted_revision: Option<i64>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct RuntimeStatus {
+    pub ready: bool,
+    pub persisted_revision: i64,
+    pub applied_revision: Option<i64>,
+    pub last_activation_error: Option<String>,
 }
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
