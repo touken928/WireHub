@@ -20,6 +20,7 @@ use super::{
 };
 
 const TIMER: Duration = Duration::from_secs(1);
+const PENDING_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const RETRY_INITIAL: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 
@@ -131,6 +132,26 @@ struct QueueObservation {
 }
 #[cfg(test)]
 tokio::task_local! { static QUEUE_OBSERVER: mpsc::UnboundedSender<QueueObservation>; }
+#[cfg(test)]
+#[derive(Debug, Eq, PartialEq)]
+struct DrainRetryObservation {
+    target_id: String,
+    packet_id: u16,
+}
+#[cfg(test)]
+tokio::task_local! { static DRAIN_RETRY_OBSERVER: mpsc::UnboundedSender<DrainRetryObservation>; }
+#[cfg(test)]
+#[derive(Debug)]
+struct DrainBatchObservation {
+    prepared: usize,
+    pending: usize,
+}
+#[cfg(test)]
+tokio::task_local! { static DRAIN_BATCH_OBSERVER: mpsc::UnboundedSender<DrainBatchObservation>; }
+#[cfg(test)]
+tokio::task_local! { static DRAIN_EGRESS_OVERRIDE: crate::kernel::dataplane::EgressOutcome; }
+
+const MAX_PENDING_DRAIN_DELIVERIES: usize = 32;
 
 struct RuntimeState {
     wireguard: wireguard::WireGuard,
@@ -221,6 +242,11 @@ impl Kernel {
         let mut out = vec![0u8; 65535];
         let mut timers = time::interval_at(time::Instant::now() + TIMER, TIMER);
         timers.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        let mut pending_retries = time::interval_at(
+            time::Instant::now() + PENDING_RETRY_INTERVAL,
+            PENDING_RETRY_INTERVAL,
+        );
+        pending_retries.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         let mut retry = SnapshotRetry::new();
         let mut retry_at = None;
         let mut minimum_revision = self.status.read().await.applied_revision.unwrap_or(0);
@@ -244,8 +270,11 @@ impl Kernel {
                     let _=command.ack.send(result.map_err(|_|ReloadError::Rejected));
                 }
                 _=timers.tick(),if timers_enabled()=>{
-                    self.state.dataplane.expire(Instant::now());self.state.wireguard.tick(&self.socket,&mut out).await;drain_pending(&self.socket,&mut self.state,&mut out).await;publish_stats(&self.state,&self.stats).await;
+                    self.state.dataplane.expire(Instant::now());self.state.wireguard.tick(&self.socket,&mut out).await;publish_stats(&self.state,&self.stats).await;
                     if retry_at.is_some_and(|at|Instant::now()>=at){match (self.loader)().map_err(|_|()).and_then(|snapshot|{let revision=snapshot.revision;if revision<minimum_revision{return Err(());}install_snapshot(snapshot,&mut self.state).map(|_|revision)}){Ok(revision)=>{minimum_revision=revision;publish_stats(&self.state,&self.stats).await;*self.status.write().await=ActivationStatus{applied_revision:Some(revision),last_error:None};self.readiness.store(true,Ordering::Release);retry_at=None;retry.succeeded();},Err(())=>{self.readiness.store(false,Ordering::Release);retry_at=Some(retry.failed_at(Instant::now()));eprintln!("runtime snapshot recovery failed; remaining fail-closed");}}}
+                }
+                _=pending_retries.tick(),if timers_enabled()&&self.state.dataplane.pending_len()>0=>{
+                    drain_pending(&self.socket,&mut self.state,&mut out,None).await;
                 }
                 received=self.socket.recv_from(&mut datagram)=>{
                      let (len,endpoint)=match classify_udp_receive(received,&self.readiness){Ok(Some(x))=>x,Ok(None)=>continue,Err(error)=>return Err(RunError::Socket(error))};
@@ -260,7 +289,7 @@ impl Kernel {
                         account(&mut self.state.stats,self.state.dataplane.finish(prepared,outcome,Instant::now()));
                         #[cfg(test)] if outcome==crate::kernel::dataplane::EgressOutcome::NotReady{QUEUE_OBSERVER.try_with(|observer|{let counters=self.state.stats.get(&id).map(|p|(p.rx_bytes,p.tx_bytes)).unwrap_or_default();let _=observer.send(QueueObservation{queued:self.state.dataplane.test_pending_observation(),queued_bytes:self.state.dataplane.pending_queue_bytes(),flow_counts:self.state.dataplane.flow_counts(),source_counters:counters});}).ok();}
                     }}
-                    if authenticated{drain_pending(&self.socket,&mut self.state,&mut out).await;}
+                    if authenticated{drain_pending(&self.socket,&mut self.state,&mut out,Some(&id)).await;}
                     #[cfg(test)] PACKET_RESULT_OBSERVER.try_with(|observer|{let _=observer.send(authenticated);}).ok();
                 }
             }
@@ -360,13 +389,51 @@ fn map_transport_outcome(
         wireguard::TransportOutcome::Failed => crate::kernel::dataplane::EgressOutcome::Failed,
     }
 }
-async fn drain_pending(socket: &UdpSocket, state: &mut RuntimeState, out: &mut [u8]) {
+async fn drain_pending(
+    socket: &UdpSocket,
+    state: &mut RuntimeState,
+    out: &mut [u8],
+    target_id: Option<&str>,
+) -> usize {
     let mut remaining = state.dataplane.pending_len();
-    while remaining > 0 {
+    let mut prepared_count = 0;
+    while remaining > 0 && prepared_count < MAX_PENDING_DRAIN_DELIVERIES {
         let now = Instant::now();
-        let Some(prepared) = state.dataplane.prepare_retry(&mut remaining, now) else {
+        let Some(prepared) = state
+            .dataplane
+            .prepare_retry_for_target(&mut remaining, now, target_id)
+        else {
             break;
         };
+        prepared_count += 1;
+        #[cfg(test)]
+        DRAIN_RETRY_OBSERVER
+            .try_with(|observer| {
+                let packet_id = prepared
+                    .bytes()
+                    .get(4..6)
+                    .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+                    .unwrap_or_default();
+                let _ = observer.send(DrainRetryObservation {
+                    target_id: prepared.target_id().to_owned(),
+                    packet_id,
+                });
+            })
+            .ok();
+        #[cfg(test)]
+        let test_outcome = DRAIN_EGRESS_OVERRIDE.try_with(|outcome| *outcome).ok();
+        #[cfg(test)]
+        let result = if let Some(outcome) = test_outcome {
+            outcome
+        } else {
+            map_transport_outcome(
+                state
+                    .wireguard
+                    .deliver(socket, prepared.target_id(), prepared.bytes(), out)
+                    .await,
+            )
+        };
+        #[cfg(not(test))]
         let result = map_transport_outcome(
             state
                 .wireguard
@@ -376,6 +443,16 @@ async fn drain_pending(socket: &UdpSocket, state: &mut RuntimeState, out: &mut [
         let accounting = state.dataplane.finish(prepared, result, Instant::now());
         account(&mut state.stats, accounting);
     }
+    #[cfg(test)]
+    DRAIN_BATCH_OBSERVER
+        .try_with(|observer| {
+            let _ = observer.send(DrainBatchObservation {
+                prepared: prepared_count,
+                pending: state.dataplane.pending_len(),
+            });
+        })
+        .ok();
+    prepared_count
 }
 
 #[cfg(test)]

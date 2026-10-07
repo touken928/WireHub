@@ -14,6 +14,12 @@ use axum::{
 };
 use std::sync::Arc;
 use std::time::Duration;
+
+#[derive(serde::Deserialize)]
+struct RetryProvisionBody {
+    peer: Peer,
+}
+
 fn test_state(configured: bool) -> (AppState, TestReceiver, HeaderMap) {
     let store = Arc::new(Store::open(":memory:").unwrap());
     store.bind_test_identity();
@@ -519,6 +525,70 @@ async fn http_disconnect_during_peer_activation_cleans_up_and_allows_retry() {
     worker.await.unwrap();
     server.abort();
     let _ = server.await;
+}
+
+#[tokio::test]
+async fn cancelled_provision_retries_cleanup_after_reload_queue_timeout() {
+    let (state, mut rx, headers) = test_state(true);
+    state
+        .store
+        .add_group(&Group {
+            id: "g".into(),
+            name: "g".into(),
+            allowed_groups: vec![],
+        })
+        .unwrap();
+
+    let request = tokio::spawn(create_peer(
+        State(state.clone()),
+        headers.clone(),
+        Json(NewPeer {
+            name: "retry-me".into(),
+            group_id: "g".into(),
+        }),
+    ));
+    let _activation = rx.recv().await.unwrap();
+    let runtime_peer = state.store.runtime_snapshot().unwrap().peers[0].clone();
+
+    // Fill the bounded command queue so the dropped guard's first reservation
+    // times out, then make room for its retry.
+    for _ in 0..16 {
+        drop(state.kernel.reserve_reload().await.unwrap().send());
+    }
+    request.abort();
+    let _ = request.await;
+    tokio::time::sleep(Duration::from_secs(3) + Duration::from_millis(100)).await;
+    for _ in 0..16 {
+        rx.recv().await.unwrap().respond(Ok(()));
+    }
+    let cleanup = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("cleanup retry should reserve a reload")
+        .unwrap();
+    assert!(state.store.runtime_snapshot().unwrap().peers.is_empty());
+    assert!(state.store.peers().unwrap().is_empty());
+    cleanup.respond(Ok(()));
+
+    let retry = tokio::spawn(create_peer(
+        State(state.clone()),
+        headers,
+        Json(NewPeer {
+            name: "retry-me".into(),
+            group_id: "g".into(),
+        }),
+    ));
+    rx.recv().await.unwrap().respond(Ok(()));
+    let response = retry.await.unwrap().into_response();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let provision: RetryProvisionBody = serde_json::from_slice(&body).unwrap();
+    assert_eq!(provision.peer.ipv4, runtime_peer.ipv4);
+    assert_eq!(provision.peer.name, runtime_peer.name);
+
+    state.store.remove_peer(&provision.peer.id).unwrap();
+    assert_eq!(state.store.remove_group("g").unwrap(), 1);
 }
 
 #[tokio::test]

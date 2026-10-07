@@ -21,7 +21,7 @@ def secure_read(path, key=False):
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(descriptor, "rb") as source:
         metadata = os.fstat(source.fileno())
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        if not stat.S_ISREG(metadata.st_mode) or (not key and metadata.st_nlink != 1):
             raise ValueError("Backup inputs must be regular files with one hard link")
         if key and (stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_size != 32):
             raise ValueError("Hub key must contain exactly 32 bytes with mode 0600")

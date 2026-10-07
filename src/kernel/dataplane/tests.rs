@@ -63,6 +63,35 @@ fn pending_is_bounded_expires_and_ttl_is_decremented_only_on_ingress() {
 }
 
 #[test]
+fn retry_target_filter_preserves_unrelated_pending_without_preparing_it() {
+    let mut dp = plane();
+    let now = Instant::now();
+    let raw = request();
+    let prepared = dp.prepare(ingress(&dp, &raw), now).unwrap();
+    dp.finish(prepared, EgressOutcome::NotReady, now);
+    let deadline = dp.pending.entries.front().unwrap().deadline;
+    let counts = dp.flow_counts();
+    let mut remaining = dp.pending_len();
+
+    assert!(dp
+        .prepare_retry_for_target(&mut remaining, now + Duration::from_millis(1), Some("a"))
+        .is_none());
+    assert_eq!(remaining, 0);
+    assert_eq!(dp.pending_counts(), (1, raw.len()));
+    assert_eq!(dp.pending_queue_bytes(), raw.len());
+    assert_eq!(dp.pending.entries.front().unwrap().deadline, deadline);
+    assert_eq!(dp.flow_counts(), counts);
+
+    let mut remaining = dp.pending_len();
+    let retry = dp
+        .prepare_retry_for_target(&mut remaining, now + Duration::from_millis(1), Some("b"))
+        .expect("matching target retry should be prepared");
+    assert_eq!(retry.target_id(), "b");
+    assert_eq!(retry.bytes()[8], 63, "retry must not decrement TTL again");
+    assert_eq!(dp.pending_counts(), (0, 0));
+}
+
+#[test]
 fn stale_authenticated_identity_and_pending_route_provenance_are_rejected() {
     let mut dp = plane();
     let raw = request();

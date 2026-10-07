@@ -170,6 +170,21 @@ def run(binary, rollback_binary, output):
         finally:
             shutdown_seconds = hub.stop()
         checks.append("SIGTERM drains and exits zero within ten seconds")
+        # A crash between link(2) and unlink(2) may leave the atomic key
+        # publication temporary name behind. A restarted service must retain
+        # the original identity, and backup must accept that key's link count.
+        key = hub.directory / "wirehub.key"
+        residue = hub.directory / (".key." + secrets.token_hex(8) + ".tmp")
+        os.link(key, residue)
+        linked_hub = Hub(binary, hub.directory)
+        try:
+            check(
+                snapshot(linked_hub.url, linked_hub.token) == before,
+                "Restart with a residual key hard link changed service state",
+            )
+        finally:
+            linked_hub.stop()
+        checks.append("restart preserves identity with residual key publication hard link")
         # Canonical schema 4 pre-upgrade fixture, using only the temporary pair.
         with sqlite3.connect(hub.directory / "wirehub.sqlite3") as connection:
             connection.execute("DROP TABLE config_state")
@@ -185,8 +200,36 @@ def run(binary, rollback_binary, output):
             for name in ("wirehub.sqlite3", "wirehub.key", "manifest.json")
         }
         checks.append(
-            "canonical schema 4 paired backup with integrity/identity validation"
+            "canonical schema 4 paired backup with integrity/identity validation despite key hard link"
         )
+        # The key exception is intentionally narrow: database hard links,
+        # key symlinks, and keys with unsafe permissions/size remain rejected.
+        database_alias = directory / "database-hardlink.sqlite3"
+        os.link(hub.directory / "wirehub.sqlite3", database_alias)
+        expect_failure(
+            lambda: backup.backup(
+                database_alias, key, directory / "database-hardlink-backup"
+            ),
+            "Database hard link passed instance locking",
+        )
+        key_symlink = directory / "key-symlink"
+        key_symlink.symlink_to(key)
+        expect_failure(
+            lambda: backup.secure_read(key_symlink, key=True),
+            "Hub key symlink was accepted",
+        )
+        insecure_key = directory / "insecure.key"
+        shutil.copyfile(key, insecure_key)
+        insecure_key.chmod(0o644)
+        expect_failure(
+            lambda: backup.secure_read(insecure_key, key=True),
+            "Insecurely permissioned hub key was accepted",
+        )
+        check(
+            key.stat().st_nlink == 2,
+            "Residual publication hard link did not remain during backup checks",
+        )
+        checks.append("database hard links, key symlinks and insecure keys remain rejected")
         upgraded = directory / "upgraded"
         backup.restore(archive, upgraded)
         migrated = Hub(binary, upgraded)

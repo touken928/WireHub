@@ -74,6 +74,35 @@ async fn cleanup_failed_provision(state: &AppState, peer_id: &str) -> bool {
     permit.send().wait().await.is_ok()
 }
 
+async fn cleanup_failed_provision_until_done(state: &AppState, peer_id: &str) {
+    let mut delay = std::time::Duration::from_millis(25);
+    loop {
+        let permit = match state.kernel.reserve_reload().await {
+            Ok(permit) => permit,
+            Err(crate::kernel::ReloadError::Stopped) => return,
+            Err(crate::kernel::ReloadError::Timeout | crate::kernel::ReloadError::Rejected) => {
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(std::time::Duration::from_secs(1));
+                continue;
+            }
+        };
+        if state.store.remove_peer(peer_id).is_err() {
+            drop(permit);
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(std::time::Duration::from_secs(1));
+            continue;
+        }
+        match permit.send().wait().await {
+            Ok(()) => return,
+            Err(crate::kernel::ReloadError::Stopped) => return,
+            Err(crate::kernel::ReloadError::Timeout | crate::kernel::ReloadError::Rejected) => {
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(std::time::Duration::from_secs(1));
+            }
+        }
+    }
+}
+
 struct ProvisionGuard {
     state: AppState,
     peer_id: String,
@@ -99,9 +128,7 @@ impl Drop for ProvisionGuard {
         // the HTTP connection; the durable journal covers process termination.
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                if !cleanup_failed_provision(&state, &peer_id).await {
-                    eprintln!("cancelled peer provisioning cleanup was not acknowledged");
-                }
+                cleanup_failed_provision_until_done(&state, &peer_id).await;
             });
         }
     }
@@ -265,5 +292,75 @@ pub async fn move_peer(
             err(StatusCode::BAD_REQUEST, "unknown group").into_response()
         }
         Err(_) => err(StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cleanup_failed_provision_until_done;
+    use crate::{
+        api::AppState,
+        kernel::control::test_harness,
+        model::{Group, Peer},
+        storage::Store,
+    };
+    use std::{sync::Arc, time::Duration};
+
+    #[tokio::test]
+    async fn cancelled_cleanup_exits_when_kernel_is_stopped_and_leaves_journal_entry() {
+        let store = Arc::new(Store::open(":memory:").unwrap());
+        store.bind_test_identity();
+        store.setup("10.88.0.0/24", "hub.example:51820", 25).unwrap();
+        store
+            .add_group(&Group {
+                id: "g".into(),
+                name: "g".into(),
+                allowed_groups: vec![],
+            })
+            .unwrap();
+        let mut peer = Peer {
+            id: "pending-on-stop".into(),
+            name: "pending-on-stop".into(),
+            public_key: "public-key".into(),
+            ipv4: String::new(),
+            group_id: "g".into(),
+            received_bytes: 0,
+            sent_bytes: 0,
+            last_handshake_unix: None,
+        };
+        assert!(store.begin_peer_provision(&mut peer).unwrap());
+
+        let weak_store = Arc::downgrade(&store);
+        let (kernel, receiver) = test_harness();
+        let state = AppState {
+            store: store.clone(),
+            token: None,
+            hub_public: String::new(),
+            kernel,
+        };
+        drop(receiver);
+
+        let cleanup_state = state.clone();
+        let peer_id = peer.id.clone();
+        let cleanup = tokio::spawn(async move {
+            cleanup_failed_provision_until_done(&cleanup_state, &peer_id).await;
+        });
+        tokio::time::timeout(Duration::from_millis(250), cleanup)
+            .await
+            .expect("cleanup should stop promptly when the kernel receiver is closed")
+            .unwrap();
+
+        assert!(state.store.peers().unwrap().is_empty());
+        assert_eq!(
+            state.store.runtime_snapshot().unwrap().peers[0].id,
+            peer.id,
+            "unreserved pending peer remains in the startup snapshot"
+        );
+        assert_eq!(state.store.recover_pending_provisions().unwrap(), 1);
+        assert!(state.store.runtime_snapshot().unwrap().peers.is_empty());
+
+        drop(state);
+        drop(store);
+        assert!(weak_store.upgrade().is_none(), "cleanup must not retain Store");
     }
 }

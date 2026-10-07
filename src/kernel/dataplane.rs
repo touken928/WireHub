@@ -186,23 +186,43 @@ impl DataPlane {
     pub(crate) fn pending_len(&self) -> usize {
         self.pending.entries.len()
     }
+    #[cfg(test)]
     pub(crate) fn prepare_retry(
         &mut self,
         remaining: &mut usize,
         now: Instant,
+    ) -> Option<PreparedDelivery> {
+        self.prepare_retry_for_target(remaining, now, None)
+    }
+    pub(crate) fn prepare_retry_for_target(
+        &mut self,
+        remaining: &mut usize,
+        now: Instant,
+        target_id: Option<&str>,
     ) -> Option<PreparedDelivery> {
         while *remaining > 0 {
             let Some(item) = self.pending.entries.pop_front() else {
                 break;
             };
             *remaining -= 1;
+            if item.deadline <= now {
+                self.pending.bytes = self
+                    .pending
+                    .bytes
+                    .saturating_sub(item.ingress.packet.bytes().len());
+                continue;
+            }
+            // Keep unrelated packets as lightweight queue metadata only. In particular,
+            // do not clone the ingress or invoke prepare_inner on an authenticated
+            // event for a different peer.
+            if target_id.is_some_and(|target| item.stamp.target_id != target) {
+                self.pending.entries.push_back(item);
+                continue;
+            }
             self.pending.bytes = self
                 .pending
                 .bytes
                 .saturating_sub(item.ingress.packet.bytes().len());
-            if item.deadline <= now {
-                continue;
-            }
             if !self.provenance_valid(&item.ingress, &item.stamp, now) {
                 continue;
             }

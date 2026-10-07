@@ -31,6 +31,222 @@ async fn sampled_after_rx(
     .expect("periodic statistics did not include delivered traffic")
 }
 
+#[tokio::test]
+async fn pending_drain_caps_retries_and_rotates_fairly_across_batches() {
+    use crate::kernel::{dataplane::DataPlane, snapshot::PeerConfig};
+
+    let group = Group {
+        id: "g".into(),
+        name: "g".into(),
+        allowed_groups: vec!["g".into()],
+    };
+    let a = PeerConfig {
+        id: "a".into(),
+        key: [1; 32],
+        ip: Ipv4Addr::new(10, 77, 0, 2),
+        group_id: "g".into(),
+        group: Some(group.clone()),
+    };
+    let b = PeerConfig {
+        id: "b".into(),
+        key: [2; 32],
+        ip: Ipv4Addr::new(10, 77, 0, 3),
+        group_id: "g".into(),
+        group: Some(group),
+    };
+    let mut dataplane = DataPlane::default();
+    dataplane.config.peers.insert("a".into(), a.clone());
+    dataplane.config.peers.insert("b".into(), b.clone());
+    dataplane.config.by_ip.insert(b.ip, "b".into());
+    let mut wireguard = wireguard::WireGuard::new([3; 32]);
+    wireguard
+        .install(vec![
+            wireguard::PeerIdentity {
+                id: a.id.clone(),
+                key: a.key,
+                ip: a.ip,
+            },
+            wireguard::PeerIdentity {
+                id: b.id.clone(),
+                key: b.key,
+                ip: b.ip,
+            },
+        ])
+        .unwrap();
+    let mut state = RuntimeState {
+        wireguard,
+        dataplane,
+        stats: HashMap::new(),
+    };
+    let now = Instant::now();
+    let authenticated = state.dataplane.authenticated_peer("a").unwrap();
+    for packet_id in 0..40u16 {
+        let mut raw = ipv4::test_packet([10, 77, 0, 2], [10, 77, 0, 3], false, false);
+        raw[4..6].copy_from_slice(&packet_id.to_be_bytes());
+        raw[10..12].fill(0);
+        let header_checksum = checksum(&raw[..20]);
+        raw[10..12].copy_from_slice(&header_checksum.to_be_bytes());
+        let ingress = state.dataplane.ingress(&authenticated, &raw).unwrap();
+        let prepared = state.dataplane.prepare(ingress, now).unwrap();
+        state
+            .dataplane
+            .finish(prepared, crate::kernel::dataplane::EgressOutcome::NotReady, now);
+    }
+    assert_eq!(state.dataplane.pending_len(), 40);
+
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut out = vec![0u8; 65535];
+    let (observer, mut observations) = mpsc::unbounded_channel();
+    DRAIN_RETRY_OBSERVER
+        .scope(observer, async {
+            assert_eq!(
+                drain_pending(&socket, &mut state, &mut out, Some("a")).await,
+                0,
+                "an authenticated event for an unrelated target must not retry packets"
+            );
+            assert!(observations.try_recv().is_err());
+
+            assert_eq!(
+                drain_pending(&socket, &mut state, &mut out, Some("b")).await,
+                MAX_PENDING_DRAIN_DELIVERIES
+            );
+            let first = (0..MAX_PENDING_DRAIN_DELIVERIES)
+                .map(|_| {
+                    let observation = observations.try_recv().unwrap();
+                    assert_eq!(observation.target_id, "b");
+                    observation.packet_id
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(first, (0..32).collect::<Vec<_>>());
+            assert_eq!(state.dataplane.pending_len(), 40);
+
+            // The timer's unfiltered fallback visits the rotated queue, then the
+            // remaining tail; together it reaches every still-pending packet.
+            assert_eq!(
+                drain_pending(&socket, &mut state, &mut out, None).await,
+                MAX_PENDING_DRAIN_DELIVERIES
+            );
+            let second = (0..MAX_PENDING_DRAIN_DELIVERIES)
+                .map(|_| {
+                    let observation = observations.try_recv().unwrap();
+                    assert_eq!(observation.target_id, "b");
+                    observation.packet_id
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(second[..8], (32..40).collect::<Vec<_>>());
+            assert_eq!(
+                drain_pending(&socket, &mut state, &mut out, None).await,
+                MAX_PENDING_DRAIN_DELIVERIES
+            );
+            let third = (0..MAX_PENDING_DRAIN_DELIVERIES)
+                .map(|_| {
+                    let observation = observations.try_recv().unwrap();
+                    assert_eq!(observation.target_id, "b");
+                    observation.packet_id
+                })
+                .collect::<Vec<_>>();
+            let mut covered = second;
+            covered.extend(third);
+            covered.sort_unstable();
+            covered.dedup();
+            assert_eq!(covered, (0..40).collect::<Vec<_>>());
+            assert_eq!(state.dataplane.pending_len(), 40);
+            assert!(observations.try_recv().is_err());
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn pending_retry_interval_drains_backlog_before_pending_ttl_without_auth_events() {
+    use crate::kernel::snapshot::PeerConfig;
+
+    let group = Group {
+        id: "g".into(),
+        name: "g".into(),
+        allowed_groups: vec!["g".into()],
+    };
+    let a = PeerConfig {
+        id: "a".into(),
+        key: [11; 32],
+        ip: Ipv4Addr::new(10, 77, 0, 2),
+        group_id: "g".into(),
+        group: Some(group.clone()),
+    };
+    let b = PeerConfig {
+        id: "b".into(),
+        key: [12; 32],
+        ip: Ipv4Addr::new(10, 77, 0, 3),
+        group_id: "g".into(),
+        group: Some(group),
+    };
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let (mut kernel, handle) = Kernel::initialize(socket, [13; 32], || Ok(empty_compiled()))
+        .await
+        .unwrap();
+    kernel.state.dataplane.config.peers.insert("a".into(), a);
+    kernel.state.dataplane.config.peers.insert("b".into(), b.clone());
+    kernel.state.dataplane.config.by_ip.insert(b.ip, "b".into());
+    let authenticated = kernel.state.dataplane.authenticated_peer("a").unwrap();
+    let queued_at = Instant::now();
+    for packet_id in 0..256u16 {
+        let mut raw = ipv4::test_packet([10, 77, 0, 2], [10, 77, 0, 3], false, false);
+        raw[4..6].copy_from_slice(&packet_id.to_be_bytes());
+        raw[10..12].fill(0);
+        let header_checksum = checksum(&raw[..20]);
+        raw[10..12].copy_from_slice(&header_checksum.to_be_bytes());
+        let ingress = kernel.state.dataplane.ingress(&authenticated, &raw).unwrap();
+        let prepared = kernel.state.dataplane.prepare(ingress, queued_at).unwrap();
+        kernel.state.dataplane.finish(
+            prepared,
+            crate::kernel::dataplane::EgressOutcome::NotReady,
+            queued_at,
+        );
+    }
+    assert_eq!(kernel.state.dataplane.pending_len(), 256);
+
+    let (retry_tx, mut retries) = mpsc::unbounded_channel();
+    let (batch_tx, mut batches) = mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        DRAIN_RETRY_OBSERVER.scope(
+            retry_tx,
+            DRAIN_BATCH_OBSERVER.scope(
+                batch_tx,
+                DRAIN_EGRESS_OVERRIDE.scope(
+                    crate::kernel::dataplane::EgressOutcome::Delivered,
+                    kernel.run(),
+                ),
+            ),
+        ).await
+    });
+
+    // No further authenticated packets are sent. Production's independent
+    // 100 ms interval must drain eight bounded batches well before the 3 s TTL.
+    let mut packet_ids = Vec::with_capacity(256);
+    let started = Instant::now();
+    timeout(Duration::from_millis(2500), async {
+        loop {
+            let batch = batches.recv().await.expect("runtime stopped before retry");
+            assert_eq!(batch.prepared, MAX_PENDING_DRAIN_DELIVERIES);
+            for _ in 0..batch.prepared {
+                let observation = retries.recv().await.expect("missing retry observation");
+                assert_eq!(observation.target_id, "b");
+                packet_ids.push(observation.packet_id);
+            }
+            if batch.pending == 0 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("periodic pending retries exceeded the original TTL");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    packet_ids.sort_unstable();
+    assert_eq!(packet_ids, (0..256).collect::<Vec<_>>());
+    assert!(retries.try_recv().is_err());
+    task.abort();
+    drop(handle);
+}
+
 use crate::kernel::checksum::checksum;
 use crate::model::Group;
 use base64::Engine;
