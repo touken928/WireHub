@@ -1,7 +1,8 @@
 # Operations
 
-The working version is **1.0.0-rc.1**, with schema 5. This is a release candidate;
-local evidence does not establish a published 1.0.0 release or a hosted CI pass.
+The release target is **1.0.1**, with schema 5 (unchanged from 1.0.0).
+HTTP bind addresses no longer require an additional proxy-mode opt-in;
+management API bearer authentication remains required.
 See [release verification](release.md) and [performance measurements](performance.md).
 
 ## Supported scope

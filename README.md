@@ -27,14 +27,12 @@ WireHub supports native builds on Unix systems only. Windows is unsupported and 
 
 ### Docker
 
-Clone this repository and use the included [`compose.yml`](compose.yml) to build the current source:
+Save the following as [`compose.yml`](compose.yml), or use the file included in this repository:
 
 ```yaml
 services:
   wirehub:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
+    image: ghcr.io/touken928/wirehub:1.0.1
     restart: unless-stopped
     environment:
       WIREHUB_ADMIN_TOKEN: ${WIREHUB_ADMIN_TOKEN:?Set WIREHUB_ADMIN_TOKEN to a long random secret}
@@ -48,16 +46,14 @@ services:
 Set your own long random admin secret and start WireHub from the directory containing `compose.yml`:
 
 ```sh
-mkdir -p data
-sudo chown 65532:65532 data
-sudo chmod 700 data
+sudo install -d -o 65532 -g 65532 -m 700 data
 export WIREHUB_ADMIN_TOKEN='replace-with-a-long-random-secret'
-docker compose up -d --build
+docker compose up -d
 ```
 
 You can also set `WIREHUB_ADMIN_TOKEN` in a local `.env` file beside `compose.yml`.
 The `./data` directory beside `compose.yml` stores the database and Hub key across container updates.
-The container runs as UID/GID `65532:65532`; the commands above prepare that directory with the required ownership and permissions.
+The container runs as UID/GID `65532:65532`; the command above prepares that directory with the required ownership and permissions.
 
 ### Linux binary
 
@@ -172,7 +168,7 @@ Building the service requires Rust 1.89 or newer for the standard-library file
 locking API. This minimum requirement does not imply that every Rust release
 has been independently tested.
 
-This release (`1.0.0`) uses strict schema version 5. Canonical version 3 and 4 databases are validated and upgraded atomically, including the pending-provision journal and monotonic configuration revision; existing configuration and hub identity are preserved. Older or structurally drifted databases are rejected. Version 5 databases cannot be opened by an older version 4 binary. At startup, WireHub binds the hub private-key file to the public identity persisted in SQLite; network setup does not create or bind that identity. Back up the SQLite database and hub private-key file together as an immutable identity pair. Restoring only one half can make startup fail because the persisted public identity must match the private key. Schema drift detection includes unexpected SQLite statistics tables and index objects.
+This release (`1.0.1`) uses strict schema version 5. Canonical version 3 and 4 databases are validated and upgraded atomically, including the pending-provision journal and monotonic configuration revision; existing configuration and hub identity are preserved. Older or structurally drifted databases are rejected. Version 5 databases cannot be opened by an older version 4 binary. At startup, WireHub binds the hub private-key file to the public identity persisted in SQLite; network setup does not create or bind that identity. Back up the SQLite database and hub private-key file together as an immutable identity pair. Restoring only one half can make startup fail because the persisted public identity must match the private key. Schema drift detection includes unexpected SQLite statistics tables and index objects.
 
 Peer provisioning records its pending state without storing the private key. Pending peers are hidden from the peer inventory and cannot be forwarding targets. Cancelling an HTTP request during activation schedules peer removal and a cleanup reload; startup removes any remaining unfinished provisions before loading the router. Successful provisioning clears the pending marker before returning the one-time configuration. Save that response: delivery acknowledgement by the client is not tracked, so a lost response still requires deleting and recreating the peer.
 

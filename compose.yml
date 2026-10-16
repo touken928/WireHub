@@ -1,8 +1,6 @@
 services:
   wirehub:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
+    image: ghcr.io/touken928/wirehub:1.0.1
     restart: unless-stopped
     environment:
       WIREHUB_ADMIN_TOKEN: ${WIREHUB_ADMIN_TOKEN:?Set WIREHUB_ADMIN_TOKEN to a long random secret}

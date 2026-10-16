@@ -294,10 +294,10 @@ jobs:
           body: |
             ## Changes
 
-            - Atomic configuration revisions, stale-write rejection and safer live ACL activation.
-            - Management UI conflict recovery, retained drafts and clearer runtime status.
-            - Structured API errors, updated OpenAPI contract and bounded graceful shutdown.
-            - Paired database/Hub-key backup tooling and expanded network, operations and endurance checks.
+            - Remove the non-loopback HTTP startup restriction; `WIREHUB_TRUSTED_PROXY_MODE` is no longer needed.
+            - Keep admin-token authentication required for management APIs.
+            - Add Compose deployment with a pinned image, relative `./data` mount and simplified directory setup.
+            - Keep the API and database schema unchanged from 1.0.0.
 
             ## Acceptance and upgrade
 
@@ -306,7 +306,7 @@ jobs:
             Review the [supported network behavior](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/operations.md#supported-scope)
             and [release verification](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/release.md).
 
-            The database schema is now 5. Before upgrading, stop the service and preserve a
+            The database schema remains 5. Before upgrading, stop the service and preserve a
             verified database/Hub-key pair. Rollback requires restoring the pre-upgrade pair;
             do not open a migrated database with an older binary. See the
             [backup and rollback procedure](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/operations.md#paired-backup-upgrade-and-rollback).

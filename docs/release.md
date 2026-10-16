@@ -1,6 +1,6 @@
 # Release verification
 
-Release target: **1.0.0**, schema **5**. The acceptance scope is one Hub,
+Release target: **1.0.1**, schema **5**. The acceptance scope is one Hub,
 a private IPv4 /24, Linux servers and the embedded management UI. Mobile testing
 is excluded and desktop interoperability is deferred for this acceptance.
 Supported behavior and network limitations are in [operations](operations.md).
@@ -17,7 +17,7 @@ Supported behavior and network limitations are in [operations](operations.md).
   pre-upgrade pair throughout acceptance; see [backup and rollback](operations.md#paired-backup-upgrade-and-rollback).
 - [ ] Agree Cargo, lockfile, frontend and exact release-tag versions. CI embeds
   the release commit SHA in binaries and containers and verifies their output.
-  RC tags remain prereleases; formal 1.0.0 requires matching `v1.0.0` and packages.
+  RC tags remain prereleases; formal releases require exact agreement between the tag and packages.
 
 The reusable integration workflow gates publishing. The
 [hosted RC preflight](https://github.com/touken928/WireHub/actions/runs/37187394418)
@@ -28,6 +28,20 @@ container architectures also passed version/build-ID, startup and embedded-UI
 checks. Its reports and binary artifacts are retained with that workflow run.
 The tag-triggered release workflow repeats the gates on the exact tagged commit
 before publishing binaries, checksums, containers and a GitHub release (prerelease for RC tags).
+
+## 1.0.1 patch release
+
+- Remove the non-loopback HTTP startup restriction and the proxy-mode environment
+  variable. IPv4 bind validation and required admin-token authentication remain.
+- Provide a Compose deployment using the pinned 1.0.1 image and `./data:/data`,
+  with a single command to prepare the non-root container's data directory.
+- Exercise non-loopback startup without an additional opt-in in operations
+  acceptance and remove the old variable from container acceptance workflows.
+- Keep API behavior and database schema 5 unchanged from 1.0.0.
+
+The tag-triggered workflow must pass all gates on the exact release commit before
+publishing. The previous formal release passed its
+[release workflow](https://github.com/touken928/WireHub/actions/runs/38892124110).
 
 ## 1.0.0 release review — 2026-10-16
 
@@ -66,7 +80,7 @@ actionlint
 pnpm --dir frontend test:ui
 target/release/wirehub export-openapi > /tmp/wirehub-openapi.json
 cmp openapi.json /tmp/wirehub-openapi.json
-python3 scripts/check-release.py --tag v1.0.0 --binary target/release/wirehub
+python3 scripts/check-release.py --tag v1.0.1 --binary target/release/wirehub
 ```
 
 CI also compiles all targets with the minimum supported Rust **1.89.0**.
