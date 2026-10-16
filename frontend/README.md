@@ -18,6 +18,21 @@ Drag any of the four handles to connect groups. One-way access follows the drag 
 
 Group positions are saved only in browser local storage. Auto layout and fit controls adjust the canvas. No backend layout endpoint is required. Interactions follow [the reference canvas](https://github.com/touken928/WireHub/tree/v0/web/src/components/groups).
 
+## Component boundaries
+
+`App.tsx` owns the authenticated session, authoritative resource lists and the
+freshness boundary for background reads. Modal state records one kind and, for
+forward editing, the rule ID; unrelated dialog states cannot be combined.
+
+`components/forwards/ForwardDialog.tsx` owns forward form drafts, loading and
+revision preconditions. Both creation and editing invalidate background reads
+at mutation start and settlement. The resource owner merges confirmed forwards
+by ID, so a refresh cannot duplicate a newly created rule.
+
+`components/Dialog.tsx` owns modal focus, keyboard containment and dismissal.
+It focuses an enabled control even while a form is loading. API response parsing
+and mutation error messages live in `src/api/client.ts`.
+
 ## UI regression tests
 
 Requires Node.js 22 and an installed Google Chrome. After building:

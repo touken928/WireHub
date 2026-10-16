@@ -63,17 +63,13 @@ pub(crate) struct IngressPacket {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ForwardIdentity {
+pub(crate) enum RouteOrigin {
+    Direct,
     Forward {
         id: String,
         protocol: TransportProtocol,
         target_port: u16,
     },
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum RouteOrigin {
-    Direct,
-    Forward(ForwardIdentity),
     ReplyOnly,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -252,23 +248,7 @@ impl DataPlane {
         let packet = &ingress.packet;
         let mut plan = None;
         let mut origin = RouteOrigin::Direct;
-        if expected
-            .as_ref()
-            .is_some_and(|stamp| stamp.origin == RouteOrigin::ReplyOnly)
-        {
-            let (target_id, rewrite, reservation) =
-                self.flows.lookup_reply(packet, &source, now)?;
-            let (bytes, reservation) = rewrite_reserved(
-                &mut self.flows,
-                packet,
-                rewrite,
-                reservation,
-                now,
-                |p, r| p.rewrite(r),
-            )?;
-            plan = Some((target_id, bytes, reservation));
-            origin = RouteOrigin::ReplyOnly;
-        } else if let Some((target_id, rewrite, reservation)) =
+        if let Some((target_id, rewrite, reservation)) =
             self.flows.lookup_reply(packet, &source, now)
         {
             let (bytes, reservation) = rewrite_reserved(
@@ -282,7 +262,13 @@ impl DataPlane {
             plan = Some((target_id, bytes, reservation));
             origin = RouteOrigin::ReplyOnly;
         } else {
-            if matches!(packet.association(), FlowAssociation::Related { .. }) {
+            // A queued reply or related ICMP error cannot become a new route
+            // after its original reverse mapping expires or is revoked.
+            if expected
+                .as_ref()
+                .is_some_and(|stamp| stamp.origin == RouteOrigin::ReplyOnly)
+                || matches!(packet.association(), FlowAssociation::Related { .. })
+            {
                 return None;
             }
             if packet.dst() == self.config.hub_ip.unwrap_or(Ipv4Addr::UNSPECIFIED) {
@@ -314,11 +300,11 @@ impl DataPlane {
                         now,
                         |p, r| p.rewrite(r),
                     )?;
-                    origin = RouteOrigin::Forward(ForwardIdentity::Forward {
+                    origin = RouteOrigin::Forward {
                         id: forward.id.clone(),
                         protocol: forward.protocol,
                         target_port: forward.target_port,
-                    });
+                    };
                     plan = Some((target.id.clone(), bytes, reservation));
                     break;
                 }
@@ -428,11 +414,11 @@ impl DataPlane {
                 policy::route_allowed(source.group.as_ref(), target.group.as_ref())
                     && (ingress.packet.dst() == target.ip)
             }
-            RouteOrigin::Forward(ForwardIdentity::Forward {
+            RouteOrigin::Forward {
                 id,
                 protocol,
                 target_port,
-            }) => self
+            } => self
                 .config
                 .forward_index
                 .by_id
@@ -470,7 +456,7 @@ impl DataPlane {
             .iter()
             .map(|item| {
                 let fid = match &item.stamp.origin {
-                    RouteOrigin::Forward(ForwardIdentity::Forward { id, .. }) => Some(id.clone()),
+                    RouteOrigin::Forward { id, .. } => Some(id.clone()),
                     _ => None,
                 };
                 (

@@ -21,7 +21,13 @@ export class ApiError extends Error {
   constructor(message: string, readonly status: number, readonly code?: string, readonly persistedRevision?: number) { super(message); this.name = 'ApiError' }
 }
 
-function throwSetupError(status: number, payload: unknown): never {
+export const mutationFailure = (error: unknown, fallback: string) => {
+  const message = error instanceof Error ? error.message : ''
+  if (/\b503\b|\b5\d\d\b|network|fetch failed|failed to fetch|networkerror/i.test(message)) return 'Result unconfirmed. Refresh to check the current state before retrying.'
+  return message || fallback
+}
+
+function throwApiError(status: number, payload: unknown): never {
   const detail = payload && typeof payload === 'object' && 'message' in payload
     ? String((payload as { message: unknown }).message)
     : typeof payload === 'string' ? payload.trim() : ''
@@ -32,17 +38,17 @@ function throwSetupError(status: number, payload: unknown): never {
 export const configApi = {
   async get(): Promise<Configuration> {
     const { data, error, response } = await client.GET('/api/config', { cache: 'no-store' })
-    if (!response.ok || !data) throwSetupError(response.status, error)
+    if (!response.ok || !data) throwApiError(response.status, error)
     return data
   },
   async save(expected_revision: number, changes: { id: string; allowed: string[] }[]): Promise<PolicyResult> {
     const { data, error, response } = await client.PUT('/api/policy', { body: { expected_revision, changes: changes.map(({ id, allowed }) => ({ group_id: id, allowed_groups: allowed })) }, cache: 'no-store' })
-    if (!response.ok || !data) throwSetupError(response.status, error)
+    if (!response.ok || !data) throwApiError(response.status, error)
     return data
   },
   async status(): Promise<RuntimeStatus> {
     const { data, error, response } = await client.GET('/api/status', { cache: 'no-store' })
-    if (!response.ok || !data) throwSetupError(response.status, error)
+    if (!response.ok || !data) throwApiError(response.status, error)
     return data
   },
 }
@@ -50,17 +56,17 @@ export const configApi = {
 export const setupApi = {
   async get(): Promise<SetupStatus> {
     const { data, error, response } = await client.GET('/api/setup', { cache: 'no-store' })
-    if (error || !response.ok) throwSetupError(response.status, error)
+    if (error || !response.ok) throwApiError(response.status, error)
     return data as SetupStatus
   },
   async create(body: SetupRequest): Promise<NetworkSettings> {
     const { data, error, response } = await client.POST('/api/setup', { body, cache: 'no-store' })
-    if (error || !response.ok) throwSetupError(response.status, error)
+    if (error || !response.ok) throwApiError(response.status, error)
     return data as NetworkSettings
   },
   async update(body: SettingsRequest): Promise<NetworkSettings> {
     const { data, error, response } = await client.PUT('/api/settings', { body, cache: 'no-store' })
-    if (error || !response.ok) throwSetupError(response.status, error)
+    if (error || !response.ok) throwApiError(response.status, error)
     return data as NetworkSettings
   },
 }
@@ -68,22 +74,22 @@ export const setupApi = {
 export const forwardsApi = {
   async list(): Promise<Forward[]> {
     const { data, error, response } = await client.GET('/api/forwards')
-    if (!response.ok || !data) throwSetupError(response.status, error)
+    if (!response.ok || !data) throwApiError(response.status, error)
     return data
   },
   async create(body: NewForward): Promise<Forward> {
     const { data, error, response } = await client.POST('/api/forwards', { body })
-    if (!response.ok || !data) throwSetupError(response.status, error)
+    if (!response.ok || !data) throwApiError(response.status, error)
     return data
   },
   async update(id: string, revision: number, body: NewForward): Promise<Forward> {
     const { data, error, response } = await client.PUT('/api/forwards/{id}', { params: { path: { id }, header: { 'If-Match': `"${revision}"` } }, body })
-    if (!response.ok || !data) throwSetupError(response.status, error)
+    if (!response.ok || !data) throwApiError(response.status, error)
     return data
   },
   async remove(id: string) {
     const { error, response } = await client.DELETE('/api/forwards/{id}', { params: { path: { id } } })
-    if (!response.ok) throwSetupError(response.status, error)
+    if (!response.ok) throwApiError(response.status, error)
   },
 }
 export function rememberToken(token: string) { currentToken = token }

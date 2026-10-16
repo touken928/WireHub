@@ -214,6 +214,9 @@ impl Flows {
         peer_policy: impl Fn(&str) -> Option<PeerPolicy<'a>>,
     ) {
         let same_hub = old_hub == new_hub;
+        // Build once per reload instead of scanning every rule for every flow.
+        let old_by_id: HashMap<_, _> = old_forwards.iter().map(|f| (f.id.as_str(), f)).collect();
+        let new_by_id: HashMap<_, _> = new_forwards.iter().map(|f| (f.id.as_str(), f)).collect();
         self.flows.retain(|key, flow| {
             if !same_hub {
                 return false;
@@ -231,14 +234,11 @@ impl Flows {
             {
                 return false;
             }
-            if flow.forward_id.is_some() {
-                let Some(id) = flow.forward_id.as_deref() else {
+            if let Some(id) = flow.forward_id.as_deref() {
+                let Some(before) = old_by_id.get(id) else {
                     return false;
                 };
-                let Some(before) = old_forwards.iter().find(|f| f.id == id) else {
-                    return false;
-                };
-                let Some(after) = new_forwards.iter().find(|f| f.id == id) else {
+                let Some(after) = new_by_id.get(id) else {
                     return false;
                 };
                 if before.protocol != after.protocol

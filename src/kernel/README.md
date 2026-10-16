@@ -68,7 +68,9 @@ Snapshot reconciliation supplies borrowed `PeerPolicy` views, so flow management
 does not depend on WireGuard tunnel objects. Direct ACLs and forward allowlists
 authorize separate paths: a service grant never requires direct backend access.
 Acknowledged direct ACL revocation removes affected direct flows; forward
-allowlist revocation removes affected forwarded flows, including queued delivery. Authorized flows and authenticated tunnels survive
+allowlist revocation removes affected forwarded flows, including queued delivery.
+Forward rule IDs are indexed once per reconciliation instead of scanned for
+every active flow. Authorized flows and authenticated tunnels survive
 unrelated reloads; failed snapshots clear routing state and trigger retries.
 
 Tests live beside their respective modules. HTTP management and persistence stay

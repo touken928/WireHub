@@ -289,6 +289,34 @@ try {
       await page.getByRole('button', { name: 'Create', exact: true }).click()
     }
     const scenarios = {
+      'forward-create-refresh-before-ack': async () => {
+        await navigate('Forwards')
+        const refreshRead = holdNext('GET', '/api/setup')
+        await refresh.click(); await refreshRead.requested
+        await page.getByRole('button', { name: 'New forward', exact: true }).first().click()
+        const dialog = page.getByRole('dialog')
+        await dialog.getByLabel('Name', { exact: true }).fill('One forward')
+        await dialog.getByLabel('Port', { exact: true }).fill('8080')
+        await dialog.getByLabel('Target peer', { exact: true }).selectOption('server')
+        await dialog.getByLabel('Engineering', { exact: false }).check()
+        const acknowledgement = holdNext('POST', '/api/forwards')
+        await dialog.getByRole('button', { name: 'Create', exact: true }).click()
+        await acknowledgement.requested
+        await refreshRead.release(); await refreshSettled()
+        await acknowledgement.release()
+        await poll(async () => await dialog.count() === 0, 'Create acknowledgement closes dialog')
+        assert.equal(forwards.length, 1)
+        assert.equal(await page.locator('.forward-card').count(), 1, 'Refresh and create acknowledgement must not duplicate a forward')
+      },
+      'forward-edit-loading-focus': async () => {
+        forwards = [{ id: 'editable', name: 'Web', protocol: 'tcp', target_port: 8000, target_peer_id: 'server', allowed_group_ids: [] }]
+        await navigate('Forwards'); await refresh.click(); await refreshSettled()
+        const configuration = holdNext('GET', '/api/config')
+        await page.getByLabel('Edit forward Web', { exact: true }).click(); await configuration.requested
+        const dialog = page.getByRole('dialog')
+        assert.ok(await dialog.evaluate(e => e.contains(document.activeElement)), 'Loading dialog must move keyboard focus inside while fields are disabled')
+        await configuration.release()
+      },
       'forward-edit': async () => {
         forwards = [{ id: 'editable', name: 'Web', protocol: 'tcp', target_port: 8000, target_peer_id: 'server', allowed_group_ids: [] }]
         await navigate('Forwards'); await refresh.click(); await refreshSettled()
