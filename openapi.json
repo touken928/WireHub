@@ -505,7 +505,7 @@
       "name": ""
     },
     "title": "wirehub",
-    "version": "1.0.0-rc.1"
+    "version": "1.0.0"
   },
   "openapi": "3.0.3",
   "paths": {

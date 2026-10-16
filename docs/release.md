@@ -1,6 +1,6 @@
 # Release verification
 
-Current candidate: **1.0.0-rc.1**, schema **5**. The acceptance scope is one Hub,
+Release target: **1.0.0**, schema **5**. The acceptance scope is one Hub,
 a private IPv4 /24, Linux servers and the embedded management UI. Mobile testing
 is excluded and desktop interoperability is deferred for this acceptance.
 Supported behavior and network limitations are in [operations](operations.md).
@@ -27,7 +27,25 @@ performance and OpenAPI agreement. Native Linux amd64/arm64 binaries and both
 container architectures also passed version/build-ID, startup and embedded-UI
 checks. Its reports and binary artifacts are retained with that workflow run.
 The tag-triggered release workflow repeats the gates on the exact tagged commit
-before publishing binaries, checksums, containers and a GitHub prerelease.
+before publishing binaries, checksums, containers and a GitHub release (prerelease for RC tags).
+
+## 1.0.0 release review — 2026-10-16
+
+The formal release includes the post-RC bounded pending-packet retries,
+target-specific authenticated drains, interrupted provisioning cleanup retries,
+and paired-backup support for atomically published hard-linked Hub keys.
+Review covered those changes, authentication and API cache behavior, default-deny
+routing, startup recovery, and the publication dependency graph.
+
+The release workflow now waits for both native binary builds before publishing
+container tags. Package manifests and the checked-in OpenAPI version agree on
+1.0.0. Local Rust verification passed 193 tests (one opt-in benchmark ignored),
+and the production frontend build passed. The exact tagged commit must still pass
+all hosted integration, audit, architecture and startup gates before publication;
+prior RC results alone do not establish formal-release acceptance.
+
+Production backup/restore and real-deployment capacity acceptance remain operator
+responsibilities. Desktop/mobile acceptance remains outside the supported scope.
 
 ## Local verification
 
@@ -48,7 +66,7 @@ actionlint
 pnpm --dir frontend test:ui
 target/release/wirehub export-openapi > /tmp/wirehub-openapi.json
 cmp openapi.json /tmp/wirehub-openapi.json
-python3 scripts/check-release.py --tag v1.0.0-rc.1 --binary target/release/wirehub
+python3 scripts/check-release.py --tag v1.0.0 --binary target/release/wirehub
 ```
 
 CI also compiles all targets with the minimum supported Rust **1.89.0**.

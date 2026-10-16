@@ -233,7 +233,7 @@ jobs:
   publish:
     name: Publish multi-platform tags
     if: github.event_name == 'push'
-    needs: [verify, release-contract, build]
+    needs: [verify, release-contract, build, binaries]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
