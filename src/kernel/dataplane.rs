@@ -297,12 +297,7 @@ impl DataPlane {
                     let Some(target) = self.config.peers.get(&forward.target_peer_id) else {
                         continue;
                     };
-                    if !policy::forward_allowed(
-                        forward,
-                        &source.group_id,
-                        source.group.as_ref(),
-                        &target.group_id,
-                    ) {
+                    if !policy::forward_allowed(forward, &source.group_id) {
                         continue;
                     }
                     let Some((rewrite, reservation)) = self
@@ -452,12 +447,7 @@ impl DataPlane {
                         && ingress.packet.dst()
                             == self.config.hub_ip.unwrap_or(Ipv4Addr::UNSPECIFIED)
                         && ingress.packet.dst_port() == Some(*target_port)
-                        && policy::forward_allowed(
-                            f,
-                            &source.group_id,
-                            source.group.as_ref(),
-                            &target.group_id,
-                        )
+                        && policy::forward_allowed(f, &source.group_id)
                 }),
         }
     }

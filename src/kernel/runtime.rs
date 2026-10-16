@@ -93,7 +93,7 @@ use super::ipv4;
 #[cfg(test)]
 use super::wireguard::ANON_PARSE_COUNT;
 #[cfg(test)]
-use crate::{kernel::policy, model::Peer};
+use crate::model::Peer;
 #[cfg(test)]
 use boringtun::{
     noise::{Packet, Tunn, TunnResult},

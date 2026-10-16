@@ -100,8 +100,9 @@ def run(binary, duration, output):
                 client + "/configure", token, "POST", {"config": provision["config"]}
             )
         request(clients[1] + "/serve", tokens[1], "POST", {"port": 18080})
+        forwards = []
         for protocol in ("tcp", "udp"):
-            request(
+            forward = request(
                 hub.url + "/api/forwards",
                 hub.token,
                 "POST",
@@ -114,6 +115,21 @@ def run(binary, duration, output):
                 },
                 expected=201,
             )
+
+            forwards.append(forward)
+
+        def forward_policy(allowed):
+            for forward in forwards:
+                revision = request(hub.url + "/api/config", hub.token)["revision"]
+                body = {key: value for key, value in forward.items() if key != "id"}
+                body["allowed_group_ids"] = allowed
+                request(
+                    hub.url + "/api/forwards/" + forward["id"],
+                    hub.token,
+                    "PUT",
+                    body,
+                    headers={"If-Match": f'"{revision}"'},
+                )
 
         def call(path, body):
             return request(clients[0] + path, tokens[0], "POST", body, timeout=65)
@@ -198,6 +214,7 @@ def run(binary, duration, output):
                 next_reload += 60
             if elapsed >= next_revoke:
                 stale = policy([])
+                forward_policy([])
                 for connection in sockets:
                     exchange(connection, "revoked-" + secrets.token_hex(8), False)
                 check(
@@ -225,6 +242,7 @@ def run(binary, duration, output):
                 for connection in sockets:
                     call("/tcp/close", {"id": connection})
                 policy([gb])
+                forward_policy([ga])
                 sockets = [opened(target) for target in targets]
                 revocations += 1
                 next_revoke += 180

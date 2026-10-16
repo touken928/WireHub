@@ -20,19 +20,13 @@ pub fn allows(source: &Group, destination: &Group) -> bool {
     source.allowed_groups.iter().any(|id| id == &destination.id)
 }
 
-/// A forward requires both its source-group allowlist and the backend's
-/// directed ACL to permit the source group.
-pub fn forward_allowed(
-    forward: &ForwardConfig,
-    source_group_id: &str,
-    source: Option<&Group>,
-    target_group_id: &str,
-) -> bool {
+/// Service access is authorized independently of direct peer routing.
+/// Authentication and assigned source-address validation happen before routing.
+pub fn forward_allowed(forward: &ForwardConfig, source_group_id: &str) -> bool {
     forward
         .allowed_group_ids
         .iter()
         .any(|id| id == source_group_id)
-        && source.is_some_and(|group| group.allowed_groups.iter().any(|id| id == target_group_id))
 }
 
 /// A peer may only originate packets from its assigned /32 address.
@@ -45,37 +39,20 @@ mod tests {
     use super::*;
     use crate::model::{Forward, Peer};
     #[test]
-    fn forward_requires_allowlist_and_backend_acl() {
-        let forward = Forward {
+    fn forward_authorization_is_independent_of_direct_group_acl() {
+        let mut forward: ForwardConfig = Forward {
             id: "f".into(),
             name: "f".into(),
             protocol: "udp".into(),
             target_peer_id: "b".into(),
             target_port: 53,
             allowed_group_ids: vec!["a".into()],
-        };
-        let source = Group {
-            id: "a".into(),
-            name: "A".into(),
-            allowed_groups: vec!["b".into()],
-        };
-        assert!(forward_allowed(
-            &forward.clone().into(),
-            "a",
-            Some(&source),
-            "b"
-        ));
-        assert!(!forward_allowed(
-            &forward.clone().into(),
-            "c",
-            Some(&source),
-            "b"
-        ));
-        let denied = Group {
-            allowed_groups: vec![],
-            ..source
-        };
-        assert!(!forward_allowed(&forward.into(), "a", Some(&denied), "b"));
+        }
+        .into();
+        assert!(forward_allowed(&forward, "a"));
+        assert!(!forward_allowed(&forward, "other"));
+        forward.allowed_group_ids.clear();
+        assert!(!forward_allowed(&forward, "a"));
     }
     #[test]
     fn acl_is_directed_and_default_deny() {

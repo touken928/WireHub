@@ -601,7 +601,7 @@ fn forward_pending_provenance_changes_are_reconciled_without_retry_or_reservatio
         "port",
         "target",
         "allowlist",
-        "acl",
+        "source group",
     ] {
         let mut dp = plane();
         let now = Instant::now();
@@ -644,7 +644,7 @@ fn forward_pending_provenance_changes_are_reconciled_without_retry_or_reservatio
             }
             "source key" => new.peers.get_mut("a").unwrap().key = [9; 32],
             "target key" => new.peers.get_mut("b").unwrap().key = [9; 32],
-            "acl" => {
+            "source group" => {
                 new.peers.get_mut("a").unwrap().group = Some(Group {
                     id: "g2".into(),
                     name: "g2".into(),
@@ -754,4 +754,192 @@ fn indexed_services_isolate_protocol_ports_and_recompile_on_policy_reload() {
     assert!(dp
         .finish(delivered, EgressOutcome::Delivered, now)
         .is_some());
+}
+
+fn service_fixture(
+    protocol: u8,
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    sport: u16,
+    dport: u16,
+    reply: bool,
+) -> Vec<u8> {
+    use crate::kernel::checksum::{checksum, transport_checksum};
+    let length = if protocol == 6 { 40 } else { 28 };
+    let mut raw = vec![0u8; length];
+    raw[0] = 0x45;
+    raw[2..4].copy_from_slice(&(length as u16).to_be_bytes());
+    raw[8] = 64;
+    raw[9] = protocol;
+    raw[12..16].copy_from_slice(&src.octets());
+    raw[16..20].copy_from_slice(&dst.octets());
+    raw[20..22].copy_from_slice(&sport.to_be_bytes());
+    raw[22..24].copy_from_slice(&dport.to_be_bytes());
+    if protocol == 6 {
+        raw[24..28].copy_from_slice(&(if reply { 200u32 } else { 100 }).to_be_bytes());
+        raw[28..32].copy_from_slice(&(if reply { 101u32 } else { 0 }).to_be_bytes());
+        raw[32] = 0x50;
+        raw[33] = if reply { 0x12 } else { 0x02 };
+        let sum = transport_checksum(src, dst, protocol, &raw[20..]);
+        raw[36..38].copy_from_slice(&sum.to_be_bytes());
+    } else {
+        raw[24..26].copy_from_slice(&8u16.to_be_bytes());
+    }
+    let sum = checksum(&raw[..20]);
+    raw[10..12].copy_from_slice(&sum.to_be_bytes());
+    raw
+}
+
+fn forward_plane(protocol: u8) -> DataPlane {
+    let mut dp = plane();
+    let hub = Ipv4Addr::new(10, 77, 0, 1);
+    dp.config.hub_ip = Some(hub);
+    dp.flows = Flows::new(hub, &[] as &[ForwardConfig]);
+    dp.config.forwards = vec![ForwardConfig {
+        id: "service".into(),
+        protocol: if protocol == 6 {
+            TransportProtocol::Tcp
+        } else {
+            TransportProtocol::Udp
+        },
+        target_peer_id: "b".into(),
+        target_port: 5678,
+        allowed_group_ids: vec!["g".into()],
+    }];
+    dp.config.forward_index = crate::kernel::snapshot::ForwardIndex::compile(&dp.config.forwards);
+    dp
+}
+
+#[test]
+fn forward_only_grants_exact_service_without_direct_or_reverse_initiation() {
+    for protocol in [6, 17] {
+        for same_group in [false, true] {
+            let mut dp = forward_plane(protocol);
+            let now = Instant::now();
+            dp.config
+                .peers
+                .get_mut("a")
+                .unwrap()
+                .group
+                .as_mut()
+                .unwrap()
+                .allowed_groups
+                .clear();
+            let target = dp.config.peers.get_mut("b").unwrap();
+            target.group_id = if same_group { "g" } else { "other" }.into();
+            target.group = Some(Group {
+                id: target.group_id.clone(),
+                name: "backend".into(),
+                allowed_groups: vec![],
+            });
+            let a = Ipv4Addr::new(10, 77, 0, 2);
+            let b = Ipv4Addr::new(10, 77, 0, 3);
+            let hub = dp.config.hub_ip.unwrap();
+            for (proto, dst, port) in [
+                (protocol, b, 5678),
+                (protocol, hub, 5679),
+                (if protocol == 6 { 17 } else { 6 }, hub, 5678),
+            ] {
+                let raw = service_fixture(proto, a, dst, 1234, port, false);
+                assert!(
+                    dp.prepare(ingress(&dp, &raw), now).is_none(),
+                    "Service grant must not authorize direct, other-port or other-protocol access"
+                );
+            }
+            let raw = service_fixture(protocol, a, hub, 1234, 5678, false);
+            let prepared = dp
+                .prepare(ingress(&dp, &raw), now)
+                .expect("Independent forward grant must work without any group ACL");
+            assert_eq!(prepared.target_id(), "b");
+            let snat = u16::from_be_bytes([prepared.bytes()[20], prepared.bytes()[21]]);
+            dp.finish(prepared, EgressOutcome::Delivered, now);
+            let reply = service_fixture(protocol, b, hub, 5678, snat, true);
+            let source = dp.authenticated_peer("b").unwrap();
+            let packet = dp.ingress(&source, &reply).unwrap();
+            let prepared = dp
+                .prepare(packet, now)
+                .expect("Established reverse mapping must not require a reverse ACL");
+            assert_eq!(prepared.target_id(), "a");
+            assert_eq!(&prepared.bytes()[12..16], &hub.octets());
+            dp.finish(prepared, EgressOutcome::Delivered, now);
+            let reverse = service_fixture(protocol, b, a, 9999, 5678, false);
+            let packet = dp.ingress(&source, &reverse).unwrap();
+            assert!(
+                dp.prepare(packet, now).is_none(),
+                "Forward grant must not authorize reverse initiation"
+            );
+            let old = dp.config.clone();
+            let mut revoked = old.clone();
+            revoked.forwards[0].allowed_group_ids.clear();
+            dp.reconcile(&old, revoked);
+            assert_eq!(dp.flow_counts(), (0, 0));
+            assert!(dp.prepare(ingress(&dp, &raw), now).is_none());
+            let packet = dp.ingress(&source, &reply).unwrap();
+            assert!(
+                dp.prepare(packet, now).is_none(),
+                "Revoked reply must not resurrect its NAT mapping"
+            );
+        }
+    }
+}
+
+#[test]
+fn direct_acl_changes_preserve_active_and_queued_forwards_but_allowlist_revocation_removes_both() {
+    for protocol in [6, 17] {
+        let mut dp = forward_plane(protocol);
+        let now = Instant::now();
+        let a = Ipv4Addr::new(10, 77, 0, 2);
+        let hub = dp.config.hub_ip.unwrap();
+        for (port, outcome) in [
+            (1234, EgressOutcome::NotReady),
+            (1235, EgressOutcome::Delivered),
+        ] {
+            let raw = service_fixture(protocol, a, hub, port, 5678, false);
+            let prepared = dp.prepare(ingress(&dp, &raw), now).unwrap();
+            dp.finish(prepared, outcome, now);
+        }
+        assert_eq!(dp.pending_counts().0, 1);
+        assert_eq!(dp.flow_counts(), (1, 0));
+        let old = dp.config.clone();
+        let mut changed = old.clone();
+        changed
+            .peers
+            .get_mut("a")
+            .unwrap()
+            .group
+            .as_mut()
+            .unwrap()
+            .allowed_groups
+            .clear();
+        let target = changed.peers.get_mut("b").unwrap();
+        target.group_id = "other".into();
+        target.group = Some(Group {
+            id: "other".into(),
+            name: "other".into(),
+            allowed_groups: vec![],
+        });
+        dp.reconcile(&old, changed);
+        assert_eq!(
+            dp.pending_counts().0,
+            1,
+            "Direct ACL and backend group changes must preserve independent queued service grants"
+        );
+        assert_eq!(
+            dp.flow_counts(),
+            (1, 0),
+            "Direct ACL revocation must not revoke active forwarded NAT"
+        );
+        let mut remaining = 1;
+        let prepared = dp
+            .prepare_retry(&mut remaining, now + Duration::from_millis(1))
+            .unwrap();
+        dp.finish(prepared, EgressOutcome::NotReady, now);
+        let old = dp.config.clone();
+        let mut revoked = old.clone();
+        revoked.forwards[0].allowed_group_ids.clear();
+        dp.reconcile(&old, revoked);
+        assert_eq!(dp.pending_counts(), (0, 0));
+        assert_eq!(dp.flow_counts(), (0, 0));
+        assert!(dp.prepare_retry(&mut remaining, now).is_none());
+    }
 }

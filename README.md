@@ -124,7 +124,7 @@ Click **Save** to commit the ACL changes as one versioned batch. If another sess
 
 ### Forward a service
 
-In **Forwards**, click **New forward** and choose the target peer, TCP/UDP, service port, and allowed groups. Each source group also needs access to the target group in **Groups**.
+In **Forwards**, click **New forward** and choose the target peer, TCP/UDP, service port, and allowed groups. Allowed groups can use this service without group-to-group access in **Groups**. This grants access only to the configured protocol and port, not direct access to the target peer.
 
 Use the edit button on a forward to change its name, protocol, port, target peer or allowed groups. Changes apply after saving. Leaving Allowed groups empty blocks all access.
 
@@ -144,7 +144,7 @@ After a runtime reload fails, WireHub fails closed, reports the reload failure, 
 
 Each peer is limited to **256 active plus pending flow entries**. Separately, the router's queued-delivery buffer is bounded to 256 packets and also enforces byte and time limits; excess queued work is dropped rather than growing without bound.
 
-TCP flows that have completed the three-way handshake have an idle timeout of **2 hours 4 minutes**, following the established-connection baseline in [RFC 5382 section 5](https://www.rfc-editor.org/rfc/rfc5382.html#section-5). Incomplete TCP handshakes and UDP flows expire after **60 seconds** of inactivity. Successful FINs in both directions or an RST start a fixed **30-second** cleanup grace. Expired flows are silently reclaimed; use TCP keepalives or application heartbeats to retain an idle connection. WireGuard keepalives alone do not refresh business flows. Per-peer and global capacity limits still apply, and acknowledged ACL revocation removes affected flows immediately, regardless of their timeout.
+TCP flows that have completed the three-way handshake have an idle timeout of **2 hours 4 minutes**, following the established-connection baseline in [RFC 5382 section 5](https://www.rfc-editor.org/rfc/rfc5382.html#section-5). Incomplete TCP handshakes and UDP flows expire after **60 seconds** of inactivity. Successful FINs in both directions or an RST start a fixed **30-second** cleanup grace. Expired flows are silently reclaimed; use TCP keepalives or application heartbeats to retain an idle connection. WireGuard keepalives alone do not refresh business flows. Per-peer and global capacity limits still apply, and acknowledged revocation removes affected flows immediately, regardless of their timeout: Groups ACLs revoke direct access, while Forward allowed groups revoke service access.
 
 Related ICMP destination-unreachable, time-exceeded, and parameter-problem errors from the authenticated backend are returned through existing live TCP/UDP mappings, with the quoted original packet restored. ICMP errors do not extend flow lifetimes or create new mappings.
 

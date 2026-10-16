@@ -42,6 +42,19 @@ transport reachability but do not refresh application-flow idle timers. TCP
 application heartbeats or TCP keepalives can retain established flows, subject
 to capacity limits and immediate acknowledged policy revocation.
 
+## Service forwarding authorization
+
+Forward rules independently authorize the source peer's group through their
+`allowed_group_ids`. No group-to-group ACL is required to use a forward. The grant
+covers only the configured Hub protocol/port and target peer; direct peer access
+still requires a Groups ACL. Empty forward allowlists deny all access.
+
+Removing a group from a forward, deleting the rule or deleting its target removes
+affected active and queued mappings when the runtime acknowledges the change.
+Changing direct group ACLs does not revoke independently authorized forwards.
+After upgrading from a release that required both permissions, review existing
+forward allowlists: their service grants now apply even without direct group access.
+
 ## Configuration
 
 | Variable | Default | Contract |
@@ -213,7 +226,7 @@ new one-time private configuration.
 | Database already in use | Stop the owning instance; do not remove its lock |
 | Key identity/mode error | Restore the matching pair and mode 0600; never generate a replacement key over existing state |
 | Schema error after rollback | Restore the original pre-upgrade pair, not just the old executable |
-| Healthy HTTP but no forwarding | Check `/api/ready`, `/api/status`, handshake, group direction, source forward grant and destination service |
+| Healthy HTTP but no forwarding | Check `/api/ready`, `/api/status`, handshake, forward protocol/port, allowed source group and destination service |
 | Save conflict | Review fresh server policy; explicitly reapply or discard the draft |
 | Save returns 503 | Check persisted/installed revisions before retrying; the UI blocks edits until activation is confirmed |
 | Large UDP fails | Stay within path MTU; fragments are rejected, see [network compatibility](#network-compatibility) |

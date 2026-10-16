@@ -695,44 +695,6 @@ async fn udp_receive_task_survives_recoverable_errors_and_fails_on_fatal_error()
     );
 }
 
-#[test]
-fn forward_requires_both_allowlist_and_directed_backend_acl() {
-    let forward = Forward {
-        id: "f".into(),
-        name: "f".into(),
-        protocol: "tcp".into(),
-        target_peer_id: "b".into(),
-        target_port: 8080,
-        allowed_group_ids: vec!["a".into()],
-    };
-    let group = Group {
-        id: "a".into(),
-        name: "a".into(),
-        allowed_groups: vec!["b".into()],
-    };
-    assert!(policy::forward_allowed(
-        &forward.clone().into(),
-        "a",
-        Some(&group),
-        "b"
-    ));
-    assert!(!policy::forward_allowed(
-        &forward.clone().into(),
-        "c",
-        Some(&group),
-        "b"
-    ));
-    let denied = Group {
-        allowed_groups: vec![],
-        ..group
-    };
-    assert!(!policy::forward_allowed(
-        &forward.into(),
-        "a",
-        Some(&denied),
-        "b"
-    ));
-}
 #[tokio::test]
 async fn forward_load_errors_fail_closed_and_are_acknowledged() {
     async fn broken_store(path: &std::path::Path) -> Arc<Store> {
@@ -1865,8 +1827,13 @@ async fn boringtun_nat_tcp_udp_roundtrip_and_live_policy_revocation() {
             .is_err()
     );
 
-    // ACL revoke is synchronously acknowledged and flushes NAT state.
-    store.set_acl("clients", &[]).unwrap();
+    // Forward allowlist revocation is acknowledged and flushes NAT state.
+    for mut forward in store.forwards().unwrap() {
+        forward.allowed_group_ids.retain(|id| id != "clients");
+        store
+            .update_forward(&mut forward, store.revision().unwrap())
+            .unwrap();
+    }
     handle.reload().await.unwrap();
     clients[0] = Tunn::new(
         StaticSecret::from([31u8; 32]),
@@ -1916,8 +1883,13 @@ async fn boringtun_nat_tcp_udp_roundtrip_and_live_policy_revocation() {
     )
     .await;
     assert_no_inner(&sockets[1], address, &mut clients[1], &mut rx, &mut tx).await;
-    // Restore ACL, then remove the forward and prove its acknowledged removal blocks traffic.
-    store.set_acl("clients", &["backend".into()]).unwrap();
+    // Regrant service access, then remove the UDP forward and verify deletion.
+    for mut forward in store.forwards().unwrap() {
+        forward.allowed_group_ids.push("clients".into());
+        store
+            .update_forward(&mut forward, store.revision().unwrap())
+            .unwrap();
+    }
     store.remove_forward("fu").unwrap();
     handle.reload().await.unwrap();
     clients[0] = Tunn::new(

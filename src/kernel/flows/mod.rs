@@ -244,16 +244,7 @@ impl Flows {
                 if before.protocol != after.protocol
                     || before.target_peer_id != after.target_peer_id
                     || before.target_port != after.target_port
-                    || !after
-                        .allowed_group_ids
-                        .iter()
-                        .any(|id| id == source.peer.group_id())
-                    || !policy::forward_allowed(
-                        after,
-                        source.peer.group_id(),
-                        source.group,
-                        target.peer.group_id(),
-                    )
+                    || !policy::forward_allowed(after, source.peer.group_id())
                 {
                     return false;
                 }

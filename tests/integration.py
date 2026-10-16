@@ -66,7 +66,7 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
         "expected_revision": before,
         "changes": [
             {"group_id": group, "allowed_groups": allowed}
-            for group, allowed in ((ga, [gb]), (gb, []), (gc, [gb]))
+            for group, allowed in ((ga, []), (gb, []), (gc, [gb]))
         ],
     }
     applied = request(hub_url + "/api/policy", hub_token, "PUT", batch)
@@ -252,6 +252,16 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
 
     wait_handshakes()
 
+    for protocol in ("tcp", "udp"):
+        check(
+            not probe(0, protocol, f"{ip_b}:18080", "direct-denied", 1000).get("ok"),
+            "Forward permission unexpectedly granted direct peer access",
+        )
+        check(
+            not probe(0, protocol, "172.23.45.1:18081", "wrong-port", 1000).get("ok"),
+            "Forward permission unexpectedly granted an unconfigured port",
+        )
+
     nonce_tcp, nonce_udp = secrets.token_hex(12), secrets.token_hex(12)
     for proto, nonce in (("tcp", nonce_tcp), ("udp", nonce_udp)):
         result = probe(0, proto, "172.23.45.1:18080", nonce)
@@ -264,17 +274,18 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
     # tear down an established NAT mapping and regrant must work on a fresh flow.
     editable = forwards[0]
 
-    def edit_forward(allowed, name):
+    def edit_forward(allowed, name, forward=None):
+        forward = forward or editable
         revision = request(hub_url + "/api/config", hub_token)["revision"]
         return request(
-            hub_url + "/api/forwards/" + editable["id"],
+            hub_url + "/api/forwards/" + forward["id"],
             hub_token,
             "PUT",
             {
                 "name": name,
-                "protocol": editable["protocol"],
-                "target_peer_id": editable["target_peer_id"],
-                "target_port": editable["target_port"],
+                "protocol": forward["protocol"],
+                "target_peer_id": forward["target_peer_id"],
+                "target_port": forward["target_port"],
                 "allowed_group_ids": allowed,
             },
             headers={"If-Match": f'"{revision}"'},
@@ -409,6 +420,19 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
             "same persistent TCP connection failed after unrelated reload",
         )
 
+        # Direct peer access is a separate grant; it is not needed for any of
+        # the preceding forwarded connections, transfers or edit/revoke checks.
+        request(
+            hub_url + f"/api/groups/{ga}/acl",
+            hub_token,
+            "PUT",
+            {"allowed_groups": [gb]},
+        )
+        check(
+            persistent_exchange(0, persistent_id, "after-direct-grant").get("ok"),
+            "Changing direct ACLs disrupted an independently authorized forward",
+        )
+
         denied = {}
         for proto in ("tcp", "udp"):
             nonce = f"deny-C-{proto}-{secrets.token_hex(8)}"
@@ -529,18 +553,35 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
         still_live = persistent_exchange(0, persistent_id, persistent_before_revoke)
         check(
             still_live.get("ok"),
-            "existing forwarded TCP connection was already broken before A ACL revocation",
+            "existing forwarded TCP connection was already broken before forward allowlist revocation",
         )
         request(
             hub_url + f"/api/groups/{ga}/acl", hub_token, "PUT", {"allowed_groups": []}
         )
+        check(
+            persistent_exchange(0, persistent_id, "after-direct-revoke").get("ok"),
+            "Direct ACL revocation incorrectly revoked a forwarded TCP connection",
+        )
+        for proto in ("tcp", "udp"):
+            check(
+                not probe(0, proto, f"{ip_b}:18080", "direct-revoked", 1000).get("ok"),
+                "Direct traffic survived direct ACL revocation",
+            )
+            check(
+                probe(0, proto, "172.23.45.1:18080", "forward-without-direct").get(
+                    "ok"
+                ),
+                "Forward traffic incorrectly requires direct group access",
+            )
+        for forward in forwards:
+            edit_forward([], forward["name"], forward)
         persistent_revoked = "persistent-revoked-" + secrets.token_hex(8)
         same_connection = persistent_exchange(
             0, persistent_id, persistent_revoked, 1000
         )
         check(
             not same_connection.get("ok"),
-            "persistent forwarded TCP survived ACL revocation",
+            "persistent forwarded TCP survived forward allowlist revocation",
         )
         revoked_forward = {}
         for proto in ("tcp", "udp"):
@@ -549,7 +590,7 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
             result = probe(0, proto, "172.23.45.1:18080", nonce, 1000)
             check(
                 not result.get("ok"),
-                f"A {proto.upper()} forward succeeded after ACL reload",
+                f"A {proto.upper()} forward succeeded after allowlist revocation",
             )
         nonce_c_direct_after = "direct-C-B-after-revoke-" + secrets.token_hex(8)
         direct_c_after = probe(2, "tcp", f"{ip_b}:18080", nonce_c_direct_after)
@@ -561,7 +602,7 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
         events = json.dumps(b_status.get("received", []))
         check(
             not any(nonce in events for nonce in revoked_forward.values()),
-            "backend observed traffic after ACL revoke",
+            "backend observed traffic after forward revocation",
         )
         check(
             nonce_direct_tcp in events

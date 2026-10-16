@@ -109,7 +109,7 @@ def run(output, build):
             "PUT",
             {
                 "expected_revision": revision,
-                "changes": [{"group_id": ga, "allowed_groups": [gb]}],
+                "changes": [{"group_id": ga, "allowed_groups": []}],
             },
         )
         provisions = [
@@ -162,8 +162,9 @@ def run(output, build):
         ip_a, ip_b = (provision["peer"]["ipv4"] for provision in provisions)
         for name, ip in zip(clients, (ip_a, ip_b)):
             docker("exec", "-d", name, "python3", "/client.py", "serve", ip, "18080")
+        forwards = []
         for protocol in ("tcp", "udp"):
-            request(
+            forward = request(
                 url + "/api/forwards",
                 token,
                 "POST",
@@ -176,7 +177,29 @@ def run(output, build):
                 },
                 expected=201,
             )
+            forwards.append(forward)
         time.sleep(0.2)
+        for protocol in ("tcp", "udp"):
+            check(
+                not helper(a, "probe", {"protocol": protocol, "target": ip_b})["ok"],
+                "Forward grant admitted direct kernel peer access",
+            )
+            check(
+                helper(a, "probe", {"protocol": protocol, "target": "172.27.91.1"})[
+                    "ok"
+                ],
+                "Kernel forward required a direct group ACL",
+            )
+        revision = request(url + "/api/config", token)["revision"]
+        request(
+            url + "/api/policy",
+            token,
+            "PUT",
+            {
+                "expected_revision": revision,
+                "changes": [{"group_id": ga, "allowed_groups": [gb]}],
+            },
+        )
         measurements = []
         for target in (ip_b, "172.27.91.1"):
             for protocol in ("tcp", "udp"):
@@ -278,6 +301,30 @@ def run(output, build):
             result["applied_revision"] >= result["revision"],
             "Kernel policy revocation not activated",
         )
+        for protocol in ("tcp", "udp"):
+            check(
+                not helper(a, "probe", {"protocol": protocol, "target": ip_b})["ok"],
+                "Kernel direct path survived direct ACL revocation",
+            )
+            check(
+                helper(a, "probe", {"protocol": protocol, "target": "172.27.91.1"})[
+                    "ok"
+                ],
+                "Direct ACL revocation incorrectly blocked a kernel forward",
+            )
+        for forward in forwards:
+            revision = request(url + "/api/config", token)["revision"]
+            request(
+                url + "/api/forwards/" + forward["id"],
+                token,
+                "PUT",
+                {
+                    key: ([] if key == "allowed_group_ids" else value)
+                    for key, value in forward.items()
+                    if key != "id"
+                },
+                headers={"If-Match": f'"{revision}"'},
+            )
         denied = "revoked-kernel-" + secrets.token_hex(16)
         for protocol in ("tcp", "udp"):
             check(
@@ -313,7 +360,8 @@ def run(output, build):
             "wireguard_tools": status[0]["wireguard_tools"],
             "checks": [
                 "direct TCP/UDP/ICMP",
-                "forward TCP/UDP",
+                "forward TCP/UDP independent of direct group ACL",
+                "forward grants never grant direct peer access",
                 "directional denial",
                 "1420 MTU boundaries",
                 "fragmented UDP rejection",
