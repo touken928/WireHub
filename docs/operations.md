@@ -1,6 +1,6 @@
 # Operations
 
-The release target is **1.0.1**, with schema 5 (unchanged from 1.0.0).
+The release target is **1.1.0**, with schema 5 (unchanged from 1.0.x).
 HTTP bind addresses no longer require an additional proxy-mode opt-in;
 management API bearer authentication remains required.
 See [release verification](release.md) and [performance measurements](performance.md).

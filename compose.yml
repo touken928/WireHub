@@ -1,6 +1,6 @@
 services:
   wirehub:
-    image: ghcr.io/touken928/wirehub:1.0.1
+    image: ghcr.io/touken928/wirehub:1.1.0
     restart: unless-stopped
     environment:
       WIREHUB_ADMIN_TOKEN: ${WIREHUB_ADMIN_TOKEN:?Set WIREHUB_ADMIN_TOKEN to a long random secret}

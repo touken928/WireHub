@@ -1,6 +1,6 @@
 # Release verification
 
-Release target: **1.0.1**, schema **5**. The acceptance scope is one Hub,
+Release target: **1.1.0**, schema **5**. The acceptance scope is one Hub,
 a private IPv4 /24, Linux servers and the embedded management UI. Mobile testing
 is excluded and desktop interoperability is deferred for this acceptance.
 Supported behavior and network limitations are in [operations](operations.md).
@@ -28,6 +28,25 @@ container architectures also passed version/build-ID, startup and embedded-UI
 checks. Its reports and binary artifacts are retained with that workflow run.
 The tag-triggered release workflow repeats the gates on the exact tagged commit
 before publishing binaries, checksums, containers and a GitHub release (prerelease for RC tags).
+
+## 1.1.0 release
+
+- Edit forwards in place: name, protocol, port, target peer and allowed groups.
+  Updates require a configuration revision and wait for runtime activation.
+- Authorize forwarded services independently through their allowed groups.
+  Direct peer access still requires a Groups ACL. Removing a forward grant
+  revokes active and queued forwarded traffic; changing direct ACLs does not.
+- Simplify Groups to canvas-based links and compact member details.
+- Isolate forward form state, fix duplicate cards during refresh/create races,
+  and keep keyboard focus inside dialogs while loading.
+- Simplify reply routing and index forward rules once per flow reconciliation.
+- Preserve database schema 5. Review existing forward allowlists before upgrade:
+  their service grants now apply even when direct group access is denied.
+
+Local verification passed 196 Rust tests (one opt-in benchmark ignored), Clippy,
+full UI regression, real userspace and Linux-kernel WireGuard checks, HTTP
+content integrity, operations acceptance and five-minute endurance. The final
+release commit must pass the complete hosted workflow before publishing.
 
 ## 1.0.1 patch release
 
@@ -80,7 +99,7 @@ actionlint
 pnpm --dir frontend test:ui
 target/release/wirehub export-openapi > /tmp/wirehub-openapi.json
 cmp openapi.json /tmp/wirehub-openapi.json
-python3 scripts/check-release.py --tag v1.0.1 --binary target/release/wirehub
+python3 scripts/check-release.py --tag v1.1.0 --binary target/release/wirehub
 ```
 
 CI also compiles all targets with the minimum supported Rust **1.89.0**.

@@ -294,10 +294,11 @@ jobs:
           body: |
             ## Changes
 
-            - Remove the non-loopback HTTP startup restriction; `WIREHUB_TRUSTED_PROXY_MODE` is no longer needed.
-            - Keep admin-token authentication required for management APIs.
-            - Add Compose deployment with a pinned image, relative `./data` mount and simplified directory setup.
-            - Keep the API and database schema unchanged from 1.0.0.
+            - Edit forward names, protocols, ports, target peers and allowed groups with revision checks and acknowledged activation.
+            - Authorize forwarded services independently of direct Groups ACLs; service grants apply only to their configured protocol and port.
+            - Simplify Groups controls and member details.
+            - Fix duplicate forward cards during refresh/create races and dialog focus while loading.
+            - Refactor forward editing and reply routing; index rules once per flow reconciliation.
 
             ## Acceptance and upgrade
 
@@ -305,6 +306,11 @@ jobs:
             Mobile and desktop interoperability are outside this release's acceptance scope.
             Review the [supported network behavior](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/operations.md#supported-scope)
             and [release verification](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/release.md).
+
+            **Forward authorization change:** review existing forward allowlists before upgrading.
+            Their allowed groups can now use the configured service even when direct group
+            access is denied. Revoke service access through the forward's allowed groups;
+            changing direct Groups ACLs does not revoke independent service grants.
 
             The database schema remains 5. Before upgrading, stop the service and preserve a
             verified database/Hub-key pair. Rollback requires restoring the pre-upgrade pair;
