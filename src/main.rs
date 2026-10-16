@@ -45,7 +45,7 @@ async fn main() -> startup::Result<()> {
             Ok(())
         }
         Command::Help => {
-            println!("WireHub {}\nUsage: wirehub [serve | export-openapi | --version | --help]\n\nServe uses WIREHUB_ADMIN_TOKEN (required), WIREHUB_PORT (51820),\nWIREHUB_HTTP_BIND (127.0.0.1), WIREHUB_DB (wirehub.sqlite3),\nWIREHUB_HUB_KEY (wirehub.key), WIREHUB_TRUSTED_PROXY_MODE (0).\nNon-loopback HTTP requires a trusted TLS proxy and proxy mode 1.\nVersion/help/OpenAPI export never open the database or hub key.\nSIGINT/SIGTERM drain HTTP for up to 8 seconds before stopping UDP.", env!("CARGO_PKG_VERSION"));
+            println!("WireHub {}\nUsage: wirehub [serve | export-openapi | --version | --help]\n\nServe uses WIREHUB_ADMIN_TOKEN (required), WIREHUB_PORT (51820),\nWIREHUB_HTTP_BIND (127.0.0.1), WIREHUB_DB (wirehub.sqlite3),\nWIREHUB_HUB_KEY (wirehub.key).\nVersion/help/OpenAPI export never open the database or hub key.\nSIGINT/SIGTERM drain HTTP for up to 8 seconds before stopping UDP.", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
     }

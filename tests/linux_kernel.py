@@ -74,8 +74,6 @@ def run(output, build):
             "127.0.0.1::51820/tcp",
             "-e",
             "WIREHUB_ADMIN_TOKEN=" + token,
-            "-e",
-            "WIREHUB_TRUSTED_PROXY_MODE=1",
             "wirehub:interop-hub",
         )
         containers.append(hub)

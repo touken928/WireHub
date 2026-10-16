@@ -67,8 +67,9 @@ def run(binary, rollback_binary, output):
             )
         check(list(readonly.iterdir()) == [], "Metadata CLI touched state")
         checks.append("version/help/OpenAPI do not open state")
-        hub = Hub(binary, directory / "source")
+        hub = Hub(binary, directory / "source", http_bind="0.0.0.0")
         try:
+            checks.append("non-loopback HTTP starts without an additional opt-in")
             unauth = request(hub.url + "/api/policy", None, "PUT", {}, expected=401)
             check(
                 unauth["code"] == "unauthorized",

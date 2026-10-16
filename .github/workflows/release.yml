@@ -177,7 +177,6 @@ jobs:
           trap 'docker rm --force wirehub-smoke >/dev/null 2>&1 || true' EXIT
           docker run --detach --name wirehub-smoke \
             --env WIREHUB_ADMIN_TOKEN=smoke-test-token \
-            --env WIREHUB_TRUSTED_PROXY_MODE=1 \
             --publish 127.0.0.1::51820/tcp wirehub:smoke
           SMOKE_ADDRESS=$(docker port wirehub-smoke 51820/tcp)
           export SMOKE_ADDRESS

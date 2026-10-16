@@ -1,0 +1,13 @@
+services:
+  wirehub:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      WIREHUB_ADMIN_TOKEN: ${WIREHUB_ADMIN_TOKEN:?Set WIREHUB_ADMIN_TOKEN to a long random secret}
+    ports:
+      - "127.0.0.1:51820:51820/tcp"
+      - "51820:51820/udp"
+    volumes:
+      - ./data:/data

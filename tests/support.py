@@ -121,7 +121,7 @@ def stop_processes(processes):
 
 
 class Hub:
-    def __init__(self, binary, directory):
+    def __init__(self, binary, directory, *, http_bind="127.0.0.1"):
         directory.mkdir(mode=0o700, exist_ok=True)
         self.directory = directory
         self.token = secrets.token_urlsafe(32)
@@ -134,7 +134,7 @@ class Hub:
             self.environment.update(
                 WIREHUB_PORT=str(port),
                 WIREHUB_ADMIN_TOKEN=self.token,
-                WIREHUB_HTTP_BIND="127.0.0.1",
+                WIREHUB_HTTP_BIND=http_bind,
                 WIREHUB_DB=str(directory / "wirehub.sqlite3"),
                 WIREHUB_HUB_KEY=str(directory / "wirehub.key"),
             )

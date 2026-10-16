@@ -47,14 +47,13 @@ to capacity limits and immediate acknowledged policy revocation.
 | --- | --- | --- |
 | `WIREHUB_ADMIN_TOKEN` | none | Required, nonempty bearer secret; generate and store securely |
 | `WIREHUB_PORT` | `51820` | Integer 1–65535; same numeric port for UDP tunnel and TCP HTTP |
-| `WIREHUB_HTTP_BIND` | `127.0.0.1` | IPv4 address; non-loopback requires proxy mode |
-| `WIREHUB_TRUSTED_PROXY_MODE` | `0` | Only literal `1` enables non-loopback HTTP; does not itself provide TLS or proxy authentication |
+| `WIREHUB_HTTP_BIND` | `127.0.0.1` | IPv4 listen address; use `0.0.0.0` for all interfaces |
 | `WIREHUB_DB` | `wirehub.sqlite3` | Local regular database; one service instance per canonical path |
 | `WIREHUB_HUB_KEY` | `wirehub.key` | Raw 32-byte private key, regular non-symlink file, exactly mode 0600 |
 | `WIREHUB_BUILD_ID` | Git commit or `unknown` | Build-time only; release CI sets the full release commit SHA |
 
 The container overrides bind to `0.0.0.0` and the two state paths to `/data/...`;
-it still requires proxy mode and an admin token. Mount persistent `/data`, and
+it requires an admin token. Mount persistent `/data`, and
 allow at least **10 seconds** for stop grace (`docker stop --time 10 wirehub`).
 SIGINT/SIGTERM stop new HTTP requests and drain existing requests for at most
 8 seconds while the UDP router remains available. Then UDP stops. A deadline
@@ -92,9 +91,7 @@ server {
 
 The browser still supplies the WireHub bearer token. Restrict public access to
 TCP 443 and UDP 51820; keep upstream TCP 51820 accessible only to the trusted
-proxy. When container HTTP is published on host loopback, enable proxy mode
-inside the container as in the README. Setting proxy mode alone is insufficient
-to protect a publicly published HTTP port. UDP goes directly to the Hub, not
+proxy. The Compose example publishes container HTTP on host loopback. UDP goes directly to the Hub, not
 through this HTTP proxy. Forwarded headers do not replace bearer authentication.
 
 For systemd use a dedicated account, a mode-0700 state directory, absolute state
@@ -211,7 +208,7 @@ new one-time private configuration.
 
 | Symptom | Check / action |
 | --- | --- |
-| Startup rejects HTTP bind | Keep loopback or configure a protected TLS proxy and literal proxy mode `1` |
+| HTTP bind fails | Use a valid local IPv4 address or `0.0.0.0`, and check whether the port is already in use |
 | Database already in use | Stop the owning instance; do not remove its lock |
 | Key identity/mode error | Restore the matching pair and mode 0600; never generate a replacement key over existing state |
 | Schema error after rollback | Restore the original pre-upgrade pair, not just the old executable |

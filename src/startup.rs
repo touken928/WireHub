@@ -31,12 +31,6 @@ pub(crate) async fn run() -> Result<()> {
     if token.trim().is_empty() {
         return Err("WIREHUB_ADMIN_TOKEN must not be empty".into());
     }
-    let proxy_mode = env::var("WIREHUB_TRUSTED_PROXY_MODE")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    if !bind.is_loopback() && !proxy_mode {
-        return Err("non-loopback HTTP bind requires WIREHUB_TRUSTED_PROXY_MODE=1 behind a trusted TLS/auth proxy".into());
-    }
     let key_path = env::var("WIREHUB_HUB_KEY").unwrap_or_else(|_| "wirehub.key".into());
     let store = Arc::new(Store::open_service(Path::new(&path))?);
     let private = hub_key::load_or_bind_hub_key(&store, Path::new(&key_path))?;

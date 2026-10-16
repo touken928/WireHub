@@ -27,20 +27,37 @@ WireHub supports native builds on Unix systems only. Windows is unsupported and 
 
 ### Docker
 
-Replace the admin token with your own long random secret, then start WireHub:
+Clone this repository and use the included [`compose.yml`](compose.yml) to build the current source:
+
+```yaml
+services:
+  wirehub:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      WIREHUB_ADMIN_TOKEN: ${WIREHUB_ADMIN_TOKEN:?Set WIREHUB_ADMIN_TOKEN to a long random secret}
+    ports:
+      - "127.0.0.1:51820:51820/tcp"
+      - "51820:51820/udp"
+    volumes:
+      - ./data:/data
+```
+
+Set your own long random admin secret and start WireHub from the directory containing `compose.yml`:
 
 ```sh
+mkdir -p data
+sudo chown 65532:65532 data
+sudo chmod 700 data
 export WIREHUB_ADMIN_TOKEN='replace-with-a-long-random-secret'
-
-docker run -d --name wirehub \
-  --restart unless-stopped \
-  -e WIREHUB_ADMIN_TOKEN \
-  -e WIREHUB_TRUSTED_PROXY_MODE=1 \
-  -p 127.0.0.1:51820:51820/tcp \
-  -p 51820:51820/udp \
-  -v wirehub-data:/data \
-  ghcr.io/touken928/wirehub:latest
+docker compose up -d --build
 ```
+
+You can also set `WIREHUB_ADMIN_TOKEN` in a local `.env` file beside `compose.yml`.
+The `./data` directory beside `compose.yml` stores the database and Hub key across container updates.
+The container runs as UID/GID `65532:65532`; the commands above prepare that directory with the required ownership and permissions.
 
 ### Linux binary
 
