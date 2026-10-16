@@ -52,7 +52,6 @@ export default function GroupsPage({ groups, peers, onCreate, saving, uncertain,
   const [both, setBoth] = useState(true)
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null)
   const [selectedEdges, setSelectedEdges] = useState<string[]>([])
-  const [source, setSource] = useState(groups[0]?.id ?? ''), [target, setTarget] = useState(groups[1]?.id ?? '')
   const startNode = useRef<string | null>(null), flow = useRef<ReactFlowInstance<GroupNode, GroupEdge> | null>(null)
   const positions = useRef(readLayout())
   const selectedGroup = groups.find(g => g.id === selectedGroupId)
@@ -75,10 +74,6 @@ export default function GroupsPage({ groups, peers, onCreate, saving, uncertain,
     }))
   }, [groups, peers, rules, selectedGroupId, setNodes])
   const groupIds = groups.map(g => g.id).join(',')
-  useEffect(() => {
-    setSource(value => groups.some(g => g.id === value) ? value : groups[0]?.id ?? '')
-    setTarget(value => groups.some(g => g.id === value) ? value : groups[1]?.id ?? groups[0]?.id ?? '')
-  }, [groupIds])
   const edit = useCallback((next: Rule[]) => { if (!locked) { if (draft === null) draftBase.current = serverRules; setDraft(next) } }, [locked, draft, serverRules])
   const onConnect = (connection: Connection) => {
     const { from, to } = connectionEnds(connection, startNode.current)
@@ -114,8 +109,6 @@ export default function GroupsPage({ groups, peers, onCreate, saving, uncertain,
     setNodes(current => current.map(node => ({ ...node, selected: false })))
   }
   const groupName = (id: string) => groups.find(g => g.id === id)?.name ?? 'Removed group'
-  const outgoing = selectedGroup ? rules.filter(r => r.from === selectedGroup.id && r.to !== selectedGroup.id) : []
-  const incoming = selectedGroup ? rules.filter(r => r.to === selectedGroup.id && r.from !== selectedGroup.id) : []
   const members = selectedGroup ? peers.filter(p => p.group_id === selectedGroup.id) : []
   const selfAllowed = selectedGroup ? rules.some(r => r.from === selectedGroup.id && r.to === selectedGroup.id) : false
   return <div className="page-enter policy-page"><div className="page-heading"><div><h1>Groups</h1><span className="heading-count">{groups.length} groups</span></div><button className="button button-primary" onClick={onCreate} disabled={locked}><Plus size={16} />New group</button></div>
@@ -155,22 +148,7 @@ export default function GroupsPage({ groups, peers, onCreate, saving, uncertain,
         <Panel position="bottom-right"><div className="link-modes" role="group" aria-label="New link direction"><button aria-pressed={!both} disabled={locked} onClick={() => setBoth(false)} title="Drag from source to target"><ArrowRight size={16} />One way</button><button aria-pressed={both} disabled={locked} onClick={() => setBoth(true)}><ArrowLeftRight size={16} />Both ways</button></div></Panel>
       </ReactFlow>{!groups.length && <div className="graph-empty"><GitBranch size={26} /><b>No groups yet</b><button className="button button-primary" onClick={onCreate}><Plus size={15} />New group</button></div>}</div>
       <div className="graph-foot"><span>Drag a handle to connect</span><span className="mono">{edges.length} links</span></div>
-      <form className="policy-link-form" onSubmit={e => {
-        e.preventDefault()
-        if (locked || source === target || !groups.some(g => g.id === source) || !groups.some(g => g.id === target)) return
-        edit(connectRules(rules, source, target, both)); setSelectedEdges([])
-      }}>
-        <div className="policy-link-heading"><GitBranch size={15} /><div><b>Add access link</b><span>Choose groups instead of dragging. Save to apply.</span></div></div>
-        <div className="policy-link-fields">
-          <label className="form-label">Source group<select value={source} disabled={locked} onChange={e => setSource(e.target.value)}>{groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label>
-          <label className="form-label">Target group<select value={target} disabled={locked} onChange={e => setTarget(e.target.value)}>{groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label>
-          <label className="form-label">Direction<select value={both ? 'both' : 'one'} disabled={locked} onChange={e => setBoth(e.target.value === 'both')}><option value="both">Both ways</option><option value="one">Source to target</option></select></label>
-          <button className="button button-quiet" disabled={locked || !source || !target || source === target || sameRules(rules, connectRules(rules, source, target, both))}><Plus size={15} />Add link</button>
-        </div>
-      </form>
     </section><aside className="panel group-detail">{selectedGroup ? <><div className="panel-head"><div><span className="eyebrow">GROUP</span><h2>{selectedGroup.name}</h2></div><button className="icon-button" aria-label="Close group details" onClick={clearSelection}><X size={16} /></button></div><label className="intra-group-toggle"><span>Intra-group access</span><input role="switch" type="checkbox" checked={selfAllowed} disabled={locked} onChange={e => edit(e.target.checked ? [...rules, { from: selectedGroup.id, to: selectedGroup.id }] : rules.filter(r => !(r.from === selectedGroup.id && r.to === selectedGroup.id)))} /></label>
-      <div className="detail-section"><h3>Outbound <span>{outgoing.length}</span></h3>{outgoing.length ? outgoing.map(r => <div className="detail-rule" key={r.to}><ArrowRight size={14} /><span>{groupName(r.to)}</span><button className="icon-button tiny" aria-label={`Remove access to ${groupName(r.to)}`} disabled={locked} onClick={() => edit(rules.filter(x => !(x.from === r.from && x.to === r.to)))}><X size={13} /></button></div>) : <p>No access</p>}</div>
-      <div className="detail-section"><h3>Inbound <span>{incoming.length}</span></h3>{incoming.length ? incoming.map(r => <div className="detail-rule" key={r.from}><ArrowRight size={14} /><span>{groupName(r.from)}</span></div>) : <p>No access</p>}</div>
-      <div className="detail-section"><h3>Peers <span>{members.length}</span></h3>{members.length ? members.map(p => <div className="detail-member" key={p.id}><b>{p.name}</b><span className="mono">{p.ipv4}</span></div>) : <p>No peers</p>}</div><button className="button button-quiet detail-delete" disabled={locked || dirty} onClick={() => onDelete(selectedGroup)}><Trash2 size={14} />Delete group</button></> : selectedEdge ? <><div className="panel-head"><div><span className="eyebrow">LINK</span><h2>Access direction</h2></div></div><div className="selected-link"><b>{groupName(selectedEdge.source)}</b>{selectedEdge.data?.bidirectional ? <ArrowLeftRight size={20} /> : <ArrowRight size={20} />}<b>{groupName(selectedEdge.target)}</b></div><div className="edge-direction-options"><button className="button button-quiet" aria-pressed={!selectedEdge.data?.bidirectional} disabled={locked} onClick={() => edit(setLinkDirection(rules, selectedEdge, 'forward'))}><ArrowRight size={16} />One way</button><button className="button button-quiet" aria-pressed={!!selectedEdge.data?.bidirectional} disabled={locked} onClick={() => edit(setLinkDirection(rules, selectedEdge, 'both'))}><ArrowLeftRight size={16} />Both ways</button><button className="button button-quiet" disabled={locked} onClick={() => edit(setLinkDirection(rules, selectedEdge, 'reverse'))}><RotateCcw size={15} />Reverse</button></div><button className="button button-quiet detail-delete" disabled={locked} onClick={removeSelected}><X size={14} />Disconnect</button></> : <><div className="panel-head"><h2>Groups</h2><span className="badge mono">{groups.length}</span></div><div className="detail-group-list">{groups.map(g => <button key={g.id} onClick={() => selectGroup(g.id)}><GitBranch size={16} /><b>{g.name}</b><span className="mono">{peers.filter(p => p.group_id === g.id).length}</span></button>)}</div><div className="detail-placeholder"><GitBranch size={23} /><p>Select a group or link</p></div></>}</aside></div>
+      <div className="group-members">{members.length ? <ul aria-label="Group members">{members.map(p => <li className="detail-member" key={p.id}><span className="detail-member-name" title={p.name}>{p.name}</span><span className="mono">{p.ipv4}</span></li>)}</ul> : <p className="group-members-empty">No peers</p>}</div><button className="button button-quiet detail-delete" disabled={locked || dirty} onClick={() => onDelete(selectedGroup)}><Trash2 size={14} />Delete group</button></> : selectedEdge ? <><div className="panel-head"><div><span className="eyebrow">LINK</span><h2>Access direction</h2></div></div><div className="selected-link"><b>{groupName(selectedEdge.source)}</b>{selectedEdge.data?.bidirectional ? <ArrowLeftRight size={20} /> : <ArrowRight size={20} />}<b>{groupName(selectedEdge.target)}</b></div><div className="edge-direction-options"><button className="button button-quiet" aria-pressed={!selectedEdge.data?.bidirectional} disabled={locked} onClick={() => edit(setLinkDirection(rules, selectedEdge, 'forward'))}><ArrowRight size={16} />One way</button><button className="button button-quiet" aria-pressed={!!selectedEdge.data?.bidirectional} disabled={locked} onClick={() => edit(setLinkDirection(rules, selectedEdge, 'both'))}><ArrowLeftRight size={16} />Both ways</button><button className="button button-quiet" disabled={locked} onClick={() => edit(setLinkDirection(rules, selectedEdge, 'reverse'))}><RotateCcw size={15} />Reverse</button></div><button className="button button-quiet detail-delete" disabled={locked} onClick={removeSelected}><X size={14} />Disconnect</button></> : <><div className="panel-head"><h2>Groups</h2><span className="badge mono">{groups.length}</span></div><div className="detail-group-list">{groups.map(g => <button key={g.id} onClick={() => selectGroup(g.id)}><GitBranch size={16} /><b>{g.name}</b><span className="mono">{peers.filter(p => p.group_id === g.id).length}</span></button>)}</div><div className="detail-placeholder"><GitBranch size={23} /><p>Select a group or link</p></div></>}</aside></div>
   </div>
 }
