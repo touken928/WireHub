@@ -1241,3 +1241,104 @@ async fn full_queue_rejects_batch_before_any_database_change() {
     }
     assert_no_reload(&mut rx).await;
 }
+
+#[tokio::test]
+async fn forward_edit_requires_revision_and_activation_acknowledgement() {
+    let (state, mut rx, mut headers) = test_state(true);
+    state
+        .store
+        .add_group(&Group {
+            id: "g".into(),
+            name: "g".into(),
+            allowed_groups: vec![],
+        })
+        .unwrap();
+    let mut peer = Peer {
+        id: "p".into(),
+        name: "p".into(),
+        public_key: "key-p".into(),
+        ipv4: String::new(),
+        group_id: "g".into(),
+        received_bytes: 0,
+        sent_bytes: 0,
+        last_handshake_unix: None,
+    };
+    state.store.create_peer_allocated(&mut peer).unwrap();
+    state
+        .store
+        .create_forward(&mut Forward {
+            id: "f".into(),
+            name: "f".into(),
+            protocol: "tcp".into(),
+            target_peer_id: "p".into(),
+            target_port: 8000,
+            allowed_group_ids: vec![],
+        })
+        .unwrap();
+    let body = || NewForward {
+        name: "edited".into(),
+        protocol: "tcp".into(),
+        target_peer_id: "p".into(),
+        target_port: 8000,
+        allowed_group_ids: vec!["g".into()],
+    };
+    let response = update_forward(
+        State(state.clone()),
+        headers.clone(),
+        Path("f".into()),
+        Json(body()),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
+    assert_no_reload(&mut rx).await;
+    let revision = state.store.revision().unwrap();
+    headers.insert(
+        header::IF_MATCH,
+        format!("\"{}\"", revision - 1).parse().unwrap(),
+    );
+    let response = update_forward(
+        State(state.clone()),
+        headers.clone(),
+        Path("f".into()),
+        Json(body()),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_no_reload(&mut rx).await;
+    headers.insert(header::IF_MATCH, format!("\"{revision}\"").parse().unwrap());
+    let task = tokio::spawn(update_forward(
+        State(state.clone()),
+        headers.clone(),
+        Path("f".into()),
+        Json(body()),
+    ));
+    let command = rx.recv().await.unwrap();
+    assert!(
+        !task.is_finished(),
+        "Update must wait for runtime acknowledgement"
+    );
+    assert_eq!(
+        state.store.forwards().unwrap()[0].allowed_group_ids,
+        vec!["g"]
+    );
+    command.respond(Ok(()));
+    assert_eq!(task.await.unwrap().into_response().status(), StatusCode::OK);
+    let revision = state.store.revision().unwrap();
+    headers.insert(header::IF_MATCH, format!("\"{revision}\"").parse().unwrap());
+    let task = tokio::spawn(update_forward(
+        State(state.clone()),
+        headers,
+        Path("f".into()),
+        Json(body()),
+    ));
+    rx.recv()
+        .await
+        .unwrap()
+        .respond(Err(crate::kernel::ReloadError::Rejected));
+    let (status, text) = response_text(task.await.unwrap().into_response()).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(text.contains("activation_unconfirmed"));
+    assert!(text.contains(&format!("\"persisted_revision\":{}", revision + 1)));
+}

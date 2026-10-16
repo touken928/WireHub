@@ -23,8 +23,10 @@ class CheckFailure(RuntimeError):
     pass
 
 
-def request(url, token=None, method="GET", body=None, expected=200, timeout=8):
-    headers = {}
+def request(
+    url, token=None, method="GET", body=None, expected=200, timeout=8, headers=None
+):
+    headers = dict(headers or {})
     data = None
     if token:
         headers["Authorization"] = "Bearer " + token

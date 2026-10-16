@@ -1474,3 +1474,55 @@ fn drifted_v4_and_missing_revision_are_rejected_unchanged() {
     assert!(Store::open(path.to_str().unwrap()).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
+
+#[test]
+fn forward_update_is_atomic_versioned_and_preserves_identity() {
+    let s = store();
+    s.add_group(&group("group")).unwrap();
+    for id in ["peer", "peer2"] {
+        s.create_peer_allocated(&mut peer(id)).unwrap();
+    }
+    let mut f = forward("editable");
+    s.create_forward(&mut f).unwrap();
+    let mut other = forward("other");
+    other.target_port = 8000;
+    s.create_forward(&mut other).unwrap();
+    let revision = s.revision().unwrap();
+    f.name = "  Updated web  ".into();
+    f.allowed_group_ids.clear();
+    f.target_peer_id = "peer2".into();
+    f.target_port = 8080;
+    f.protocol = "udp".into();
+    assert_eq!(s.update_forward(&mut f, revision).unwrap(), revision + 1);
+    assert_eq!(f.name, "Updated web");
+    assert!(s.forwards().unwrap().iter().any(|stored| stored.id == f.id
+        && stored.target_port == 8080
+        && stored.allowed_group_ids.is_empty()));
+    assert!(matches!(
+        s.update_forward(&mut f, revision),
+        Err(PolicyError::Conflict { .. })
+    ));
+    let unchanged = serde_json::to_value(s.forwards().unwrap()).unwrap();
+    let revision = s.revision().unwrap();
+    for (target, port, allowed) in [
+        ("missing", 8080, vec![]),
+        ("peer2", 8080, vec!["missing".into()]),
+        ("peer2", 8000, vec![]),
+    ] {
+        f.protocol = "tcp".into();
+        f.target_peer_id = target.into();
+        f.target_port = port;
+        f.allowed_group_ids = allowed;
+        assert!(s.update_forward(&mut f, revision).is_err());
+        assert_eq!(s.revision().unwrap(), revision);
+        assert_eq!(
+            serde_json::to_value(s.forwards().unwrap()).unwrap(),
+            unchanged
+        );
+    }
+    f.id = "deleted".into();
+    assert!(matches!(
+        s.update_forward(&mut f, revision),
+        Err(PolicyError::MissingForward)
+    ));
+}

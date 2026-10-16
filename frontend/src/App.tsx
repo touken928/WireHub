@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import {
   Activity, ArrowDownLeft, ArrowLeftRight, ArrowUpRight, Check, CircleHelp,
   Copy, Download, Gauge, GitBranch, KeyRound, LoaderCircle, LogOut,
-  Menu, Network, Plus, Radio, RefreshCw, Search, Settings2, Shield, Trash2, X,
+  Menu, Network, Pencil, Plus, Radio, RefreshCw, Search, Settings2, Shield, Trash2, X,
 } from 'lucide-react'
 import GroupsPage from './components/groups/GroupsPage'
 import '@xyflow/react/dist/style.css'
@@ -62,6 +62,7 @@ export default function App() {
   const [forwardsError, setForwardsError] = useState('')
   const [query, setQuery] = useState('')
   const [modal, setModal] = useState<'peer' | 'group' | 'forward' | null>(null)
+  const [editingForward, setEditingForward] = useState<Forward | null>(null)
   const [provision, setProvision] = useState<Provision | null>(null)
   const [provisionRetained, setProvisionRetained] = useState(false)
   const provisionGenerationRef = useRef(0)
@@ -249,7 +250,7 @@ export default function App() {
     policyPendingRef.current = false; policyUncertainRef.current = false
     setPolicySaving(false); setPolicyUncertain(false); setPolicyError('')
     setConnected(false); setToken(''); rememberToken(''); configRevisionRef.current = null; revisionNeedsRefreshRef.current = false; setPolicyConflict(null); setRuntime(null); setRuntimeError(''); setSampledAt(null)
-    setPeers([]); setGroups([]); setForwards([]); setSetup(null); setModal(null); setProvision(null); setProvisionRetained(false)
+    setPeers([]); setGroups([]); setForwards([]); setSetup(null); setModal(null); setEditingForward(null); setProvision(null); setProvisionRetained(false)
     setError(''); setForwardsError(''); setToast(''); setLoginError(''); setMobileNav(false); setQuery(''); setBusy(false); setUpdatedAt(null)
     pendingPeersRef.current.clear(); setPendingPeers(new Set())
     settingsPendingRef.current = false; setSettingsSaving(false); setSettingsError(''); setSettingsVersion(0); setPolicyDirty(false); setPage('overview')
@@ -307,7 +308,7 @@ export default function App() {
           finally { if (session === sessionRef.current) finishPeerMutation(peer.id) }
         }} />}
           {page === 'groups' && <GroupsPage conflict={policyConflict} onResolveConflict={resolveConflict} onDirtyChange={setPolicyDirty} groups={groups} peers={peers} saving={policySaving} uncertain={policyUncertain} error={policyError} onCreate={() => { if (!policyPendingRef.current && !policyUncertainRef.current) setModal('group') }} onDelete={async g => { if (policyPendingRef.current || policyUncertainRef.current) return; if (!confirm(`Delete group "${g.name}"?`)) return; try { const r = await client.DELETE('/api/groups/{id}', { params: { path: { id: g.id } } }); if (activeSession !== sessionRef.current) return; if (!r.error) { configurationChanged(); setGroups(v => v.filter(x => x.id !== g.id).map(x => ({ ...x, allowed_groups: (x.allowed_groups ?? []).filter(id => id !== g.id) }))); setForwards(v => v.map(f => ({ ...f, allowed_group_ids: f.allowed_group_ids.filter(id => id !== g.id) }))); setToast('Group deleted') } else setError('Deletion unconfirmed. Refresh before retrying.') } catch (e) { if (activeSession === sessionRef.current) setError(mutationFailure(e, 'Unable to delete group.')) } }} onSavePolicy={savePolicy} onReload={recoverPolicy} />}
-          {page === 'forwards' && <ForwardsPage forwards={forwards} subnet={setup?.settings?.subnet ?? ''} loadError={forwardsError} onRetry={() => void load()} peers={peers} groups={groups} onCreate={() => setModal('forward')} onDelete={async f => { if (!confirm(`Delete forward "${f.name}"?`)) return; const session = sessionRef.current; try { await forwardsApi.remove(f.id); if (session !== sessionRef.current) return; configurationChanged(); setForwards(v => v.filter(x => x.id !== f.id)); setToast('Forward deleted') } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Deletion unconfirmed. Refresh before retrying.')) } }} />}
+          {page === 'forwards' && <ForwardsPage forwards={forwards} subnet={setup?.settings?.subnet ?? ''} loadError={forwardsError} onRetry={() => void load()} peers={peers} groups={groups} onCreate={() => { setEditingForward(null); setModal('forward') }} onEdit={forward => { setEditingForward(forward); setModal('forward') }} onDelete={async f => { if (!confirm(`Delete forward "${f.name}"?`)) return; const session = sessionRef.current; try { await forwardsApi.remove(f.id); if (session !== sessionRef.current) return; configurationChanged(); setForwards(v => v.filter(x => x.id !== f.id)); setToast('Forward deleted') } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Deletion unconfirmed. Refresh before retrying.')) } }} />}
           {page === 'settings' && setup?.settings && <SettingsPage settings={setup.settings} savedVersion={settingsVersion} saving={settingsSaving} error={settingsError} onSave={async defaults => {
             if (activeSession !== sessionRef.current || settingsPendingRef.current) return
              settingsPendingRef.current = true; setSettingsSaving(true); setSettingsError(''); invalidateLoads()
@@ -320,12 +321,12 @@ export default function App() {
           }} />}
       </div>
     </main>
-    {modal && <Modal kind={modal} session={sessionRef.current} isSessionCurrent={session => session === sessionRef.current} groups={groups} peers={peers} forwards={forwards} subnet={setup?.settings?.subnet ?? ''} onClose={() => setModal(null)} onCreated={async value => {
+    {modal && <Modal key={`${modal}-${editingForward?.id ?? "new"}`} kind={modal} editingForward={editingForward} onMutationStart={invalidateLoads} onMutationSettled={configurationChanged} session={sessionRef.current} isSessionCurrent={session => session === sessionRef.current} groups={groups} peers={peers} forwards={forwards} subnet={setup?.settings?.subnet ?? ''} onClose={() => { setModal(null); setEditingForward(null) }} onCreated={async value => {
       if (activeSession !== sessionRef.current) return
       configurationChanged()
       if (modal === 'peer') { ++provisionGenerationRef.current; setModal(null); setProvisionRetained(false); setProvision(value as Provision); setPeers(v => [...v, (value as Provision).peer]) }
       if (modal === 'group') { setGroups(v => [...v, value as Group]); setModal(null); setToast('Group created') }
-      if (modal === 'forward') { setForwards(v => [...v, value as Forward]); setModal(null); setToast('Forward created') }
+      if (modal === 'forward') { setForwards(v => editingForward ? v.map(f => f.id === editingForward.id ? value as Forward : f) : [...v, value as Forward]); setModal(null); setEditingForward(null); setToast(editingForward ? 'Forward updated' : 'Forward created') }
     }} />}
     {provision && <ProvisionDialog data={provision} retained={provisionRetained} onRetained={() => {
       if (activeSession === sessionRef.current && activeProvisionGeneration === provisionGenerationRef.current) setProvisionRetained(true)
@@ -449,9 +450,9 @@ function PeersPage({ peers, allCount, groups, query, setQuery, onCreate, onMove,
     })}</div> : <div className="panel empty-panel"><Empty title={query ? 'No matching peers' : 'No peers yet'} action={query ? <button className="text-action" onClick={() => setQuery('')}>Clear search</button> : <button className="button button-primary" onClick={onCreate}><Plus size={15} />New peer</button>} /></div>}
   </div>
 }
-function ForwardsPage({ forwards, subnet, peers, groups, onCreate, onDelete, loadError, onRetry }: { forwards: Forward[]; subnet: string; peers: Peer[]; groups: Group[]; onCreate: () => void; onDelete: (f: Forward) => void; loadError: string; onRetry: () => void }) {
+function ForwardsPage({ forwards, subnet, peers, groups, onCreate, onEdit, onDelete, loadError, onRetry }: { forwards: Forward[]; subnet: string; peers: Peer[]; groups: Group[]; onCreate: () => void; onEdit: (f: Forward) => void; onDelete: (f: Forward) => void; loadError: string; onRetry: () => void }) {
   const hubAddress = subnet.replace(/\.0\/24$/, '.1')
-  return <div className="page-enter"><PageHeading title="Forwards" count={`${forwards.length} forwards`} action={<button className="button button-primary" onClick={onCreate}><Plus size={16} />New forward</button>} /><div className="inline-banner"><Shield size={15} /><span>Internal only</span><code>{hubAddress}</code></div>{loadError ? <div className="error-banner" role="alert"><span>{loadError}</span><button onClick={onRetry}>Retry</button></div> : forwards.length ? <div className="forward-list">{forwards.map(f => { const target = peers.find(p => p.id === f.target_peer_id); return <article className="forward-card" key={f.id}><div className="forward-card-head"><span className="badge mono">{f.protocol.toUpperCase()}</span><span className="forward-active">Configured</span><button className="icon-button danger-on-hover" aria-label={`Delete forward ${f.name}`} onClick={() => onDelete(f)}><Trash2 size={15} /></button></div><h3>{f.name}</h3><div className="route-visual"><div><small>Hub</small><b className="mono">{hubAddress}:{f.target_port}</b></div><ArrowRightIcon /><div><small>{target?.name ?? 'Peer removed'}</small><b className="mono">{target?.ipv4 ?? '—'}:{f.target_port}</b></div></div><div className="forward-access"><Shield size={14} /><div className="allow-chips">{f.allowed_group_ids.length ? f.allowed_group_ids.map(id => <span key={id}>{groupName(groups, id)}</span>) : <span className="denied-label">No access</span>}</div></div></article> })}</div> : <div className="panel empty-panel"><Empty title="No forwards yet" action={<button className="button button-primary" onClick={onCreate}><Plus size={15} />New forward</button>} /></div>}</div>
+  return <div className="page-enter"><PageHeading title="Forwards" count={`${forwards.length} forwards`} action={<button className="button button-primary" onClick={onCreate}><Plus size={16} />New forward</button>} /><div className="inline-banner"><Shield size={15} /><span>Internal only</span><code>{hubAddress}</code></div>{loadError ? <div className="error-banner" role="alert"><span>{loadError}</span><button onClick={onRetry}>Retry</button></div> : forwards.length ? <div className="forward-list">{forwards.map(f => { const target = peers.find(p => p.id === f.target_peer_id); return <article className="forward-card" key={f.id}><div className="forward-card-head"><span className="badge mono">{f.protocol.toUpperCase()}</span><span className="forward-active">{f.allowed_group_ids.length ? 'Configured' : 'Access disabled'}</span><div className="forward-card-actions"><button className="icon-button" aria-label={`Edit forward ${f.name}`} onClick={() => onEdit(f)}><Pencil size={15} /></button><button className="icon-button danger-on-hover" aria-label={`Delete forward ${f.name}`} onClick={() => onDelete(f)}><Trash2 size={15} /></button></div></div><h3>{f.name}</h3><div className="route-visual"><div><small>Hub</small><b className="mono">{hubAddress}:{f.target_port}</b></div><ArrowRightIcon /><div><small>{target?.name ?? 'Peer removed'}</small><b className="mono">{target?.ipv4 ?? '—'}:{f.target_port}</b></div></div><div className="forward-access"><Shield size={14} /><div className="allow-chips">{f.allowed_group_ids.length ? f.allowed_group_ids.map(id => <span key={id}>{groupName(groups, id)}</span>) : <span className="denied-label">No access</span>}</div></div></article> })}</div> : <div className="panel empty-panel"><Empty title="No forwards yet" action={<button className="button button-primary" onClick={onCreate}><Plus size={15} />New forward</button>} /></div>}</div>
 }
 function ArrowRightIcon() { return <ArrowUpRight className="route-arrow" size={18} /> }
 function Dialog({ title, children, onClose, locked = false }: { title: string; children: ReactNode; onClose: () => void; locked?: boolean }) {
@@ -471,17 +472,34 @@ function Dialog({ title, children, onClose, locked = false }: { title: string; c
   }
   return <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget && !locked) onClose() }}><section ref={ref} className="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" onKeyDown={onKeyDown}><div className="dialog-head"><h2 id="dialog-title">{title}</h2><button className="icon-button" aria-label="Close dialog" disabled={locked} onClick={onClose}><X size={18} /></button></div>{children}</section></div>
 }
-function Modal({ kind, groups, peers, forwards, subnet, session, isSessionCurrent, onClose, onCreated }: { kind: 'peer' | 'group' | 'forward'; groups: Group[]; peers: Peer[]; forwards: Forward[]; subnet: string; session: number; isSessionCurrent: (session: number) => boolean; onClose: () => void; onCreated: (value: Peer | Group | Provision | Forward) => void }) {
+function Modal({ kind, editingForward, onMutationStart, onMutationSettled, groups, peers, forwards, subnet, session, isSessionCurrent, onClose, onCreated }: { kind: 'peer' | 'group' | 'forward'; editingForward: Forward | null; onMutationStart: () => void; onMutationSettled: () => void; groups: Group[]; peers: Peer[]; forwards: Forward[]; subnet: string; session: number; isSessionCurrent: (session: number) => boolean; onClose: () => void; onCreated: (value: Peer | Group | Provision | Forward) => void }) {
   const [name, setName] = useState(''), [groupId, setGroupId] = useState(groups[0]?.id ?? ''), [targetPeer, setTargetPeer] = useState(peers[0]?.id ?? '')
   const [protocol, setProtocol] = useState<'tcp' | 'udp'>('tcp'), [targetPort, setTargetPort] = useState(''), [allowed, setAllowed] = useState<string[]>([])
   const [saving, setSaving] = useState(false), [error, setError] = useState('')
-  const title = { peer: 'New peer', group: 'New group', forward: 'New forward' }[kind]
+  const [loading, setLoading] = useState(!!editingForward)
+  const [expectedRevision, setExpectedRevision] = useState<number | null>(null)
+  const [reloadVersion, setReloadVersion] = useState(0)
+  useEffect(() => {
+    if (!editingForward) return
+    setLoading(true); setExpectedRevision(null); setError('')
+    let active = true
+    void configApi.get().then(config => {
+      if (!active || !isSessionCurrent(session)) return
+      const forward = config.forwards.find(f => f.id === editingForward.id)
+      if (!forward) throw new Error('Forward no longer exists. Close this dialog and refresh.')
+      setName(forward.name); setProtocol(forward.protocol as 'tcp' | 'udp'); setTargetPeer(forward.target_peer_id)
+      setTargetPort(String(forward.target_port)); setAllowed(forward.allowed_group_ids); setExpectedRevision(config.revision)
+    }).catch(e => { if (active && isSessionCurrent(session)) setError(mutationFailure(e, 'Unable to load forward. Close and reopen to retry.')) })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [editingForward?.id, reloadVersion])
+  const title = editingForward ? 'Edit forward' : { peer: 'New peer', group: 'New group', forward: 'New forward' }[kind]
   const portNumber = Number(targetPort)
-  const duplicatePort = kind === 'forward' && forwards.some(f => f.protocol === protocol && f.target_port === portNumber)
+  const duplicatePort = kind === 'forward' && forwards.some(f => f.id !== editingForward?.id && f.protocol === protocol && f.target_port === portNumber)
   const entryAddress = subnet.replace(/\.0\/24$/, '.1')
   const submit = async (e: React.FormEvent) => {
-    e.preventDefault(); if (!name.trim()) { setError('Enter a name.'); return }
-    setSaving(true); setError('')
+    e.preventDefault(); if (saving || loading || (editingForward && expectedRevision === null)) return; if (!name.trim()) { setError('Enter a name.'); return }
+    setSaving(true); setError(''); if (editingForward) onMutationStart()
     try {
       if (kind === 'peer') {
         const r = await client.POST('/api/peers', { body: { name: name.trim(), group_id: groupId } })
@@ -504,17 +522,23 @@ function Modal({ kind, groups, peers, forwards, subnet, session, isSessionCurren
       }
       if (kind === 'forward') {
         if (duplicatePort) throw new Error(`${protocol.toUpperCase()} port ${portNumber} is already in use.`)
-        const created = await forwardsApi.create({ name: name.trim(), protocol, target_peer_id: targetPeer, target_port: portNumber, allowed_group_ids: allowed })
+        const body = { name: name.trim(), protocol, target_peer_id: targetPeer, target_port: portNumber, allowed_group_ids: allowed }
+        const created = editingForward ? await forwardsApi.update(editingForward.id, expectedRevision!, body) : await forwardsApi.create(body)
         if (isSessionCurrent(session)) onCreated(created)
       }
-    } catch (e) { if (isSessionCurrent(session)) setError(mutationFailure(e, 'Result unconfirmed. Refresh before retrying.')) }
-    finally { if (isSessionCurrent(session)) setSaving(false) }
+    } catch (e) {
+      if (isSessionCurrent(session)) {
+        setError(mutationFailure(e, 'Result unconfirmed. Refresh before retrying.'))
+        if (editingForward && (!(e instanceof ApiError) || e.code === 'revision_conflict' || e.status === 503 || e.status === 404)) setExpectedRevision(null)
+      }
+    }
+    finally { if (isSessionCurrent(session)) { if (editingForward) onMutationSettled(); setSaving(false) } }
   }
-  return <Dialog title={title} onClose={onClose} locked={saving}><form className="stack-form" onSubmit={e => void submit(e)}><fieldset className="form-fields" disabled={saving}>
+  return <Dialog title={title} onClose={onClose} locked={saving}><form className="stack-form" onSubmit={e => void submit(e)}><fieldset className="form-fields" disabled={saving || loading || (!!editingForward && expectedRevision === null)}>
     <label className="form-label">Name<input value={name} onChange={e => setName(e.target.value)} placeholder={kind === 'peer' ? 'MacBook Pro' : kind === 'group' ? 'Engineering' : 'Internal docs'} required maxLength={128} /></label>
     {kind === 'peer' && <><label className="form-label">Group<select aria-label="Group" value={groupId} onChange={e => setGroupId(e.target.value)} required><option value="" disabled>Select a group</option>{groups.map(g => <option value={g.id} key={g.id}>{g.name}</option>)}</select></label><p className="field-note"><KeyRound size={14} /> Download the configuration after creation. It is shown once.</p>{!groups.length && <div className="field-warning">Create a group first.</div>}</>}
-    {kind === 'forward' && <><div className="forward-entry-preview"><span>Hub entry</span><b className="mono">{entryAddress}:{targetPort || 'port'}</b></div><div className="form-row"><label className="form-label">Protocol<select aria-label="Protocol" value={protocol} onChange={e => setProtocol(e.target.value as 'tcp' | 'udp')}><option value="tcp">TCP</option><option value="udp">UDP</option></select></label><label className="form-label">Port<input type="number" min="1" max="65535" step="1" value={targetPort} onChange={e => setTargetPort(e.target.value)} placeholder="8080" required aria-invalid={duplicatePort} aria-describedby={duplicatePort ? 'forward-port-error' : undefined} /></label></div>{duplicatePort && <div className="field-warning" id="forward-port-error" role="alert">{protocol.toUpperCase()} port {portNumber} is already in use.</div>}<label className="form-label">Target peer<select aria-label="Target peer" value={targetPeer} onChange={e => setTargetPeer(e.target.value)} required><option value="" disabled>Select a peer</option>{peers.map(p => <option value={p.id} key={p.id}>{p.name} · {p.ipv4}</option>)}</select></label><fieldset className="group-chooser"><legend>Allowed groups</legend>{groups.map(g => <label key={g.id} className="check-row"><input type="checkbox" checked={allowed.includes(g.id)} onChange={e => setAllowed(e.target.checked ? [...allowed, g.id] : allowed.filter(id => id !== g.id))} /><span>{g.name}</span><small>{peers.filter(p => p.group_id === g.id).length} peers</small></label>)}</fieldset><p className="field-note">Internal access only. Hub and target use the same port.</p></>}
-    </fieldset>{error && <div className="form-error" role="alert">{error}</div>}<div className="dialog-actions"><button type="button" className="button button-quiet" disabled={saving} onClick={onClose}>Cancel</button><button className="button button-primary" disabled={saving || (kind === 'peer' && !groups.length) || (kind === 'forward' && (!peers.length || duplicatePort))}>{saving && <LoaderCircle size={15} className="spin" />}{saving ? 'Creating…' : 'Create'}</button></div>
+    {kind === 'forward' && <><div className="forward-entry-preview"><span>Hub entry</span><b className="mono">{entryAddress}:{targetPort || 'port'}</b></div><div className="form-row"><label className="form-label">Protocol<select aria-label="Protocol" value={protocol} onChange={e => setProtocol(e.target.value as 'tcp' | 'udp')}><option value="tcp">TCP</option><option value="udp">UDP</option></select></label><label className="form-label">Port<input type="number" min="1" max="65535" step="1" value={targetPort} onChange={e => setTargetPort(e.target.value)} placeholder="8080" required aria-invalid={duplicatePort} aria-describedby={duplicatePort ? 'forward-port-error' : undefined} /></label></div>{duplicatePort && <div className="field-warning" id="forward-port-error" role="alert">{protocol.toUpperCase()} port {portNumber} is already in use.</div>}<label className="form-label">Target peer<select aria-label="Target peer" value={targetPeer} onChange={e => setTargetPeer(e.target.value)} required><option value="" disabled>Select a peer</option>{peers.map(p => <option value={p.id} key={p.id}>{p.name} · {p.ipv4}</option>)}</select></label><fieldset className="group-chooser"><legend>Allowed groups</legend>{groups.map(g => <label key={g.id} className="check-row"><input type="checkbox" checked={allowed.includes(g.id)} onChange={e => setAllowed(e.target.checked ? [...allowed, g.id] : allowed.filter(id => id !== g.id))} /><span>{g.name}</span><small>{peers.filter(p => p.group_id === g.id).length} peers</small></label>)}</fieldset><p className="field-note">Internal access only. Hub and target use the same port. Allowed groups also need access to the target’s group in Groups.</p>{!allowed.length && <p className="field-warning">No groups selected. This forward will block all access.</p>}</>}
+    </fieldset>{error && <div className="form-error" role="alert"><span>{error}</span>{editingForward && <button type="button" className="text-action" disabled={saving || loading} onClick={() => setReloadVersion(v => v + 1)}>Reload and discard edits</button>}</div>}<div className="dialog-actions"><button type="button" className="button button-quiet" disabled={saving} onClick={onClose}>Cancel</button><button className="button button-primary" disabled={saving || loading || (!!editingForward && expectedRevision === null) || (kind === 'peer' && !groups.length) || (kind === 'forward' && (!peers.length || duplicatePort))}>{saving && <LoaderCircle size={15} className="spin" />}{loading ? 'Loading…' : saving ? (editingForward ? 'Saving…' : 'Creating…') : editingForward ? 'Save changes' : 'Create'}</button></div>
   </form></Dialog>
 }
 function ProvisionDialog({ data, group, retained, onRetained, onClose }: { data: Provision; group: string; retained: boolean; onRetained: () => void; onClose: () => void }) {

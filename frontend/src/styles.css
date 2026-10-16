@@ -215,7 +215,7 @@ h2 { font-size: 14px; font-weight: 600; letter-spacing: -.2px; }
 .forward-card { padding: 20px; background: #fff; border: 1px solid var(--line); border-radius: 9px; min-width: 0; }
 .forward-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
 .forward-active { font-size: 9px; color: #a3afbf; }
-.forward-card-head .icon-button { margin-left: auto; }
+.forward-card-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
 .forward-card h3 { font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
 .route-visual { display: grid; grid-template-columns: 1fr auto 1fr; gap: 15px; align-items: center; padding: 23px 0; }
 .route-visual > div { min-width: 0; }

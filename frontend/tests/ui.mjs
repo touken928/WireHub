@@ -47,7 +47,7 @@ try {
   let revision = 0, appliedRevision = 0, runtimeReady = true, failStatus = false
   let configured = true, failSave = false, failReload = false, partialSave = false, commitAclThenFail = false
   let failSettings = false
-  let loseSettingsResponse = false, peerCreateError = ''
+  let loseSettingsResponse = false, peerCreateError = '', failForwardActivation = false
   const reads = []
   let setupCreateStatus = 200, setupCreateError = ''
   const mutations = []
@@ -137,6 +137,16 @@ try {
     if (path.startsWith('/api/peers/') && method === 'DELETE') { const id = path.split('/')[3]; peers = peers.filter(p => p.id !== id); forwards = forwards.filter(f => f.target_peer_id !== id); commitConfig(); return route.fulfill({ status: 204 }) }
     if (path === '/api/forwards' && method === 'GET') return reply(forwards)
     if (path === '/api/forwards' && method === 'POST') { const forward = { id: 'new-forward', ...body }; forwards.push(forward); commitConfig(); return reply(forward) }
+    if (path.startsWith('/api/forwards/') && method === 'PUT') {
+      const id = path.split('/')[3]
+      if (req.headers()['if-match'] !== `"${revision}"`) return reply({ code: 'revision_conflict', message: 'Configuration changed. Reload and review before saving.' }, 409)
+      if (!forwards.some(f => f.id === id)) return reply({ code: 'forward_not_found', message: 'forward not found' }, 404)
+      if (forwards.some(f => f.id !== id && f.protocol === body.protocol && f.target_port === body.target_port)) return reply({ code: 'conflict', message: 'forward conflict' }, 409)
+      const updated = { id, ...body }
+      forwards = forwards.map(f => f.id === id ? updated : f); commitConfig()
+      if (failForwardActivation) return reply({ code: 'activation_unconfirmed', message: 'Forward saved; runtime activation is unconfirmed. Reload before retrying.', persisted_revision: revision }, 503)
+      return reply(updated)
+    }
     if (path.startsWith('/api/forwards/') && method === 'DELETE') { forwards = forwards.filter(f => f.id !== path.split('/')[3]); commitConfig(); return route.fulfill({ status: 204 }) }
     return reply({}, 404)
   })
@@ -268,7 +278,7 @@ try {
       settings = { subnet: '10.77.0.0/24', endpoint: 'vpn.example.com:51820', persistent_keepalive: 25 }
       revision = appliedRevision = 0; runtimeReady = true; failStatus = false
       failSave = failReload = partialSave = commitAclThenFail = failSettings = loseSettingsResponse = false
-      peerCreateError = ''; acceptDialog = true; configured = true
+      peerCreateError = ''; failForwardActivation = false; acceptDialog = true; configured = true
       setupCreateStatus = 200; setupCreateError = ''
       mutations.length = 0; reads.length = 0; runtimeErrors.length = 0
       await page.goto(url); await login(); await refreshSettled()
@@ -279,6 +289,56 @@ try {
       await page.getByRole('button', { name: 'Create', exact: true }).click()
     }
     const scenarios = {
+      'forward-edit': async () => {
+        forwards = [{ id: 'editable', name: 'Web', protocol: 'tcp', target_port: 8000, target_peer_id: 'server', allowed_group_ids: [] }]
+        await navigate('Forwards'); await refresh.click(); await refreshSettled()
+        const old = holdNext('GET', '/api/forwards'); await refresh.click(); await old.requested
+        await page.getByLabel('Edit forward Web', { exact: true }).click()
+        const dialog = page.getByRole('dialog')
+        await poll(async () => await dialog.getByRole('button', { name: 'Save changes', exact: true }).isEnabled(), 'Forward loaded for edit')
+        assert.equal(await dialog.getByLabel('Name', { exact: true }).inputValue(), 'Web')
+        assert.equal(await dialog.getByLabel('Port', { exact: true }).inputValue(), '8000')
+        await dialog.getByText('No groups selected. This forward will block all access.', { exact: true }).waitFor()
+        await dialog.getByLabel('Name', { exact: true }).fill('Edited web')
+        await dialog.getByLabel('Port', { exact: true }).fill('8080')
+        await dialog.getByLabel('Protocol', { exact: true }).selectOption('udp')
+        await dialog.getByLabel('Target peer', { exact: true }).selectOption('mac')
+        await dialog.getByLabel('Engineering', { exact: false }).check()
+        await screenshot('forward-edit-dialog')
+        const held = holdNext('PUT', '/api/forwards/editable')
+        await dialog.getByRole('button', { name: 'Save changes', exact: true }).click(); await held.requested
+        assert.ok(await dialog.getByLabel('Name', { exact: true }).isDisabled(), 'Editing locked during activation')
+        await page.keyboard.press('Escape'); assert.equal(await dialog.count(), 1)
+        await held.release(); await poll(async () => await dialog.count() === 0, 'Confirmed update closes dialog')
+        await old.release(); await refreshSettled()
+        assert.equal(forwards.length, 1, 'Editing preserves forward identity')
+        assert.deepEqual(forwards[0], { id: 'editable', name: 'Edited web', protocol: 'udp', target_port: 8080, target_peer_id: 'mac', allowed_group_ids: ['engineering'] })
+        await page.getByRole('heading', { name: 'Edited web', exact: true }).waitFor()
+        assert.match(await page.locator('.route-visual').innerText(), /10.77.0.1:8080/)
+        await screenshot('forward-edited')
+      },
+      'forward-edit-conflict': async () => {
+        forwards = [{ id: 'editable', name: 'Web', protocol: 'tcp', target_port: 8000, target_peer_id: 'server', allowed_group_ids: ['engineering'] }]
+        await navigate('Forwards'); await refresh.click(); await refreshSettled()
+        await page.getByLabel('Edit forward Web', { exact: true }).click()
+        const dialog = page.getByRole('dialog')
+        await poll(async () => await dialog.getByRole('button', { name: 'Save changes', exact: true }).isEnabled(), 'Forward loaded')
+        await dialog.getByLabel('Name', { exact: true }).fill('My draft')
+        forwards[0].name = 'Other administrator'; revision++; appliedRevision = revision
+        await dialog.getByRole('button', { name: 'Save changes', exact: true }).click()
+        await dialog.getByText('Configuration changed. Reload and review before saving.', { exact: true }).waitFor()
+        assert.equal(await dialog.getByLabel('Name', { exact: true }).inputValue(), 'My draft')
+        assert.equal(forwards[0].name, 'Other administrator', 'Stale edits never overwrite current server state')
+        assert.ok(await dialog.getByRole('button', { name: 'Save changes', exact: true }).isDisabled())
+        await dialog.getByRole('button', { name: 'Reload and discard edits', exact: true }).click()
+        await poll(async () => await dialog.getByLabel('Name', { exact: true }).inputValue() === 'Other administrator', 'Reloading reads authoritative state')
+        failForwardActivation = true
+        await dialog.getByLabel('Name', { exact: true }).fill('Saved but unconfirmed')
+        await dialog.getByRole('button', { name: 'Save changes', exact: true }).click()
+        await dialog.getByText('Forward saved; runtime activation is unconfirmed. Reload before retrying.', { exact: true }).waitFor()
+        assert.equal(await dialog.count(), 1, 'Unconfirmed activation keeps draft visible')
+        assert.equal(forwards[0].name, 'Saved but unconfirmed')
+      },
       'acl-conflict-revocation': async () => {
         await navigate('Groups')
         await page.getByRole('group', { name: 'New link direction' }).getByRole('button', { name: 'One way', exact: true }).click()

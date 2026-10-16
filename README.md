@@ -126,6 +126,8 @@ Click **Save** to commit the ACL changes as one versioned batch. If another sess
 
 In **Forwards**, click **New forward** and choose the target peer, TCP/UDP, service port, and allowed groups. Each source group also needs access to the target group in **Groups**.
 
+Use the edit button on a forward to change its name, protocol, port, target peer or allowed groups. Changes apply after saving. Leaving Allowed groups empty blocks all access.
+
 For example, forward a peer's TCP `8080` service so authorized peers can reach it at **`10.10.10.1:8080`**.
 
 ### Settings and updates

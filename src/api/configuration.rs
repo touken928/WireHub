@@ -40,6 +40,12 @@ pub(crate) fn policy_failure(error: PolicyError) -> Response {
             "Configuration changed. Reload and review before saving.",
             Some(revision),
         ),
+        PolicyError::MissingForward => failure(
+            StatusCode::NOT_FOUND,
+            "forward_not_found",
+            "forward not found",
+            None,
+        ),
         PolicyError::MissingGroup => failure(
             StatusCode::NOT_FOUND,
             "group_not_found",

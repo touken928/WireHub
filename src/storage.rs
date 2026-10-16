@@ -23,6 +23,8 @@ pub enum PolicyError {
     Conflict { revision: i64 },
     #[error("group not found")]
     MissingGroup,
+    #[error("forward not found")]
+    MissingForward,
     #[error("{0}")]
     Invalid(String),
     #[error("database error")]
@@ -406,6 +408,38 @@ impl Store {
         tx.commit()?;
         f.name = name;
         Ok(())
+    }
+    pub fn update_forward(&self, f: &mut Forward, expected: i64) -> Result<i64, PolicyError> {
+        let mut db = self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = read_revision(&tx)?;
+        if expected != current {
+            return Err(PolicyError::Conflict { revision: current });
+        }
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM forwards WHERE id=?1)",
+            [&f.id],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(PolicyError::MissingForward);
+        }
+        let name = normalized_name(&f.name)?;
+        validate_group_refs(&tx, &f.allowed_group_ids)?;
+        ensure_forward_target_exists(&tx, &f.target_peer_id)?;
+        let mut groups = f.allowed_group_ids.clone();
+        groups.sort();
+        groups.dedup();
+        let allowed = serde_json::to_string(&groups).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        tx.execute(
+            "UPDATE forwards SET name=?2,protocol=?3,target_peer_id=?4,target_port=?5,allowed=?6 WHERE id=?1",
+            params![f.id, name, f.protocol, f.target_peer_id, f.target_port, allowed],
+        )?;
+        let revision = advance_revision(&tx)?;
+        tx.commit()?;
+        f.name = name;
+        f.allowed_group_ids = groups;
+        Ok(revision)
     }
     pub fn remove_forward(&self, id: &str) -> rusqlite::Result<usize> {
         self.delete_rows("DELETE FROM forwards WHERE id=?1", [id])

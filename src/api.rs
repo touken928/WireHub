@@ -18,7 +18,7 @@ mod peers;
 mod settings;
 
 pub use configuration::{get_config, get_status, put_policy};
-pub use forwards::{create_forward, delete_forward, list_forwards};
+pub use forwards::{create_forward, delete_forward, list_forwards, update_forward};
 pub use groups::{create_group, delete_group, list_groups, set_acl};
 pub use peers::{create_peer, delete_peer, list_peers, move_peer};
 pub use settings::{get_setup, post_setup, put_settings};
@@ -215,7 +215,10 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/api/peers/:id", delete(delete_peer))
         .route("/api/peers/:id/group", put(move_peer))
         .route("/api/forwards", get(list_forwards).post(create_forward))
-        .route("/api/forwards/:id", delete(delete_forward))
+        .route(
+            "/api/forwards/:id",
+            delete(delete_forward).put(update_forward),
+        )
         .fallback(crate::static_assets::handler)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -253,7 +256,8 @@ pub fn openapi() -> String {
             peers::move_peer,
             forwards::list_forwards,
             forwards::create_forward,
-            forwards::delete_forward
+            forwards::delete_forward,
+            forwards::update_forward
         ),
         components(schemas(
             NetworkSettings,
@@ -314,7 +318,7 @@ pub fn openapi() -> String {
                     errors.push((404, "Resource missing"));
                 }
             }
-            if path.ends_with("/acl") {
+            if path.ends_with("/acl") || (path == "/api/forwards/{id}" && method == "put") {
                 errors.push((428, "If-Match revision required"));
                 operation["parameters"] = serde_json::json!([
                     {"name":"id","in":"path","required":true,"schema":{"type":"string"}},

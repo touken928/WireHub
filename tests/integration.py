@@ -260,6 +260,52 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
             f"authorized A {proto.upper()} forward did not echo",
         )
 
+    # Edit the existing rule rather than deleting/recreating it. Revocation must
+    # tear down an established NAT mapping and regrant must work on a fresh flow.
+    editable = forwards[0]
+
+    def edit_forward(allowed, name):
+        revision = request(hub_url + "/api/config", hub_token)["revision"]
+        return request(
+            hub_url + "/api/forwards/" + editable["id"],
+            hub_token,
+            "PUT",
+            {
+                "name": name,
+                "protocol": editable["protocol"],
+                "target_peer_id": editable["target_peer_id"],
+                "target_port": editable["target_port"],
+                "allowed_group_ids": allowed,
+            },
+            headers={"If-Match": f'"{revision}"'},
+        )
+
+    edited_connection = persistent_open(0, "172.23.45.1:18080")["id"]
+    try:
+        edit_forward([ga], "renamed TCP service")
+        check(
+            persistent_exchange(0, edited_connection, "after-forward-rename")["ok"],
+            "Renaming a forward disrupted an established TCP mapping",
+        )
+        edit_forward([], "disabled TCP service")
+        check(
+            not persistent_exchange(0, edited_connection, "after-forward-revoke")["ok"],
+            "Editing allowed groups did not revoke the established TCP mapping",
+        )
+        check(
+            not probe(0, "tcp", "172.23.45.1:18080", "new-denied")["ok"],
+            "An empty forward allowlist admitted a new TCP flow",
+        )
+        updated = edit_forward([ga], "restored TCP service")
+        check(updated["id"] == editable["id"], "Editing changed the forward identity")
+        check(
+            probe(0, "tcp", "172.23.45.1:18080", "after-forward-regrant")["ok"],
+            "Forward access did not recover after editing allowed groups",
+        )
+    finally:
+        control_post(a_url, tokens[0], "/tcp/close", {"id": edited_connection})
+    print("PASS: forward rename continuity and live allowlist revoke/regrant via PUT")
+
     # Keep one real forwarded TCP socket alive across an unrelated policy
     # mutation; the exchanges must use the same client-side net.Conn.
     persistent_id = None

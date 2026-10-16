@@ -76,6 +76,11 @@ export const forwardsApi = {
     if (!response.ok || !data) throwSetupError(response.status, error)
     return data
   },
+  async update(id: string, revision: number, body: NewForward): Promise<Forward> {
+    const { data, error, response } = await client.PUT('/api/forwards/{id}', { params: { path: { id }, header: { 'If-Match': `"${revision}"` } }, body })
+    if (!response.ok || !data) throwSetupError(response.status, error)
+    return data
+  },
   async remove(id: string) {
     const { error, response } = await client.DELETE('/api/forwards/{id}', { params: { path: { id } } })
     if (!response.ok) throwSetupError(response.status, error)
