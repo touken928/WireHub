@@ -184,7 +184,9 @@ def run(binary, rollback_binary, output):
             )
         finally:
             linked_hub.stop()
-        checks.append("restart preserves identity with residual key publication hard link")
+        checks.append(
+            "restart preserves identity with residual key publication hard link"
+        )
         # Canonical schema 4 pre-upgrade fixture, using only the temporary pair.
         with sqlite3.connect(hub.directory / "wirehub.sqlite3") as connection:
             connection.execute("DROP TABLE config_state")
@@ -229,7 +231,9 @@ def run(binary, rollback_binary, output):
             key.stat().st_nlink == 2,
             "Residual publication hard link did not remain during backup checks",
         )
-        checks.append("database hard links, key symlinks and insecure keys remain rejected")
+        checks.append(
+            "database hard links, key symlinks and insecure keys remain rejected"
+        )
         upgraded = directory / "upgraded"
         backup.restore(archive, upgraded)
         migrated = Hub(binary, upgraded)

@@ -310,7 +310,9 @@ mod tests {
     async fn cancelled_cleanup_exits_when_kernel_is_stopped_and_leaves_journal_entry() {
         let store = Arc::new(Store::open(":memory:").unwrap());
         store.bind_test_identity();
-        store.setup("10.88.0.0/24", "hub.example:51820", 25).unwrap();
+        store
+            .setup("10.88.0.0/24", "hub.example:51820", 25)
+            .unwrap();
         store
             .add_group(&Group {
                 id: "g".into(),
@@ -361,6 +363,9 @@ mod tests {
 
         drop(state);
         drop(store);
-        assert!(weak_store.upgrade().is_none(), "cleanup must not retain Store");
+        assert!(
+            weak_store.upgrade().is_none(),
+            "cleanup must not retain Store"
+        );
     }
 }

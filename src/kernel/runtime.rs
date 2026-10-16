@@ -399,9 +399,10 @@ async fn drain_pending(
     let mut prepared_count = 0;
     while remaining > 0 && prepared_count < MAX_PENDING_DRAIN_DELIVERIES {
         let now = Instant::now();
-        let Some(prepared) = state
-            .dataplane
-            .prepare_retry_for_target(&mut remaining, now, target_id)
+        let Some(prepared) =
+            state
+                .dataplane
+                .prepare_retry_for_target(&mut remaining, now, target_id)
         else {
             break;
         };

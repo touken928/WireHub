@@ -88,9 +88,11 @@ async fn pending_drain_caps_retries_and_rotates_fairly_across_batches() {
         raw[10..12].copy_from_slice(&header_checksum.to_be_bytes());
         let ingress = state.dataplane.ingress(&authenticated, &raw).unwrap();
         let prepared = state.dataplane.prepare(ingress, now).unwrap();
-        state
-            .dataplane
-            .finish(prepared, crate::kernel::dataplane::EgressOutcome::NotReady, now);
+        state.dataplane.finish(
+            prepared,
+            crate::kernel::dataplane::EgressOutcome::NotReady,
+            now,
+        );
     }
     assert_eq!(state.dataplane.pending_len(), 40);
 
@@ -184,7 +186,12 @@ async fn pending_retry_interval_drains_backlog_before_pending_ttl_without_auth_e
         .await
         .unwrap();
     kernel.state.dataplane.config.peers.insert("a".into(), a);
-    kernel.state.dataplane.config.peers.insert("b".into(), b.clone());
+    kernel
+        .state
+        .dataplane
+        .config
+        .peers
+        .insert("b".into(), b.clone());
     kernel.state.dataplane.config.by_ip.insert(b.ip, "b".into());
     let authenticated = kernel.state.dataplane.authenticated_peer("a").unwrap();
     let queued_at = Instant::now();
@@ -194,7 +201,11 @@ async fn pending_retry_interval_drains_backlog_before_pending_ttl_without_auth_e
         raw[10..12].fill(0);
         let header_checksum = checksum(&raw[..20]);
         raw[10..12].copy_from_slice(&header_checksum.to_be_bytes());
-        let ingress = kernel.state.dataplane.ingress(&authenticated, &raw).unwrap();
+        let ingress = kernel
+            .state
+            .dataplane
+            .ingress(&authenticated, &raw)
+            .unwrap();
         let prepared = kernel.state.dataplane.prepare(ingress, queued_at).unwrap();
         kernel.state.dataplane.finish(
             prepared,
@@ -207,16 +218,18 @@ async fn pending_retry_interval_drains_backlog_before_pending_ttl_without_auth_e
     let (retry_tx, mut retries) = mpsc::unbounded_channel();
     let (batch_tx, mut batches) = mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
-        DRAIN_RETRY_OBSERVER.scope(
-            retry_tx,
-            DRAIN_BATCH_OBSERVER.scope(
-                batch_tx,
-                DRAIN_EGRESS_OVERRIDE.scope(
-                    crate::kernel::dataplane::EgressOutcome::Delivered,
-                    kernel.run(),
+        DRAIN_RETRY_OBSERVER
+            .scope(
+                retry_tx,
+                DRAIN_BATCH_OBSERVER.scope(
+                    batch_tx,
+                    DRAIN_EGRESS_OVERRIDE.scope(
+                        crate::kernel::dataplane::EgressOutcome::Delivered,
+                        kernel.run(),
+                    ),
                 ),
-            ),
-        ).await
+            )
+            .await
     });
 
     // No further authenticated packets are sent. Production's independent
