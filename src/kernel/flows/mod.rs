@@ -177,7 +177,7 @@ impl Flows {
             .iter()
             .cloned()
             .map(Into::into)
-            .map(|f: ForwardConfig| (f.protocol.number(), f.target_port))
+            .map(|f: ForwardConfig| (f.protocol.number(), f.listen_port))
             .collect();
         Self {
             flows: HashMap::new(),
@@ -243,6 +243,7 @@ impl Flows {
                 };
                 if before.protocol != after.protocol
                     || before.target_peer_id != after.target_peer_id
+                    || before.listen_port != after.listen_port
                     || before.target_port != after.target_port
                     || !policy::forward_allowed(after, source.peer.group_id())
                 {
@@ -255,7 +256,7 @@ impl Flows {
         });
         let service_ports: HashSet<_> = new_forwards
             .iter()
-            .map(|f| (f.protocol.number(), f.target_port))
+            .map(|f| (f.protocol.number(), f.listen_port))
             .collect();
         self.remove_service_port_collisions(&service_ports);
         self.reverse.retain(|_, key| self.flows.contains_key(key));
@@ -317,7 +318,7 @@ impl Flows {
     ) -> Option<(RewritePlan, Reservation)> {
         if packet.protocol() != forward.protocol.number()
             || packet.dst() != self.hub_ip
-            || packet.dst_port()? != forward.target_port
+            || packet.dst_port()? != forward.listen_port
         {
             return None;
         }

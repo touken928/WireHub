@@ -1,6 +1,6 @@
 # Release verification
 
-Release target: **1.1.0**, schema **5**. The acceptance scope is one Hub,
+Release target: **1.2.0**, schema **6**. The acceptance scope is one Hub,
 a private IPv4 /24, Linux servers and the embedded management UI. Mobile testing
 is excluded and desktop interoperability is deferred for this acceptance.
 Supported behavior and network limitations are in [operations](operations.md).
@@ -28,6 +28,29 @@ container architectures also passed version/build-ID, startup and embedded-UI
 checks. Its reports and binary artifacts are retained with that workflow run.
 The tag-triggered release workflow repeats the gates on the exact tagged commit
 before publishing binaries, checksums, containers and a GitHub release (prerelease for RC tags).
+
+## 1.2.0 release
+
+- Select the Hub entry port independently of the target port, for example
+  `10.10.10.1:8080` → `10.10.10.4:8000`, for both TCP and UDP.
+- Reserve each Hub port per protocol, allowing multiple entries to the same
+  backend service and TCP/UDP entries with the same numeric port.
+- Edit either port in place; activation removes affected active and queued NAT
+  mappings. Replies retain the correct Hub entry port.
+- Display forwards as aligned horizontal rows, with separate entry and target
+  addresses, compact access groups and responsive controls.
+- Upgrade canonical schemas 3–5 atomically to 6, preserving existing forward
+  entry ports, configuration revisions and Hub identity. Legacy API requests
+  without `listen_port` continue to use `target_port` for both sides.
+- Extend paired-backup support to schema 6. Rollback to v1.1.0 requires restoring
+  the verified pre-upgrade database/key pair.
+
+Local verification passed 199 Rust tests (one opt-in benchmark ignored), Clippy,
+production UI regression and responsive layout checks, real userspace and Linux
+kernel WireGuard traffic with different entry/target ports, live entry-port
+edits, schema 5→6 paired backup/restore with a v1.1.0 source-baseline binary,
+schema 6 backup/restore, and five-minute endurance with automatic rekey.
+The exact tagged commit must pass all hosted gates before publication.
 
 ## 1.1.0 release
 
@@ -99,7 +122,7 @@ actionlint
 pnpm --dir frontend test:ui
 target/release/wirehub export-openapi > /tmp/wirehub-openapi.json
 cmp openapi.json /tmp/wirehub-openapi.json
-python3 scripts/check-release.py --tag v1.1.0 --binary target/release/wirehub
+python3 scripts/check-release.py --tag v1.2.0 --binary target/release/wirehub
 ```
 
 CI also compiles all targets with the minimum supported Rust **1.89.0**.
@@ -130,7 +153,7 @@ python3 tests/soak.py --binary target/release/wirehub --seconds 1800 --output /t
 
 For real previous-version rollback execution, add
 `--rollback-binary /absolute/path/to/previous/wirehub` to the operations command.
-Without it, the test verifies the restored schema-4 pair without executing an
+Without it, the test verifies the restored schema-5 pair without executing an
 old binary. For future desktop acceptance, run
 `python3 tests/desktop_interop.py --output /tmp/desktop-interop.json` and manually
 import/activate its temporary profile in the installed WireGuard client.

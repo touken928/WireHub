@@ -4,6 +4,8 @@ import { ApiError, configApi, forwardsApi, mutationFailure, type Forward, type N
 import type { components } from '../../api/schema'
 import Dialog from '../Dialog'
 
+type Draft = Omit<NewForward, 'listen_port'> & { listen_port: number }
+
 type Group = components['schemas']['Group']
 type Peer = components['schemas']['Peer']
 type Snapshot = { status: 'loading' | 'reload' } | { status: 'ready'; revision: number | null }
@@ -23,8 +25,8 @@ type Props = {
 
 export default function ForwardDialog({ forwardId, groups, peers, forwards, subnet, session, isSessionCurrent, onMutationStart, onMutationSettled, onClose, onSaved }: Props) {
   const editing = forwardId !== undefined
-  const [draft, setDraft] = useState<NewForward>(() => ({
-    name: '', protocol: 'tcp', target_peer_id: peers[0]?.id ?? '', target_port: 0, allowed_group_ids: [],
+  const [draft, setDraft] = useState<Draft>(() => ({
+    name: '', protocol: 'tcp', target_peer_id: peers[0]?.id ?? '', listen_port: 0, target_port: 0, allowed_group_ids: [],
   }))
   const [snapshot, setSnapshot] = useState<Snapshot>(editing ? { status: 'loading' } : { status: 'ready', revision: null })
   const [saving, setSaving] = useState(false)
@@ -52,8 +54,8 @@ export default function ForwardDialog({ forwardId, groups, peers, forwards, subn
     return () => { active = false }
   }, [forwardId, reloadVersion, session, isSessionCurrent])
 
-  const change = <K extends keyof NewForward,>(key: K, value: NewForward[K]) => setDraft(previous => ({ ...previous, [key]: value }))
-  const duplicatePort = forwards.some(forward => forward.id !== forwardId && forward.protocol === draft.protocol && forward.target_port === draft.target_port)
+  const change = <K extends keyof Draft,>(key: K, value: Draft[K]) => setDraft(previous => ({ ...previous, [key]: value }))
+  const duplicatePort = forwards.some(forward => forward.id !== forwardId && forward.protocol === draft.protocol && forward.listen_port === draft.listen_port)
   const loading = snapshot.status === 'loading'
   const locked = saving || snapshot.status !== 'ready'
   const entryAddress = subnet.replace(/\.0\/24$/, '.1')
@@ -62,7 +64,8 @@ export default function ForwardDialog({ forwardId, groups, peers, forwards, subn
     event.preventDefault()
     if (savingRef.current || snapshot.status !== 'ready') return
     if (!draft.name.trim()) { setError('Enter a name.'); return }
-    if (duplicatePort) { setError(`${draft.protocol.toUpperCase()} port ${draft.target_port} is already in use.`); return }
+    if (duplicatePort) { setError(`${draft.protocol.toUpperCase()} port ${draft.listen_port} is already in use.`); return }
+    if (!Number.isInteger(draft.listen_port) || draft.listen_port < 1 || draft.listen_port > 65535) return
     if (!Number.isInteger(draft.target_port) || draft.target_port < 1 || draft.target_port > 65535 || !draft.target_peer_id) return
     if (editing && snapshot.revision === null) return
     savingRef.current = true; setSaving(true); setError('')
@@ -95,21 +98,24 @@ export default function ForwardDialog({ forwardId, groups, peers, forwards, subn
         <label className="form-label">Name
           <input value={draft.name} onChange={event => change('name', event.target.value)} placeholder="Internal docs" required maxLength={128} />
         </label>
-        <div className="forward-entry-preview"><span>Hub entry</span><b className="mono">{entryAddress}:{draft.target_port || 'port'}</b></div>
+        <div className="forward-entry-preview"><span>Hub entry</span><b className="mono">{entryAddress}:{draft.listen_port || 'port'}</b></div>
         <div className="form-row">
           <label className="form-label">Protocol
             <select aria-label="Protocol" value={draft.protocol} onChange={event => change('protocol', event.target.value)}><option value="tcp">TCP</option><option value="udp">UDP</option></select>
           </label>
-          <label className="form-label">Port
-            <input type="number" min="1" max="65535" step="1" value={draft.target_port || ''} onChange={event => change('target_port', Number(event.target.value))} placeholder="8080" required aria-invalid={duplicatePort} aria-describedby={duplicatePort ? 'forward-port-error' : undefined} />
+          <label className="form-label">Hub port
+            <input type="number" min="1" max="65535" step="1" value={draft.listen_port || ''} onChange={event => change('listen_port', Number(event.target.value))} placeholder="8080" required aria-invalid={duplicatePort} aria-describedby={duplicatePort ? 'forward-port-error' : undefined} />
           </label>
         </div>
-        {duplicatePort && <div className="field-warning" id="forward-port-error" role="alert">{draft.protocol.toUpperCase()} port {draft.target_port} is already in use.</div>}
+        {duplicatePort && <div className="field-warning" id="forward-port-error" role="alert">{draft.protocol.toUpperCase()} port {draft.listen_port} is already in use.</div>}
         <label className="form-label">Target peer
           <select aria-label="Target peer" value={draft.target_peer_id} onChange={event => change('target_peer_id', event.target.value)} required>
             <option value="" disabled>Select a peer</option>
             {peers.map(peer => <option value={peer.id} key={peer.id}>{peer.name} · {peer.ipv4}</option>)}
           </select>
+        </label>
+        <label className="form-label">Target port
+          <input type="number" min="1" max="65535" step="1" value={draft.target_port || ''} onChange={event => change('target_port', Number(event.target.value))} placeholder="8000" required />
         </label>
         <fieldset className="group-chooser"><legend>Allowed groups</legend>
           {groups.map(group => <label key={group.id} className="check-row">
@@ -117,7 +123,7 @@ export default function ForwardDialog({ forwardId, groups, peers, forwards, subn
             <span>{group.name}</span><small>{peers.filter(peer => peer.group_id === group.id).length} peers</small>
           </label>)}
         </fieldset>
-        <p className="field-note">Internal access only. Hub and target use the same port. Allowed groups can access this service without direct access to the target’s group.</p>
+        <p className="field-note">Internal access only. Allowed groups can access this service without direct access to the target’s group.</p>
         {!draft.allowed_group_ids.length && <p className="field-warning">No groups selected. This forward will block all access.</p>}
       </fieldset>
       {error && <div className="form-error" role="alert"><span>{error}</span>

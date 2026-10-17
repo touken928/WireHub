@@ -1,5 +1,9 @@
 use super::*;
 use rusqlite::Connection;
+fn legacy_forwards(db: &Connection) {
+    db.execute_batch("ALTER TABLE forwards RENAME TO forwards_new; CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,target_port INTEGER NOT NULL,allowed TEXT NOT NULL,UNIQUE(protocol,target_port)); INSERT INTO forwards(id,name,protocol,target_peer_id,target_port,allowed) SELECT id,name,protocol,target_peer_id,target_port,allowed FROM forwards_new; DROP TABLE forwards_new; ").unwrap();
+}
+
 fn group(id: &str) -> Group {
     Group {
         id: id.into(),
@@ -25,6 +29,7 @@ fn forward(id: &str) -> Forward {
         name: id.into(),
         protocol: "tcp".into(),
         target_peer_id: "peer".into(),
+        listen_port: 9000,
         target_port: 9000,
         allowed_group_ids: vec!["group".into()],
     }
@@ -173,7 +178,7 @@ fn fresh_database_initializes_current_schema() {
     }
 }
 #[test]
-fn forward_uniqueness_is_protocol_and_target_port_and_has_no_pool_limit() {
+fn forward_uniqueness_is_protocol_and_listen_port_and_has_no_pool_limit() {
     let s = store();
     s.add_group(&group("group")).unwrap();
     for id in ["peer", "peer2"] {
@@ -182,12 +187,14 @@ fn forward_uniqueness_is_protocol_and_target_port_and_has_no_pool_limit() {
     }
     let mut tcp = forward("one");
     tcp.target_peer_id = "peer".into();
+    tcp.listen_port = 8443;
     tcp.target_port = 443;
     s.create_forward(&mut tcp).unwrap();
     let mut udp = Forward {
         protocol: "udp".into(),
         ..forward("udp")
     };
+    udp.listen_port = 8443;
     udp.target_port = 443;
     s.create_forward(&mut udp).unwrap();
     let mut dup = Forward {
@@ -195,7 +202,8 @@ fn forward_uniqueness_is_protocol_and_target_port_and_has_no_pool_limit() {
         target_peer_id: "peer2".into(),
         ..forward("dup")
     };
-    dup.target_port = 443;
+    dup.listen_port = 8443;
+    dup.target_port = 444;
     let error = s.create_forward(&mut dup).unwrap_err();
     assert!(
         matches!(error,rusqlite::Error::SqliteFailure(ref e,_) if e.code==rusqlite::ErrorCode::ConstraintViolation)
@@ -205,7 +213,8 @@ fn forward_uniqueness_is_protocol_and_target_port_and_has_no_pool_limit() {
             id: format!("f{port}"),
             protocol: "tcp".into(),
             target_peer_id: "peer".into(),
-            target_port: 1000 + port,
+            listen_port: 1000 + port,
+            target_port: 443,
             ..forward("many")
         };
         s.create_forward(&mut f).unwrap();
@@ -340,17 +349,17 @@ fn rejects_nocase_name_index_unchanged() {
 }
 #[test]
 fn rejects_partial_forward_unique_index_unchanged() {
-    let (_d,p)=current_db_with_index("DROP TABLE forwards; CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,target_port INTEGER NOT NULL,allowed TEXT NOT NULL); CREATE UNIQUE INDEX forwards_partial_unique ON forwards(protocol,target_port) WHERE target_port > 0");
+    let (_d,p)=current_db_with_index("DROP TABLE forwards; CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,listen_port INTEGER NOT NULL,target_port INTEGER NOT NULL,allowed TEXT NOT NULL); CREATE UNIQUE INDEX forwards_partial_unique ON forwards(protocol,listen_port) WHERE listen_port > 0");
     assert_current_rejected_unchanged(&p);
 }
 #[test]
 fn rejects_adversarial_forward_column_shape_unchanged() {
-    let (_d,p)=current_db_with_index("DROP TABLE forwards; CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,target_port INTEGER NOT NULL,allowed TEXT NOT NULL,extra TEXT); CREATE UNIQUE INDEX forwards_unique ON forwards(protocol,target_port)");
+    let (_d,p)=current_db_with_index("DROP TABLE forwards; CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,listen_port INTEGER NOT NULL,target_port INTEGER NOT NULL,allowed TEXT NOT NULL,extra TEXT); CREATE UNIQUE INDEX forwards_unique ON forwards(protocol,listen_port)");
     assert_current_rejected_unchanged(&p);
 }
 #[test]
 fn rejects_non_binary_forward_unique_index_unchanged() {
-    let (_d,p)=current_db_with_index("DROP TABLE forwards; CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,target_port INTEGER NOT NULL,allowed TEXT NOT NULL); CREATE UNIQUE INDEX forwards_unique ON forwards(protocol COLLATE NOCASE,target_port)");
+    let (_d,p)=current_db_with_index("DROP TABLE forwards; CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,listen_port INTEGER NOT NULL,target_port INTEGER NOT NULL,allowed TEXT NOT NULL); CREATE UNIQUE INDEX forwards_unique ON forwards(protocol COLLATE NOCASE,listen_port)");
     assert_current_rejected_unchanged(&p);
 }
 #[test]
@@ -358,7 +367,7 @@ fn rejects_expression_key_indexes_unchanged_and_raw_database_allows_duplicate_na
     for change in [
         "DROP INDEX groups_name_unique; CREATE UNIQUE INDEX groups_name_unique ON groups(name,length(id))",
         "DROP INDEX peers_name_unique; CREATE UNIQUE INDEX peers_name_unique ON peers(name,length(id))",
-        "DROP TABLE forwards; CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,target_port INTEGER NOT NULL,allowed TEXT NOT NULL); CREATE UNIQUE INDEX forwards_expected_unique ON forwards(protocol,target_port,length(id))",
+        "DROP TABLE forwards; CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,listen_port INTEGER NOT NULL,target_port INTEGER NOT NULL,allowed TEXT NOT NULL); CREATE UNIQUE INDEX forwards_expected_unique ON forwards(protocol,listen_port,length(id))",
     ] { let (_d,p)=current_db_with_index(change); assert_current_rejected_unchanged(&p); }
 
     let (_d,p)=current_db_with_index("DROP INDEX groups_name_unique; CREATE UNIQUE INDEX groups_name_unique ON groups(name,length(id)); DROP INDEX peers_name_unique; CREATE UNIQUE INDEX peers_name_unique ON peers(name,length(id))");
@@ -461,6 +470,7 @@ fn malformed_identity_rows_reject_open_even_when_checks_are_ignored() {
     db.execute_batch(TABLES).unwrap();
     db.pragma_update(None, "ignore_check_constraints", true)
         .unwrap();
+    legacy_forwards(&db);
     db.execute_batch(
         "INSERT INTO hub_identity(id,public_key) VALUES(1,'wrong-type'); DROP TABLE config_state; DROP TABLE pending_provisions; PRAGMA user_version=3;",
     )
@@ -531,7 +541,7 @@ fn group_cleanup_rolls_back_on_malformed_forward_json_and_missing_group_is_noop(
     s.set_acl("other", &["group".into()]).unwrap();
     let mut p = peer("peer");
     s.create_peer_allocated(&mut p).unwrap();
-    s.db.lock().unwrap().execute("INSERT INTO forwards(id,name,protocol,target_peer_id,target_port,allowed) VALUES('broken','broken','tcp','peer',9000,'not-json')",[]).unwrap();
+    s.db.lock().unwrap().execute("INSERT INTO forwards(id,name,protocol,target_peer_id,listen_port,target_port,allowed) VALUES('broken','broken','tcp','peer',9000,9000,'not-json')",[]).unwrap();
     assert!(s.remove_group("group").is_err());
     assert!(s.group("group").unwrap().is_some());
     assert_eq!(
@@ -678,6 +688,7 @@ fn references_serialize_with_group_delete_for_all_operations_and_orders() {
                     name: "forward".into(),
                     protocol: "tcp".into(),
                     target_peer_id: "peer".into(),
+                    listen_port: 8100,
                     target_port: 8100,
                     allowed_group_ids: vec!["victim".into(), "survivor".into()],
                 };
@@ -712,6 +723,7 @@ fn references_serialize_with_group_delete_for_all_operations_and_orders() {
                         name: "loser".into(),
                         protocol: "udp".into(),
                         target_peer_id: "peer".into(),
+                        listen_port: 8101,
                         target_port: 8101,
                         allowed_group_ids: vec!["victim".into()],
                     };
@@ -838,6 +850,7 @@ fn canonical_v3_migrates_without_changing_existing_configuration_or_identity() {
     let identity = s.hub_identity().unwrap();
     drop(s);
     let db = Connection::open(&path).unwrap();
+    legacy_forwards(&db);
     db.execute_batch(
         "DROP TABLE config_state; DROP TABLE pending_provisions; PRAGMA user_version=3;",
     )
@@ -867,6 +880,7 @@ fn drifted_v3_is_rejected_without_migration() {
     let path = dir.path().join("drift.db");
     drop(Store::open(path.to_str().unwrap()).unwrap());
     let db = Connection::open(&path).unwrap();
+    legacy_forwards(&db);
     db.execute_batch("DROP TABLE config_state; DROP TABLE pending_provisions; CREATE INDEX drift ON peers(group_id); PRAGMA user_version=3;").unwrap();
     drop(db);
     assert!(Store::open(path.to_str().unwrap()).is_err());
@@ -989,6 +1003,7 @@ fn service_lock_is_acquired_before_v3_migration() {
     let seed = Store::open(path.to_str().unwrap()).unwrap();
     drop(seed);
     let db = Connection::open(&path).unwrap();
+    legacy_forwards(&db);
     db.execute_batch(
         "DROP TABLE config_state; DROP TABLE pending_provisions; PRAGMA user_version=3;",
     )
@@ -1435,6 +1450,7 @@ fn canonical_v4_migrates_without_identity_or_inventory_loss() {
     let identity = s.hub_identity().unwrap();
     drop(s);
     let db = Connection::open(&path).unwrap();
+    legacy_forwards(&db);
     db.execute_batch("DROP TABLE config_state; PRAGMA user_version=4;")
         .unwrap();
     drop(db);
@@ -1457,6 +1473,7 @@ fn drifted_v4_and_missing_revision_are_rejected_unchanged() {
     let path = dir.path().join("bad-v4.db");
     drop(Store::open(path.to_str().unwrap()).unwrap());
     let db = Connection::open(&path).unwrap();
+    legacy_forwards(&db);
     db.execute_batch(
         "DROP TABLE config_state; CREATE INDEX drift ON groups(name); PRAGMA user_version=4;",
     )
@@ -1485,17 +1502,20 @@ fn forward_update_is_atomic_versioned_and_preserves_identity() {
     let mut f = forward("editable");
     s.create_forward(&mut f).unwrap();
     let mut other = forward("other");
-    other.target_port = 8000;
+    other.listen_port = 8000;
+    other.target_port = 9000;
     s.create_forward(&mut other).unwrap();
     let revision = s.revision().unwrap();
     f.name = "  Updated web  ".into();
     f.allowed_group_ids.clear();
     f.target_peer_id = "peer2".into();
+    f.listen_port = 18080;
     f.target_port = 8080;
     f.protocol = "udp".into();
     assert_eq!(s.update_forward(&mut f, revision).unwrap(), revision + 1);
     assert_eq!(f.name, "Updated web");
     assert!(s.forwards().unwrap().iter().any(|stored| stored.id == f.id
+        && stored.listen_port == 18080
         && stored.target_port == 8080
         && stored.allowed_group_ids.is_empty()));
     assert!(matches!(
@@ -1511,7 +1531,7 @@ fn forward_update_is_atomic_versioned_and_preserves_identity() {
     ] {
         f.protocol = "tcp".into();
         f.target_peer_id = target.into();
-        f.target_port = port;
+        f.listen_port = port;
         f.allowed_group_ids = allowed;
         assert!(s.update_forward(&mut f, revision).is_err());
         assert_eq!(s.revision().unwrap(), revision);
@@ -1525,4 +1545,73 @@ fn forward_update_is_atomic_versioned_and_preserves_identity() {
         s.update_forward(&mut f, revision),
         Err(PolicyError::MissingForward)
     ));
+}
+
+#[test]
+fn canonical_v5_backfills_listen_ports_and_preserves_revision_and_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = Store::open(path.to_str().unwrap()).unwrap();
+    store.bind_test_identity();
+    store
+        .setup("10.77.0.0/24", "hub.example:51820", 25)
+        .unwrap();
+    store.add_group(&group("group")).unwrap();
+    store.create_peer_allocated(&mut peer("peer")).unwrap();
+    for protocol in ["tcp", "udp"] {
+        let mut f = forward(protocol);
+        f.protocol = protocol.into();
+        store.create_forward(&mut f).unwrap();
+    }
+    let revision = store.revision().unwrap();
+    let identity = store.hub_identity().unwrap();
+    let forwards = serde_json::to_value(store.forwards().unwrap()).unwrap();
+    drop(store);
+    let db = Connection::open(&path).unwrap();
+    legacy_forwards(&db);
+    db.pragma_update(None, "user_version", 5).unwrap();
+    drop(db);
+    let store = Store::open(path.to_str().unwrap()).unwrap();
+    assert_eq!(store.revision().unwrap(), revision);
+    assert_eq!(store.hub_identity().unwrap(), identity);
+    assert_eq!(
+        serde_json::to_value(store.forwards().unwrap()).unwrap(),
+        forwards
+    );
+    drop(store);
+    assert!(
+        Store::open(path.to_str().unwrap()).is_ok(),
+        "Migrated schema must match a fresh canonical schema"
+    );
+}
+
+#[test]
+fn invalid_listen_ports_and_drifted_v5_are_rejected_without_mutation() {
+    for port in ["0", "65536", "-1", "'not-a-port'", "80.5"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let s = Store::open(path.to_str().unwrap()).unwrap();
+        s.bind_test_identity();
+        s.setup("10.77.0.0/24", "hub.example:51820", 25).unwrap();
+        s.add_group(&group("group")).unwrap();
+        s.create_peer_allocated(&mut peer("peer")).unwrap();
+        s.create_forward(&mut forward("f")).unwrap();
+        s.db.lock()
+            .unwrap()
+            .execute_batch(&format!("UPDATE forwards SET listen_port={port}"))
+            .unwrap();
+        drop(s);
+        assert_current_rejected_unchanged(&path);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("drifted-v5");
+    drop(Store::open(path.to_str().unwrap()).unwrap());
+    let db = Connection::open(&path).unwrap();
+    legacy_forwards(&db);
+    db.execute_batch("CREATE INDEX drift ON forwards(name); PRAGMA user_version=5;")
+        .unwrap();
+    drop(db);
+    let before = std::fs::read(&path).unwrap();
+    assert!(Store::open(path.to_str().unwrap()).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }

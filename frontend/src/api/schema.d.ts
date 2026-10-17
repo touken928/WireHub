@@ -265,6 +265,11 @@ export interface components {
         Forward: {
             allowed_group_ids: string[];
             id: string;
+            /**
+             * Format: int32
+             * @description Hub tunnel entry port. Unique within each transport protocol.
+             */
+            listen_port: number;
             name: string;
             protocol: string;
             target_peer_id: string;
@@ -287,6 +292,11 @@ export interface components {
         };
         NewForward: {
             allowed_group_ids: string[];
+            /**
+             * Format: int32
+             * @description Hub tunnel entry port. Defaults to target_port when omitted by legacy clients.
+             */
+            listen_port?: number | null;
             name: string;
             protocol: string;
             target_peer_id: string;

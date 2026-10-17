@@ -83,6 +83,7 @@ pub(crate) struct ForwardConfig {
     pub(crate) id: String,
     pub(crate) protocol: TransportProtocol,
     pub(crate) target_peer_id: String,
+    pub(crate) listen_port: u16,
     pub(crate) target_port: u16,
     pub(crate) allowed_group_ids: Vec<String>,
 }
@@ -94,6 +95,7 @@ impl From<crate::model::Forward> for ForwardConfig {
             protocol: TransportProtocol::parse(&value.protocol)
                 .expect("valid test fixture protocol"),
             target_peer_id: value.target_peer_id,
+            listen_port: value.listen_port,
             target_port: value.target_port,
             allowed_group_ids: value.allowed_group_ids,
         }
@@ -106,6 +108,7 @@ impl From<&crate::model::Forward> for ForwardConfig {
             protocol: TransportProtocol::parse(&value.protocol)
                 .expect("validated forward protocol"),
             target_peer_id: value.target_peer_id.clone(),
+            listen_port: value.listen_port,
             target_port: value.target_port,
             allowed_group_ids: value.allowed_group_ids.clone(),
         }
@@ -122,7 +125,7 @@ impl ForwardIndex {
         for (position, forward) in forwards.iter().enumerate() {
             index
                 .by_service
-                .entry((forward.protocol.number(), forward.target_port))
+                .entry((forward.protocol.number(), forward.listen_port))
                 .or_default()
                 .push(position);
             index.by_id.insert(forward.id.clone(), position);
@@ -187,13 +190,14 @@ impl TryFrom<NetworkSnapshot> for CompiledSnapshot {
             .iter()
             .map(|forward| {
                 let protocol = TransportProtocol::parse(&forward.protocol).ok_or(())?;
-                if forward.target_port == 0 {
+                if forward.listen_port == 0 || forward.target_port == 0 {
                     return Err(());
                 }
                 Ok(ForwardConfig {
                     id: forward.id.clone(),
                     protocol,
                     target_peer_id: forward.target_peer_id.clone(),
+                    listen_port: forward.listen_port,
                     target_port: forward.target_port,
                     allowed_group_ids: forward.allowed_group_ids.clone(),
                 })
@@ -271,6 +275,7 @@ mod tests {
                 name: "f".into(),
                 protocol: "udp".into(),
                 target_peer_id: "p".into(),
+                listen_port: 53,
                 target_port: 53,
                 allowed_group_ids: vec![],
             }],

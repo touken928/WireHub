@@ -465,7 +465,31 @@ function PeersPage({ peers, allCount, groups, query, setQuery, onCreate, onMove,
 }
 function ForwardsPage({ forwards, subnet, peers, groups, onCreate, onEdit, onDelete, loadError, onRetry }: { forwards: Forward[]; subnet: string; peers: Peer[]; groups: Group[]; onCreate: () => void; onEdit: (f: Forward) => void; onDelete: (f: Forward) => void; loadError: string; onRetry: () => void }) {
   const hubAddress = subnet.replace(/\.0\/24$/, '.1')
-  return <div className="page-enter"><PageHeading title="Forwards" count={`${forwards.length} forwards`} action={<button className="button button-primary" onClick={onCreate}><Plus size={16} />New forward</button>} /><div className="inline-banner"><Shield size={15} /><span>Internal only</span><code>{hubAddress}</code></div>{loadError ? <div className="error-banner" role="alert"><span>{loadError}</span><button onClick={onRetry}>Retry</button></div> : forwards.length ? <div className="forward-list">{forwards.map(f => { const target = peers.find(p => p.id === f.target_peer_id); return <article className="forward-card" key={f.id}><div className="forward-card-head"><span className="badge mono">{f.protocol.toUpperCase()}</span><span className="forward-active">{f.allowed_group_ids.length ? 'Configured' : 'Access disabled'}</span><div className="forward-card-actions"><button className="icon-button" aria-label={`Edit forward ${f.name}`} onClick={() => onEdit(f)}><Pencil size={15} /></button><button className="icon-button danger-on-hover" aria-label={`Delete forward ${f.name}`} onClick={() => onDelete(f)}><Trash2 size={15} /></button></div></div><h3>{f.name}</h3><div className="route-visual"><div><small>Hub</small><b className="mono">{hubAddress}:{f.target_port}</b></div><ArrowRightIcon /><div><small>{target?.name ?? 'Peer removed'}</small><b className="mono">{target?.ipv4 ?? '—'}:{f.target_port}</b></div></div><div className="forward-access"><Shield size={14} /><div className="allow-chips">{f.allowed_group_ids.length ? f.allowed_group_ids.map(id => <span key={id}>{groupName(groups, id)}</span>) : <span className="denied-label">No access</span>}</div></div></article> })}</div> : <div className="panel empty-panel"><Empty title="No forwards yet" action={<button className="button button-primary" onClick={onCreate}><Plus size={15} />New forward</button>} /></div>}</div>
+  return <div className="page-enter">
+    <PageHeading title="Forwards" count={`${forwards.length} forwards`} action={<button className="button button-primary" onClick={onCreate}><Plus size={16} />New forward</button>} />
+    <div className="inline-banner"><Shield size={15} /><span>Internal only</span><code>{hubAddress}</code></div>
+    {loadError ? <div className="error-banner" role="alert"><span>{loadError}</span><button onClick={onRetry}>Retry</button></div> : forwards.length ? <div className="forward-list">
+      {forwards.map(forward => {
+        const target = peers.find(peer => peer.id === forward.target_peer_id)
+        return <article className="forward-card" key={forward.id}>
+          <div className="forward-identity">
+            <h3 title={forward.name}>{forward.name}</h3>
+            <div className="forward-card-head"><span className="badge mono">{forward.protocol.toUpperCase()}</span><span className="forward-active">{forward.allowed_group_ids.length ? 'Configured' : 'Access disabled'}</span></div>
+          </div>
+          <div className="route-visual">
+            <div><small>Hub entry</small><b className="mono">{hubAddress}:{forward.listen_port}</b></div>
+            <ArrowRightIcon />
+            <div><small title={target?.name}>{target?.name ?? 'Peer removed'}</small><b className="mono">{target?.ipv4 ?? '—'}:{forward.target_port}</b></div>
+          </div>
+          <div className="forward-access"><Shield size={14} /><div className="allow-chips">{forward.allowed_group_ids.length ? forward.allowed_group_ids.map(id => <span key={id}>{groupName(groups, id)}</span>) : <span className="denied-label">No access</span>}</div></div>
+          <div className="forward-card-actions">
+            <button className="icon-button" aria-label={`Edit forward ${forward.name}`} onClick={() => onEdit(forward)}><Pencil size={15} /></button>
+            <button className="icon-button danger-on-hover" aria-label={`Delete forward ${forward.name}`} onClick={() => onDelete(forward)}><Trash2 size={15} /></button>
+          </div>
+        </article>
+      })}
+    </div> : <div className="panel empty-panel"><Empty title="No forwards yet" action={<button className="button button-primary" onClick={onCreate}><Plus size={15} />New forward</button>} /></div>}
+  </div>
 }
 function ArrowRightIcon() { return <ArrowUpRight className="route-arrow" size={18} /> }
 function CreateDialog({ kind, groups, session, isSessionCurrent, onClose, onCreated }: {

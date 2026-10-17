@@ -141,6 +141,7 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
                     "name": f"integration-{proto}",
                     "protocol": proto,
                     "target_peer_id": peer_b["id"],
+                    "listen_port": 28080,
                     "target_port": 18080,
                     "allowed_group_ids": [ga],
                 },
@@ -148,13 +149,14 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
             )
         )
         check(
-            not ({"virtual_ip", "listen_port"} & forwards[-1].keys()),
-            "forward has removed response fields",
+            "virtual_ip" not in forwards[-1] and forwards[-1]["listen_port"] == 28080,
+            "forward response must expose the Hub port and omit the removed virtual IP",
         )
     duplicate = {
         "name": "duplicate",
         "protocol": "tcp",
         "target_peer_id": peer_b["id"],
+        "listen_port": 28080,
         "target_port": 18080,
         "allowed_group_ids": [ga],
     }
@@ -264,17 +266,52 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
 
     nonce_tcp, nonce_udp = secrets.token_hex(12), secrets.token_hex(12)
     for proto, nonce in (("tcp", nonce_tcp), ("udp", nonce_udp)):
-        result = probe(0, proto, "172.23.45.1:18080", nonce)
+        result = probe(0, proto, "172.23.45.1:28080", nonce)
         check(
             result.get("ok") and result.get("payload", nonce) == nonce,
             f"authorized A {proto.upper()} forward did not echo",
         )
 
+    # Two entries may share a backend without mixing their reverse NAT tuples.
+    alternate = []
+    try:
+        for protocol in ("tcp", "udp"):
+            alternate.append(
+                request(
+                    hub_url + "/api/forwards",
+                    hub_token,
+                    "POST",
+                    {
+                        "name": "alternate-" + protocol,
+                        "protocol": protocol,
+                        "listen_port": 28083,
+                        "target_peer_id": peer_b["id"],
+                        "target_port": 18080,
+                        "allowed_group_ids": [ga],
+                    },
+                    expected=201,
+                )
+            )
+            for port in (28080, 28083):
+                check(
+                    probe(0, protocol, f"172.23.45.1:{port}", f"entry-{port}")["ok"],
+                    "Multiple entries to one backend mixed reverse mappings",
+                )
+    finally:
+        for forward in alternate:
+            request(
+                hub_url + "/api/forwards/" + forward["id"],
+                hub_token,
+                "DELETE",
+                expected=204,
+            )
+    print("PASS: independent TCP/UDP entries can share one target service")
+
     # Edit the existing rule rather than deleting/recreating it. Revocation must
     # tear down an established NAT mapping and regrant must work on a fresh flow.
     editable = forwards[0]
 
-    def edit_forward(allowed, name, forward=None):
+    def edit_forward(allowed, name, forward=None, listen_port=None):
         forward = forward or editable
         revision = request(hub_url + "/api/config", hub_token)["revision"]
         return request(
@@ -285,13 +322,16 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
                 "name": name,
                 "protocol": forward["protocol"],
                 "target_peer_id": forward["target_peer_id"],
+                "listen_port": listen_port
+                if listen_port is not None
+                else forward["listen_port"],
                 "target_port": forward["target_port"],
                 "allowed_group_ids": allowed,
             },
             headers={"If-Match": f'"{revision}"'},
         )
 
-    edited_connection = persistent_open(0, "172.23.45.1:18080")["id"]
+    edited_connection = persistent_open(0, "172.23.45.1:28080")["id"]
     try:
         edit_forward([ga], "renamed TCP service")
         check(
@@ -304,24 +344,47 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
             "Editing allowed groups did not revoke the established TCP mapping",
         )
         check(
-            not probe(0, "tcp", "172.23.45.1:18080", "new-denied")["ok"],
+            not probe(0, "tcp", "172.23.45.1:28080", "new-denied")["ok"],
             "An empty forward allowlist admitted a new TCP flow",
         )
         updated = edit_forward([ga], "restored TCP service")
         check(updated["id"] == editable["id"], "Editing changed the forward identity")
         check(
-            probe(0, "tcp", "172.23.45.1:18080", "after-forward-regrant")["ok"],
+            probe(0, "tcp", "172.23.45.1:28080", "after-forward-regrant")["ok"],
             "Forward access did not recover after editing allowed groups",
         )
     finally:
         control_post(a_url, tokens[0], "/tcp/close", {"id": edited_connection})
     print("PASS: forward rename continuity and live allowlist revoke/regrant via PUT")
 
+    connection = persistent_open(0, "172.23.45.1:28080")["id"]
+    try:
+        for forward in forwards:
+            protocol = forward["protocol"]
+            edit_forward([ga], "moved entry", forward=forward, listen_port=28082)
+            check(
+                not probe(0, protocol, "172.23.45.1:28080", "old-entry")["ok"],
+                "Old entry survived port edit",
+            )
+            check(
+                probe(0, protocol, "172.23.45.1:28082", "new-entry")["ok"],
+                "New entry failed after port edit",
+            )
+            if protocol == "tcp":
+                check(
+                    not persistent_exchange(0, connection, "old-socket")["ok"],
+                    "Port edit retained old TCP mapping",
+                )
+            edit_forward([ga], "restored entry", forward=forward)
+    finally:
+        control_post(a_url, tokens[0], "/tcp/close", {"id": connection})
+    print("PASS: TCP/UDP entry-port edits revoke old entry and established TCP mapping")
+
     # Keep one real forwarded TCP socket alive across an unrelated policy
     # mutation; the exchanges must use the same client-side net.Conn.
     persistent_id = None
     try:
-        opened = persistent_open(0, "172.23.45.1:18080")
+        opened = persistent_open(0, "172.23.45.1:28080")
         check(opened.get("id"), "could not open persistent forwarded TCP connection")
         persistent_id = opened["id"]
         initial_arrivals = json.dumps(
@@ -345,7 +408,7 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
         for protocol in ("tcp", "udp"):
             mtu_payload = "mtu-safe-" + "x" * 1200
             check(
-                probe(0, protocol, "172.23.45.1:18080", mtu_payload, 5000).get("ok"),
+                probe(0, protocol, "172.23.45.1:28080", mtu_payload, 5000).get("ok"),
                 f"MTU-safe {protocol} payload failed",
             )
         print(
@@ -387,18 +450,18 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
             resumed.get("ok"),
             "Same established TCP socket did not resume after idle",
         )
-        recovered_udp = probe(0, "udp", "172.23.45.1:18080", "idle-udp-recovered", 5000)
+        recovered_udp = probe(0, "udp", "172.23.45.1:28080", "idle-udp-recovered", 5000)
         check(recovered_udp.get("ok"), "Fresh UDP flow did not recover after idle")
         print(
             f"PASS: deterministic 5% encrypted data loss, 12 ms delay and 30 ms reordering (drops={relay.dropped}, reordered={relay.reordered}), 1 MiB integrity, NAT migration, idle same-socket TCP and fresh UDP recovery"
         )
         # Re-establish event evidence after the long transfer evicted old records.
         check(
-            probe(0, "tcp", "172.23.45.1:18080", nonce_tcp, 5000).get("ok"),
+            probe(0, "tcp", "172.23.45.1:28080", nonce_tcp, 5000).get("ok"),
             "TCP warm recovery failed",
         )
         check(
-            probe(0, "udp", "172.23.45.1:18080", nonce_udp, 5000).get("ok"),
+            probe(0, "udp", "172.23.45.1:28080", nonce_udp, 5000).get("ok"),
             "UDP warm recovery failed",
         )
         persistent_before = "persistent-before-" + secrets.token_hex(8)
@@ -437,7 +500,7 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
         for proto in ("tcp", "udp"):
             nonce = f"deny-C-{proto}-{secrets.token_hex(8)}"
             denied[("C", proto)] = nonce
-            result = probe(2, proto, "172.23.45.1:18080", nonce, 1000)
+            result = probe(2, proto, "172.23.45.1:28080", nonce, 1000)
             check(
                 not result.get("ok"),
                 f"C {proto.upper()} forward unexpectedly succeeded",
@@ -568,7 +631,7 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
                 "Direct traffic survived direct ACL revocation",
             )
             check(
-                probe(0, proto, "172.23.45.1:18080", "forward-without-direct").get(
+                probe(0, proto, "172.23.45.1:28080", "forward-without-direct").get(
                     "ok"
                 ),
                 "Forward traffic incorrectly requires direct group access",
@@ -587,7 +650,7 @@ def scenario(hub_url, clients, hub_token, tokens, endpoint, relays):
         for proto in ("tcp", "udp"):
             nonce = f"revoked-{proto}-{secrets.token_hex(8)}"
             revoked_forward[proto] = nonce
-            result = probe(0, proto, "172.23.45.1:18080", nonce, 1000)
+            result = probe(0, proto, "172.23.45.1:28080", nonce, 1000)
             check(
                 not result.get("ok"),
                 f"A {proto.upper()} forward succeeded after allowlist revocation",

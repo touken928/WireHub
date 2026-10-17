@@ -1,6 +1,6 @@
 # Operations
 
-The release target is **1.1.0**, with schema 5 (unchanged from 1.0.x).
+The release target is **1.2.0**, with schema 6.
 HTTP bind addresses no longer require an additional proxy-mode opt-in;
 management API bearer authentication remains required.
 See [release verification](release.md) and [performance measurements](performance.md).
@@ -49,7 +49,12 @@ Forward rules independently authorize the source peer's group through their
 covers only the configured Hub protocol/port and target peer; direct peer access
 still requires a Groups ACL. Empty forward allowlists deny all access.
 
-Removing a group from a forward, deleting the rule or deleting its target removes
+Each rule maps the Hub tunnel address and `listen_port` to the target peer and
+`target_port`. Entry ports are unique per protocol. An omitted API `listen_port`
+defaults to `target_port` for legacy clients; the UI always sends both ports.
+These tunnel ports do not require publishing extra host/container ports.
+
+Removing a group from a forward, changing either port, deleting the rule or deleting its target removes
 affected active and queued mappings when the runtime acknowledges the change.
 Changing direct group ACLs does not revoke independently authorized forwards.
 After upgrading from a release that required both permissions, review existing
@@ -154,8 +159,10 @@ durable manifest with checksums, schema version and revision. Protect the archiv
 as a private key; it is not encrypted by this utility. Preserve an immutable
 pre-upgrade archive plus the exact old binary/image version and build ID.
 
-Schema 5 adds the monotonic configuration revision. Canonical schemas **3 and 4**
-are validated and migrated atomically to 5 on startup. Drifted or unsupported
+Schema 6 separates Forward entry and target ports, preserving old entries by
+backfilling `listen_port = target_port`. Canonical schemas **3, 4 and 5**
+are validated and migrated atomically to 6 on startup, preserving the monotonic
+configuration revision and Hub identity. Drifted or unsupported
 schemas are rejected. For an upgrade, verify the new binary version and the
 pre-upgrade pair, install the binary, start once and check `/api/ready` plus
 authenticated `/api/status`, then check saved inventory and traffic. Preserve
@@ -171,8 +178,8 @@ python3 scripts/state-backup.py restore \
 ```
 
 Set both state paths to that directory, preserve service-account ownership and
-key mode 0600, then start the recorded old binary. An old schema-4 binary cannot
-open schema 5; replacing only the executable is insufficient. Rollback discards
+key mode 0600, then start the recorded old binary. A v1.1.0 or earlier binary cannot
+open schema 6; replacing only the executable is insufficient. Rollback discards
 configuration changes made since the archive, so preserve the stopped upgraded
 pair separately if those changes need review. Do not edit schema numbers to
 force compatibility. Do not replace live files or overwrite existing archives.

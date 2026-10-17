@@ -26,10 +26,14 @@ spec.loader.exec_module(backup)
 
 
 def snapshot(url, token):
-    return {
+    state = {
         path: request(url + "/api/" + path, token)
         for path in ("setup", "groups", "peers", "forwards")
     }
+    # Legacy releases express both entry and target with target_port.
+    for forward in state["forwards"]:
+        forward.setdefault("listen_port", forward["target_port"])
+    return state
 
 
 def expect_failure(operation, message):
@@ -188,10 +192,32 @@ def run(binary, rollback_binary, output):
         checks.append(
             "restart preserves identity with residual key publication hard link"
         )
-        # Canonical schema 4 pre-upgrade fixture, using only the temporary pair.
+        current_archive = directory / "schema-6-backup"
+        backup.backup(hub.directory / "wirehub.sqlite3", key, current_archive)
+        current_metadata = backup.verify(current_archive)
+        check(
+            current_metadata["schema_version"] == 6,
+            "Current backup lost schema version",
+        )
+        current_restored = directory / "schema-6-restored"
+        backup.restore(current_archive, current_restored)
+        current_hub = Hub(binary, current_restored)
+        try:
+            check(
+                snapshot(current_hub.url, current_hub.token) == before,
+                "Schema 6 backup restore changed inventory",
+            )
+        finally:
+            current_hub.stop()
+        checks.append(
+            "schema 6 paired backup verifies and restores complete service state"
+        )
+        # Canonical schema 5 pre-upgrade fixture, using only the temporary pair.
         with sqlite3.connect(hub.directory / "wirehub.sqlite3") as connection:
-            connection.execute("DROP TABLE config_state")
-            connection.execute("PRAGMA user_version=4")
+            connection.executescript(
+                "ALTER TABLE forwards RENAME TO forwards_new; CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,target_port INTEGER NOT NULL,allowed TEXT NOT NULL,UNIQUE(protocol,target_port)); INSERT INTO forwards(id,name,protocol,target_peer_id,target_port,allowed) SELECT id,name,protocol,target_peer_id,target_port,allowed FROM forwards_new; DROP TABLE forwards_new; "
+            )
+            connection.execute("PRAGMA user_version=5")
             connection.commit()
         archive = directory / "before-upgrade"
         backup.backup(
@@ -203,7 +229,7 @@ def run(binary, rollback_binary, output):
             for name in ("wirehub.sqlite3", "wirehub.key", "manifest.json")
         }
         checks.append(
-            "canonical schema 4 paired backup with integrity/identity validation despite key hard link"
+            "canonical schema 5 paired backup with integrity/identity validation despite key hard link"
         )
         # The key exception is intentionally narrow: database hard links,
         # key symlinks, and keys with unsafe permissions/size remain rejected.
@@ -245,8 +271,8 @@ def run(binary, rollback_binary, output):
             )
             with sqlite3.connect(upgraded / "wirehub.sqlite3") as connection:
                 check(
-                    connection.execute("PRAGMA user_version").fetchone()[0] == 5,
-                    "Upgrade did not install schema 5",
+                    connection.execute("PRAGMA user_version").fetchone()[0] == 6,
+                    "Upgrade did not install schema 6",
                 )
             request(
                 migrated.url + "/api/settings",
@@ -256,13 +282,13 @@ def run(binary, rollback_binary, output):
             )
         finally:
             migrated.stop()
-        checks.append("schema 4→5 migration preserves complete inventory and identity")
+        checks.append("schema 5→6 migration preserves complete inventory and identity")
         restored = directory / "restored"
         backup.restore(archive, restored)
         rolled_back = False
         if rollback_binary:
             rollback_binary = rollback_binary.resolve()
-            # Older schema 4 binary must reject schema 5 without mutating it.
+            # Older schema 5 binary must reject schema 6 without mutating it.
             digest = hashlib.sha256(
                 (upgraded / "wirehub.sqlite3").read_bytes()
             ).digest()
@@ -295,16 +321,16 @@ def run(binary, rollback_binary, output):
                 old.stop(False)
             rolled_back = True
             checks.append(
-                "real pre-upgrade binary rejects schema 5 and runs restored schema 4 pair"
+                "real pre-upgrade binary rejects schema 6 and runs restored schema 5 pair"
             )
         else:
             with sqlite3.connect(restored / "wirehub.sqlite3") as connection:
                 check(
-                    connection.execute("PRAGMA user_version").fetchone()[0] == 4,
+                    connection.execute("PRAGMA user_version").fetchone()[0] == 5,
                     "Rollback restore changed the original schema",
                 )
             checks.append(
-                "rollback pair restores original schema 4; old binary execution not requested"
+                "rollback pair restores original schema 5; old binary execution not requested"
             )
         check(
             archive_hash

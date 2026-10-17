@@ -84,9 +84,9 @@ def inspect(database, private):
         if connection.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
             raise ValueError("SQLite integrity check failed")
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (3, 4, 5):
+        if version not in (3, 4, 5, 6):
             raise ValueError(
-                "Backup supports canonical schema 3, 4 or 5 identity pairs"
+                "Backup supports canonical schema 3, 4, 5 or 6 identity pairs"
             )
         identities = connection.execute(
             "SELECT public_key FROM hub_identity WHERE id=1"
@@ -97,7 +97,7 @@ def inspect(database, private):
             connection.execute(
                 "SELECT revision FROM config_state WHERE id=1"
             ).fetchone()[0]
-            if version == 5
+            if version >= 5
             else None
         )
         return {

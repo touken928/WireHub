@@ -432,8 +432,8 @@ impl Store {
         groups.dedup();
         let allowed = serde_json::to_string(&groups).map_err(|_| rusqlite::Error::InvalidQuery)?;
         tx.execute(
-            "UPDATE forwards SET name=?2,protocol=?3,target_peer_id=?4,target_port=?5,allowed=?6 WHERE id=?1",
-            params![f.id, name, f.protocol, f.target_peer_id, f.target_port, allowed],
+            "UPDATE forwards SET name=?2,protocol=?3,target_peer_id=?4,target_port=?5,allowed=?6,listen_port=?7 WHERE id=?1",
+            params![f.id, name, f.protocol, f.target_peer_id, f.target_port, allowed, f.listen_port],
         )?;
         let revision = advance_revision(&tx)?;
         tx.commit()?;
@@ -514,7 +514,7 @@ fn read_peers(db: &Connection) -> rusqlite::Result<Vec<Peer>> {
     rows.collect()
 }
 fn read_forwards(db: &Connection) -> rusqlite::Result<Vec<Forward>> {
-    let mut q=db.prepare("SELECT id,trim(name),protocol,target_peer_id,target_port,allowed FROM forwards ORDER BY id")?;
+    let mut q=db.prepare("SELECT id,trim(name),protocol,target_peer_id,target_port,allowed,listen_port FROM forwards ORDER BY id")?;
     let rows = q.query_map([], |r| {
         let raw: String = r.get(5)?;
         Ok(Forward {
@@ -522,6 +522,7 @@ fn read_forwards(db: &Connection) -> rusqlite::Result<Vec<Forward>> {
             name: r.get(1)?,
             protocol: r.get(2)?,
             target_peer_id: r.get(3)?,
+            listen_port: r.get(6)?,
             target_port: r.get(4)?,
             allowed_group_ids: serde_json::from_str(&raw)
                 .map_err(|_| rusqlite::Error::InvalidQuery)?,
@@ -536,7 +537,7 @@ fn insert_forward(
     name: &str,
     allowed: &str,
 ) -> rusqlite::Result<()> {
-    tx.execute("INSERT INTO forwards(id,name,protocol,target_peer_id,target_port,allowed) VALUES(?1,?2,?3,?4,?5,?6)",params![f.id,name,f.protocol,f.target_peer_id,f.target_port,allowed])?;
+    tx.execute("INSERT INTO forwards(id,name,protocol,target_peer_id,target_port,allowed,listen_port) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![f.id,name,f.protocol,f.target_peer_id,f.target_port,allowed,f.listen_port])?;
     Ok(())
 }
 fn ensure_forward_target_exists(tx: &Transaction<'_>, peer_id: &str) -> rusqlite::Result<()> {

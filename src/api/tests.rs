@@ -338,6 +338,7 @@ async fn endpoint_validation_status_matrix_does_not_queue_reload_for_failures() 
         name: name.into(),
         protocol: "tcp".into(),
         target_peer_id: target.into(),
+        listen_port: None,
         target_port: port,
         allowed_group_ids: groups,
     };
@@ -402,6 +403,13 @@ async fn endpoint_validation_status_matrix_does_not_queue_reload_for_failures() 
         assert!(body.contains(detail), "{body}");
         assert_no_reload(&mut rx).await;
     }
+    let mut zero = f("zero", "p", vec![], 80);
+    zero.listen_port = Some(0);
+    let response = create_forward(State(s.clone()), h.clone(), Json(zero))
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_no_reload(&mut rx).await;
     let first = f("dupe", "p", vec!["g".into()], 84);
     s.store
         .create_forward(&mut Forward {
@@ -409,6 +417,7 @@ async fn endpoint_validation_status_matrix_does_not_queue_reload_for_failures() 
             name: first.name.clone(),
             protocol: first.protocol.clone(),
             target_peer_id: first.target_peer_id.clone(),
+            listen_port: first.target_port,
             target_port: first.target_port,
             allowed_group_ids: first.allowed_group_ids.clone(),
         })
@@ -890,6 +899,7 @@ async fn full_reload_queue_rejects_each_mutation_family_before_writing() {
             name: "forward".into(),
             protocol: "tcp".into(),
             target_peer_id: "p".into(),
+            listen_port: 80,
             target_port: 80,
             allowed_group_ids: vec!["g".into()],
         })
@@ -946,6 +956,7 @@ async fn full_reload_queue_rejects_each_mutation_family_before_writing() {
                     name: "new".into(),
                     protocol: "tcp".into(),
                     target_peer_id: "p".into(),
+                    listen_port: None,
                     target_port: 81,
                     allowed_group_ids: vec!["g".into()],
                 }),
@@ -1271,6 +1282,7 @@ async fn forward_edit_requires_revision_and_activation_acknowledgement() {
             name: "f".into(),
             protocol: "tcp".into(),
             target_peer_id: "p".into(),
+            listen_port: 8000,
             target_port: 8000,
             allowed_group_ids: vec![],
         })
@@ -1279,6 +1291,7 @@ async fn forward_edit_requires_revision_and_activation_acknowledgement() {
         name: "edited".into(),
         protocol: "tcp".into(),
         target_peer_id: "p".into(),
+        listen_port: Some(8080),
         target_port: 8000,
         allowed_group_ids: vec!["g".into()],
     };
@@ -1323,6 +1336,8 @@ async fn forward_edit_requires_revision_and_activation_acknowledgement() {
         state.store.forwards().unwrap()[0].allowed_group_ids,
         vec!["g"]
     );
+    assert_eq!(state.store.forwards().unwrap()[0].listen_port, 8080);
+    assert_eq!(state.store.forwards().unwrap()[0].target_port, 8000);
     command.respond(Ok(()));
     assert_eq!(task.await.unwrap().into_response().status(), StatusCode::OK);
     let revision = state.store.revision().unwrap();

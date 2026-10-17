@@ -599,6 +599,7 @@ fn forward_pending_provenance_changes_are_reconciled_without_retry_or_reservatio
         "forward id",
         "protocol",
         "port",
+        "listen port",
         "target",
         "allowlist",
         "source group",
@@ -611,6 +612,7 @@ fn forward_pending_provenance_changes_are_reconciled_without_retry_or_reservatio
             id: "f".into(),
             protocol: TransportProtocol::Udp,
             target_peer_id: "b".into(),
+            listen_port: 5678,
             target_port: 5678,
             allowed_group_ids: vec!["g".into()],
         }];
@@ -654,6 +656,7 @@ fn forward_pending_provenance_changes_are_reconciled_without_retry_or_reservatio
             }
             "forward id" => new.forwards[0].id = "changed".into(),
             "protocol" => new.forwards[0].protocol = TransportProtocol::Tcp,
+            "listen port" => new.forwards[0].listen_port = 5679,
             "port" => new.forwards[0].target_port = 5679,
             "target" => new.forwards[0].target_peer_id = "a".into(),
             "allowlist" => new.forwards[0].allowed_group_ids.clear(),
@@ -720,6 +723,7 @@ fn indexed_services_isolate_protocol_ports_and_recompile_on_policy_reload() {
                 TransportProtocol::Tcp
             },
             target_peer_id: "b".into(),
+            listen_port: 10000 + i,
             target_port: 10000 + i,
             allowed_group_ids: vec!["g".into()],
         })
@@ -741,7 +745,7 @@ fn indexed_services_isolate_protocol_ports_and_recompile_on_policy_reload() {
     );
     let old = dp.config.clone();
     let mut next = old.clone();
-    next.forwards[1022].target_port = 12000;
+    next.forwards[1022].listen_port = 12000;
     next.forward_index = crate::kernel::snapshot::ForwardIndex::compile(&next.forwards);
     dp.reconcile(&old, next);
     raw[22..24].copy_from_slice(&11022u16.to_be_bytes());
@@ -803,6 +807,7 @@ fn forward_plane(protocol: u8) -> DataPlane {
             TransportProtocol::Udp
         },
         target_peer_id: "b".into(),
+        listen_port: 5678,
         target_port: 5678,
         allowed_group_ids: vec!["g".into()],
     }];
@@ -815,6 +820,9 @@ fn forward_only_grants_exact_service_without_direct_or_reverse_initiation() {
     for protocol in [6, 17] {
         for same_group in [false, true] {
             let mut dp = forward_plane(protocol);
+            dp.config.forwards[0].listen_port = 8080;
+            dp.config.forward_index =
+                crate::kernel::snapshot::ForwardIndex::compile(&dp.config.forwards);
             let now = Instant::now();
             dp.config
                 .peers
@@ -837,8 +845,8 @@ fn forward_only_grants_exact_service_without_direct_or_reverse_initiation() {
             let hub = dp.config.hub_ip.unwrap();
             for (proto, dst, port) in [
                 (protocol, b, 5678),
-                (protocol, hub, 5679),
-                (if protocol == 6 { 17 } else { 6 }, hub, 5678),
+                (protocol, hub, 5678),
+                (if protocol == 6 { 17 } else { 6 }, hub, 8080),
             ] {
                 let raw = service_fixture(proto, a, dst, 1234, port, false);
                 assert!(
@@ -846,11 +854,15 @@ fn forward_only_grants_exact_service_without_direct_or_reverse_initiation() {
                     "Service grant must not authorize direct, other-port or other-protocol access"
                 );
             }
-            let raw = service_fixture(protocol, a, hub, 1234, 5678, false);
+            let raw = service_fixture(protocol, a, hub, 1234, 8080, false);
             let prepared = dp
                 .prepare(ingress(&dp, &raw), now)
                 .expect("Independent forward grant must work without any group ACL");
             assert_eq!(prepared.target_id(), "b");
+            assert_eq!(
+                u16::from_be_bytes([prepared.bytes()[22], prepared.bytes()[23]]),
+                5678
+            );
             let snat = u16::from_be_bytes([prepared.bytes()[20], prepared.bytes()[21]]);
             dp.finish(prepared, EgressOutcome::Delivered, now);
             let reply = service_fixture(protocol, b, hub, 5678, snat, true);
@@ -861,6 +873,10 @@ fn forward_only_grants_exact_service_without_direct_or_reverse_initiation() {
                 .expect("Established reverse mapping must not require a reverse ACL");
             assert_eq!(prepared.target_id(), "a");
             assert_eq!(&prepared.bytes()[12..16], &hub.octets());
+            assert_eq!(
+                u16::from_be_bytes([prepared.bytes()[20], prepared.bytes()[21]]),
+                8080
+            );
             dp.finish(prepared, EgressOutcome::Delivered, now);
             let reverse = service_fixture(protocol, b, a, 9999, 5678, false);
             let packet = dp.ingress(&source, &reverse).unwrap();
@@ -941,5 +957,51 @@ fn direct_acl_changes_preserve_active_and_queued_forwards_but_allowlist_revocati
         assert_eq!(dp.pending_counts(), (0, 0));
         assert_eq!(dp.flow_counts(), (0, 0));
         assert!(dp.prepare_retry(&mut remaining, now).is_none());
+    }
+}
+
+#[test]
+fn editing_listen_port_revokes_active_and_queued_tcp_and_udp_and_allows_new_entry() {
+    for protocol in [6, 17] {
+        let mut dp = forward_plane(protocol);
+        let now = Instant::now();
+        let a = Ipv4Addr::new(10, 77, 0, 2);
+        let b = Ipv4Addr::new(10, 77, 0, 3);
+        let hub = dp.config.hub_ip.unwrap();
+        let mut reply_port = 0;
+        for (sport, outcome) in [
+            (1234, EgressOutcome::Delivered),
+            (1235, EgressOutcome::NotReady),
+        ] {
+            let raw = service_fixture(protocol, a, hub, sport, 5678, false);
+            let prepared = dp.prepare(ingress(&dp, &raw), now).unwrap();
+            if sport == 1234 {
+                reply_port = u16::from_be_bytes([prepared.bytes()[20], prepared.bytes()[21]]);
+            }
+            dp.finish(prepared, outcome, now);
+        }
+        assert_eq!(dp.flow_counts(), (1, 0));
+        assert_eq!(dp.pending_counts().0, 1);
+        let old = dp.config.clone();
+        let mut changed = old.clone();
+        changed.forwards[0].listen_port = 8080;
+        changed.forward_index = crate::kernel::snapshot::ForwardIndex::compile(&changed.forwards);
+        dp.reconcile(&old, changed);
+        assert_eq!(dp.flow_counts(), (0, 0));
+        assert_eq!(dp.pending_counts().0, 0);
+        let old_request = service_fixture(protocol, a, hub, 1234, 5678, false);
+        assert!(dp.prepare(ingress(&dp, &old_request), now).is_none());
+        let source = dp.authenticated_peer("b").unwrap();
+        let reply = service_fixture(protocol, b, hub, 5678, reply_port, true);
+        assert!(dp
+            .prepare(dp.ingress(&source, &reply).unwrap(), now)
+            .is_none());
+        let new_request = service_fixture(protocol, a, hub, 1234, 8080, false);
+        let prepared = dp.prepare(ingress(&dp, &new_request), now).unwrap();
+        assert_eq!(
+            u16::from_be_bytes([prepared.bytes()[22], prepared.bytes()[23]]),
+            5678
+        );
+        assert!(dp.finish(prepared, EgressOutcome::Delivered, now).is_some());
     }
 }

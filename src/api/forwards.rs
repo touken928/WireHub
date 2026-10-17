@@ -29,7 +29,10 @@ pub async fn create_forward(
     if !auth(&headers, &state) {
         return err(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
-    if !matches!(new.protocol.as_str(), "tcp" | "udp") || new.target_port == 0 {
+    if !matches!(new.protocol.as_str(), "tcp" | "udp")
+        || new.target_port == 0
+        || new.listen_port == Some(0)
+    {
         return err(StatusCode::BAD_REQUEST, "invalid protocol or port").into_response();
     }
     let permit = match state.kernel.reserve_reload().await {
@@ -43,6 +46,7 @@ pub async fn create_forward(
         name: new.name,
         target_peer_id: new.target_peer_id,
         protocol: new.protocol,
+        listen_port: new.listen_port.unwrap_or(new.target_port),
         target_port: new.target_port,
         allowed_group_ids: new.allowed_group_ids,
     };
@@ -97,7 +101,10 @@ pub async fn update_forward(
         Ok(revision) => revision,
         Err(error) => return error.into_response(),
     };
-    if !matches!(new.protocol.as_str(), "tcp" | "udp") || new.target_port == 0 {
+    if !matches!(new.protocol.as_str(), "tcp" | "udp")
+        || new.target_port == 0
+        || new.listen_port == Some(0)
+    {
         return err(StatusCode::BAD_REQUEST, "invalid protocol or port").into_response();
     }
     let permit = match state.kernel.reserve_reload().await {
@@ -111,6 +118,7 @@ pub async fn update_forward(
         name: new.name,
         protocol: new.protocol,
         target_peer_id: new.target_peer_id,
+        listen_port: new.listen_port.unwrap_or(new.target_port),
         target_port: new.target_port,
         allowed_group_ids: new.allowed_group_ids,
     };

@@ -21,6 +21,7 @@ fn forward(proto: &str, port: u16) -> Forward {
         name: "service".into(),
         protocol: proto.into(),
         target_peer_id: "backend".into(),
+        listen_port: port,
         target_port: port,
         allowed_group_ids: vec![],
     }
@@ -738,14 +739,15 @@ fn forward_translation_identity_and_reverse_success_refresh_boundary() {
     let mut flows = Flows::default();
     let source = peer("source", "10.77.0.2");
     let backend = peer("backend", "10.77.0.3");
-    let f = forward("udp", 9000);
+    let mut f = forward("udp", 9000);
+    f.listen_port = 8000;
     let now = t();
     let p = packet(
         17,
         "10.77.0.2".parse().unwrap(),
         1234,
         "10.77.0.1".parse().unwrap(),
-        9000,
+        8000,
         0,
     );
     let (translated, r) = flows
@@ -785,6 +787,7 @@ fn forward_translation_identity_and_reverse_success_refresh_boundary() {
         .unwrap();
     assert_eq!(target, "source");
     assert_eq!(&rewritten[12..16], &[10, 77, 0, 1]);
+    assert_eq!(u16::from_be_bytes([rewritten[20], rewritten[21]]), 8000);
     assert_eq!(u16::from_be_bytes([rewritten[22], rewritten[23]]), 1234);
     flows.complete(
         r.expect("connection reply reservation"),
@@ -924,7 +927,9 @@ fn expired_forward_reclaimed_and_tcp_requires_syn_only_for_new_record() {
 fn pending_dedup_service_exclusion_protocol_sharing_and_capacity() {
     let backend = peer("backend", "10.77.0.3");
     let source = peer("source", "10.77.0.2");
-    let mut flows = Flows::new("10.77.0.1".parse().unwrap(), &[forward("udp", 40000)]);
+    let mut reserved = forward("udp", 8000);
+    reserved.listen_port = 40000;
+    let mut flows = Flows::new("10.77.0.1".parse().unwrap(), &[reserved]);
     let now = t();
     let udp_forward = forward("udp", 53);
     let udp = packet(

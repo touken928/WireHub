@@ -32,7 +32,7 @@ Save the following as [`compose.yml`](compose.yml), or use the file included in 
 ```yaml
 services:
   wirehub:
-    image: ghcr.io/touken928/wirehub:1.1.0
+    image: ghcr.io/touken928/wirehub:1.2.0
     restart: unless-stopped
     environment:
       WIREHUB_ADMIN_TOKEN: ${WIREHUB_ADMIN_TOKEN:?Set WIREHUB_ADMIN_TOKEN to a long random secret}
@@ -124,11 +124,11 @@ Click **Save** to commit the ACL changes as one versioned batch. If another sess
 
 ### Forward a service
 
-In **Forwards**, click **New forward** and choose the target peer, TCP/UDP, service port, and allowed groups. Allowed groups can use this service without group-to-group access in **Groups**. This grants access only to the configured protocol and port, not direct access to the target peer.
+In **Forwards**, click **New forward** and choose the target peer, TCP/UDP, Hub port, target port, and allowed groups. Allowed groups can use this service without group-to-group access in **Groups**. This grants access only to the configured protocol and port, not direct access to the target peer.
 
-Use the edit button on a forward to change its name, protocol, port, target peer or allowed groups. Changes apply after saving. Leaving Allowed groups empty blocks all access.
+Use the edit button on a forward to change its name, protocol, Hub port, target port, target peer or allowed groups. Changes apply after saving. Leaving Allowed groups empty blocks all access.
 
-For example, forward a peer's TCP `8080` service so authorized peers can reach it at **`10.10.10.1:8080`**.
+For example, map **`10.10.10.1:8080`** to a peer's service at **`10.10.10.4:8000`** by setting Hub port to `8080` and target port to `8000`. Hub ports must be unique per protocol; TCP and UDP may share a numeric port, and multiple entries may point to the same backend service. These ports exist inside the WireGuard tunnel; no additional Docker port publication is needed.
 
 ### Settings and updates
 
@@ -170,7 +170,7 @@ Building the service requires Rust 1.89 or newer for the standard-library file
 locking API. This minimum requirement does not imply that every Rust release
 has been independently tested.
 
-This release (`1.1.0`) uses strict schema version 5. Canonical version 3 and 4 databases are validated and upgraded atomically, including the pending-provision journal and monotonic configuration revision; existing configuration and hub identity are preserved. Older or structurally drifted databases are rejected. Version 5 databases cannot be opened by an older version 4 binary. At startup, WireHub binds the hub private-key file to the public identity persisted in SQLite; network setup does not create or bind that identity. Back up the SQLite database and hub private-key file together as an immutable identity pair. Restoring only one half can make startup fail because the persisted public identity must match the private key. Schema drift detection includes unexpected SQLite statistics tables and index objects.
+This release (`1.2.0`) uses strict schema version 6. Canonical version 3, 4 and 5 databases are validated and upgraded atomically. Existing forwards keep their entry ports (`listen_port` is backfilled from `target_port`); configuration, revision and Hub identity are preserved. Older or structurally drifted databases are rejected. Version 6 databases cannot be opened by v1.1.0 or earlier binaries; rollback requires the pre-upgrade database/key pair. At startup, WireHub binds the hub private-key file to the public identity persisted in SQLite; network setup does not create or bind that identity. Back up the SQLite database and hub private-key file together as an immutable identity pair. Restoring only one half can make startup fail because the persisted public identity must match the private key. Schema drift detection includes unexpected SQLite statistics tables and index objects.
 
 Peer provisioning records its pending state without storing the private key. Pending peers are hidden from the peer inventory and cannot be forwarding targets. Cancelling an HTTP request during activation schedules peer removal and a cleanup reload; startup removes any remaining unfinished provisions before loading the router. Successful provisioning clears the pending marker before returning the one-time configuration. Save that response: delivery acknowledgement by the client is not tracked, so a lost response still requires deleting and recreating the peer.
 

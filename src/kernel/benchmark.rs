@@ -42,6 +42,7 @@ fn plane(peers: usize, forwards: usize) -> DataPlane {
                 id: format!("f{i}"),
                 name: format!("f{i}"),
                 protocol: if i % 2 == 0 { "udp" } else { "tcp" }.into(),
+                listen_port: (10_000 + i) as u16,
                 target_port: (10_000 + i) as u16,
                 target_peer_id: format!("p{}", peers - 1),
                 allowed_group_ids: vec!["g".into()],

@@ -2,11 +2,13 @@ use super::{sql_error, Store};
 use crate::network;
 use rusqlite::{Connection, OptionalExtension};
 
-pub(super) const SCHEMA_VERSION: i64 = 5;
+pub(super) const SCHEMA_VERSION: i64 = 6;
+const LEGACY_FORWARDS: &str = "CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,target_port INTEGER NOT NULL,allowed TEXT NOT NULL,UNIQUE(protocol,target_port));";
+const FORWARDS: &str = "CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,listen_port INTEGER NOT NULL,target_port INTEGER NOT NULL,allowed TEXT NOT NULL,UNIQUE(protocol,listen_port));";
 pub(super) const TABLES: &str = "
 CREATE TABLE groups(id TEXT PRIMARY KEY,name TEXT NOT NULL,allowed TEXT NOT NULL DEFAULT '[]');
 CREATE TABLE peers(id TEXT PRIMARY KEY,name TEXT NOT NULL,public_key TEXT NOT NULL UNIQUE,ipv4 TEXT NOT NULL UNIQUE,group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE RESTRICT,rx INTEGER NOT NULL DEFAULT 0,tx INTEGER NOT NULL DEFAULT 0,last_handshake INTEGER);
-CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,target_port INTEGER NOT NULL,allowed TEXT NOT NULL,UNIQUE(protocol,target_port));
+CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,listen_port INTEGER NOT NULL,target_port INTEGER NOT NULL,allowed TEXT NOT NULL,UNIQUE(protocol,listen_port));
 CREATE TABLE network_settings(id INTEGER PRIMARY KEY CHECK(id=1),subnet TEXT NOT NULL,endpoint TEXT NOT NULL,persistent_keepalive INTEGER NOT NULL CHECK(persistent_keepalive BETWEEN 0 AND 65535));
 CREATE TABLE hub_identity(id INTEGER PRIMARY KEY CHECK(id=1),public_key BLOB NOT NULL CHECK(typeof(public_key)='blob' AND length(public_key)=32));
 CREATE UNIQUE INDEX groups_name_unique ON groups(name);
@@ -24,7 +26,7 @@ pub(super) fn open(
     db.pragma_update(None, "foreign_keys", "ON")?;
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version != 0 && version != 3 && version != 4 && version != SCHEMA_VERSION {
+    if version != 0 && version != 3 && version != 4 && version != 5 && version != SCHEMA_VERSION {
         return Err(sql_error("database schema version is unsupported (including v1/v2); export any needed data and create a fresh database; refusing to modify database"));
     }
     if version == 0 {
@@ -63,7 +65,6 @@ pub(super) fn open(
                 "CREATE TABLE config_state{}",
                 TABLES.split_once("CREATE TABLE config_state").unwrap().1
             ))?;
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         } else {
             let valid: i64 = tx.query_row("SELECT COUNT(*) FROM config_state WHERE id=1 AND typeof(revision)='integer' AND revision BETWEEN 0 AND 9007199254740991", [], |r| r.get(0))?;
             let total: i64 = tx.query_row("SELECT COUNT(*) FROM config_state", [], |r| r.get(0))?;
@@ -72,6 +73,12 @@ pub(super) fn open(
                     "current database contains invalid configuration revision; refusing to start",
                 ));
             }
+        }
+        if version < 6 {
+            tx.execute_batch("ALTER TABLE forwards RENAME TO forwards_legacy;")?;
+            tx.execute_batch(FORWARDS)?;
+            tx.execute_batch("INSERT INTO forwards(id,name,protocol,target_peer_id,listen_port,target_port,allowed) SELECT id,name,protocol,target_peer_id,target_port,target_port,allowed FROM forwards_legacy; DROP TABLE forwards_legacy;")?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
     }
     tx.commit()?;
@@ -86,6 +93,12 @@ fn validate_current_schema(db: &Connection, version: i64) -> rusqlite::Result<()
     let invalid: i64 = db.query_row("SELECT COUNT(*) FROM forwards WHERE protocol NOT IN ('tcp','udp') OR target_port NOT BETWEEN 1 AND 65535", [], |r| r.get(0))?;
     if invalid != 0 {
         return Err(sql_error("current database contains an invalid forward protocol or port; refusing to modify database"));
+    }
+    if version >= 6 {
+        let invalid: i64 = db.query_row("SELECT COUNT(*) FROM forwards WHERE typeof(listen_port)!='integer' OR listen_port NOT BETWEEN 1 AND 65535", [], |r| r.get(0))?;
+        if invalid != 0 {
+            return Err(sql_error("current database contains an invalid forward listen port; refusing to modify database"));
+        }
     }
     Ok(())
 }
@@ -114,7 +127,12 @@ fn validate_schema_exact(db: &Connection, version: i64) -> rusqlite::Result<()> 
     } else {
         TABLES
     };
-    reference.execute_batch(tables)?;
+    let tables = if version < 6 {
+        tables.replace(FORWARDS, LEGACY_FORWARDS)
+    } else {
+        tables.to_owned()
+    };
+    reference.execute_batch(&tables)?;
     if schema_rows(db)? != schema_rows(&reference)? {
         return Err(sql_error(
             "current database schema differs from canonical schema; refusing to modify database",

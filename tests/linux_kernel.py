@@ -27,6 +27,8 @@ def docker(*args, input=None):
 
 
 def helper(name, action, body=None):
+    if body is not None and body.get("target") == "172.27.91.1":
+        body = {**body, "port": 28080}
     return json.loads(
         docker(
             "exec",
@@ -171,6 +173,7 @@ def run(output, build):
                 {
                     "name": "kernel-" + protocol,
                     "protocol": protocol,
+                    "listen_port": 28080,
                     "target_port": 18080,
                     "target_peer_id": provisions[1]["peer"]["id"],
                     "allowed_group_ids": [ga],

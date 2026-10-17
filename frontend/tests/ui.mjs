@@ -42,7 +42,7 @@ try {
     { id: 'mac', name: 'MacBook Pro', group_id: 'engineering', ipv4: '10.77.0.2', public_key: 'fixture', sent_bytes: 1820000, received_bytes: 4600000, last_handshake_unix: Math.floor(Date.now() / 1000) },
     { id: 'server', name: 'Build server', group_id: 'services', ipv4: '10.77.0.3', public_key: 'fixture', sent_bytes: 65400000, received_bytes: 87600000, last_handshake_unix: null },
   ]
-  let forwards = [{ id: 'docs', name: 'Internal docs', protocol: 'tcp', target_port: 8080, target_peer_id: 'server', allowed_group_ids: ['engineering'] }]
+  let forwards = [{ id: 'docs', name: 'Internal docs', protocol: 'tcp', listen_port: 8080, target_port: 8080, target_peer_id: 'server', allowed_group_ids: ['engineering'] }]
   let settings = { subnet: '10.77.0.0/24', endpoint: 'vpn.example.com:51820', persistent_keepalive: 25 }
   let revision = 0, appliedRevision = 0, runtimeReady = true, failStatus = false
   let configured = true, failSave = false, failReload = false, partialSave = false, commitAclThenFail = false
@@ -141,7 +141,7 @@ try {
       const id = path.split('/')[3]
       if (req.headers()['if-match'] !== `"${revision}"`) return reply({ code: 'revision_conflict', message: 'Configuration changed. Reload and review before saving.' }, 409)
       if (!forwards.some(f => f.id === id)) return reply({ code: 'forward_not_found', message: 'forward not found' }, 404)
-      if (forwards.some(f => f.id !== id && f.protocol === body.protocol && f.target_port === body.target_port)) return reply({ code: 'conflict', message: 'forward conflict' }, 409)
+      if (forwards.some(f => f.id !== id && f.protocol === body.protocol && f.listen_port === body.listen_port)) return reply({ code: 'conflict', message: 'forward conflict' }, 409)
       const updated = { id, ...body }
       forwards = forwards.map(f => f.id === id ? updated : f); commitConfig()
       if (failForwardActivation) return reply({ code: 'activation_unconfirmed', message: 'Forward saved; runtime activation is unconfirmed. Reload before retrying.', persisted_revision: revision }, 503)
@@ -296,7 +296,7 @@ try {
         await page.getByRole('button', { name: 'New forward', exact: true }).first().click()
         const dialog = page.getByRole('dialog')
         await dialog.getByLabel('Name', { exact: true }).fill('One forward')
-        await dialog.getByLabel('Port', { exact: true }).fill('8080')
+        await dialog.getByLabel('Hub port', { exact: true }).fill('8080'); await dialog.getByLabel('Target port', { exact: true }).fill('8000')
         await dialog.getByLabel('Target peer', { exact: true }).selectOption('server')
         await dialog.getByLabel('Engineering', { exact: false }).check()
         const acknowledgement = holdNext('POST', '/api/forwards')
@@ -309,7 +309,7 @@ try {
         assert.equal(await page.locator('.forward-card').count(), 1, 'Refresh and create acknowledgement must not duplicate a forward')
       },
       'forward-edit-loading-focus': async () => {
-        forwards = [{ id: 'editable', name: 'Web', protocol: 'tcp', target_port: 8000, target_peer_id: 'server', allowed_group_ids: [] }]
+        forwards = [{ id: 'editable', name: 'Web', protocol: 'tcp', listen_port: 8000, target_port: 8000, target_peer_id: 'server', allowed_group_ids: [] }]
         await navigate('Forwards'); await refresh.click(); await refreshSettled()
         const configuration = holdNext('GET', '/api/config')
         await page.getByLabel('Edit forward Web', { exact: true }).click(); await configuration.requested
@@ -318,17 +318,17 @@ try {
         await configuration.release()
       },
       'forward-edit': async () => {
-        forwards = [{ id: 'editable', name: 'Web', protocol: 'tcp', target_port: 8000, target_peer_id: 'server', allowed_group_ids: [] }]
+        forwards = [{ id: 'editable', name: 'Web', protocol: 'tcp', listen_port: 8000, target_port: 8000, target_peer_id: 'server', allowed_group_ids: [] }]
         await navigate('Forwards'); await refresh.click(); await refreshSettled()
         const old = holdNext('GET', '/api/forwards'); await refresh.click(); await old.requested
         await page.getByLabel('Edit forward Web', { exact: true }).click()
         const dialog = page.getByRole('dialog')
         await poll(async () => await dialog.getByRole('button', { name: 'Save changes', exact: true }).isEnabled(), 'Forward loaded for edit')
         assert.equal(await dialog.getByLabel('Name', { exact: true }).inputValue(), 'Web')
-        assert.equal(await dialog.getByLabel('Port', { exact: true }).inputValue(), '8000')
+        assert.equal(await dialog.getByLabel('Hub port', { exact: true }).inputValue(), '8000')
         await dialog.getByText('No groups selected. This forward will block all access.', { exact: true }).waitFor()
         await dialog.getByLabel('Name', { exact: true }).fill('Edited web')
-        await dialog.getByLabel('Port', { exact: true }).fill('8080')
+        await dialog.getByLabel('Hub port', { exact: true }).fill('8080'); await dialog.getByLabel('Target port', { exact: true }).fill('8000')
         await dialog.getByLabel('Protocol', { exact: true }).selectOption('udp')
         await dialog.getByLabel('Target peer', { exact: true }).selectOption('mac')
         await dialog.getByLabel('Engineering', { exact: false }).check()
@@ -340,13 +340,14 @@ try {
         await held.release(); await poll(async () => await dialog.count() === 0, 'Confirmed update closes dialog')
         await old.release(); await refreshSettled()
         assert.equal(forwards.length, 1, 'Editing preserves forward identity')
-        assert.deepEqual(forwards[0], { id: 'editable', name: 'Edited web', protocol: 'udp', target_port: 8080, target_peer_id: 'mac', allowed_group_ids: ['engineering'] })
+        assert.deepEqual(forwards[0], { id: 'editable', name: 'Edited web', protocol: 'udp', listen_port: 8080, target_port: 8000, target_peer_id: 'mac', allowed_group_ids: ['engineering'] })
         await page.getByRole('heading', { name: 'Edited web', exact: true }).waitFor()
         assert.match(await page.locator('.route-visual').innerText(), /10.77.0.1:8080/)
+        assert.match(await page.locator('.route-visual').innerText(), /10.77.0.2:8000/)
         await screenshot('forward-edited')
       },
       'forward-edit-conflict': async () => {
-        forwards = [{ id: 'editable', name: 'Web', protocol: 'tcp', target_port: 8000, target_peer_id: 'server', allowed_group_ids: ['engineering'] }]
+        forwards = [{ id: 'editable', name: 'Web', protocol: 'tcp', listen_port: 8000, target_port: 8000, target_peer_id: 'server', allowed_group_ids: ['engineering'] }]
         await navigate('Forwards'); await refresh.click(); await refreshSettled()
         await page.getByLabel('Edit forward Web', { exact: true }).click()
         const dialog = page.getByRole('dialog')
@@ -842,8 +843,10 @@ try {
     await releasePeerDelete(); assert.equal(await page.locator('.peer-card').count(), 2, 'Old peers GET cannot resurrect a deleted peer'); await screenshot('peers')
     await navigate('Forwards')
     const releaseForwardCreate = await staleRefresh('/api/forwards')
-    await page.getByRole('button', { name: 'New forward', exact: true }).click(); await page.getByRole('dialog').getByLabel('Name', { exact: true }).fill('Test service'); await page.getByRole('dialog').getByLabel('Port', { exact: true }).fill('8080'); await page.getByRole('alert').waitFor(); assert.ok(await page.getByRole('button', { name: 'Create', exact: true }).isDisabled())
+    await page.getByRole('button', { name: 'New forward', exact: true }).click(); await page.getByRole('dialog').getByLabel('Name', { exact: true }).fill('Test service'); await page.getByRole('dialog').getByLabel('Hub port', { exact: true }).fill('8080'); await page.getByRole('dialog').getByLabel('Target port', { exact: true }).fill('8000'); await page.getByRole('alert').waitFor(); assert.ok(await page.getByRole('button', { name: 'Create', exact: true }).isDisabled())
     await page.getByRole('dialog').getByLabel('Protocol', { exact: true }).selectOption('udp'); await page.getByRole('dialog').getByLabel('Engineering', { exact: false }).check(); await page.getByRole('button', { name: 'Create', exact: true }).click(); await poll(async () => forwards.length === 2 && await page.getByRole('dialog').count() === 0 && await page.locator('.forward-card').count() === 2, 'Forward created'); await english(); await screenshot('forwards')
+    for (const width of [1024, 800, 720]) { await page.setViewportSize({ width, height: 900 }); await flushFrames(); await noOverflow(); await screenshot(`forwards-${width}`) }
+    await page.setViewportSize({ width: 1440, height: 1000 })
     await releaseForwardCreate(); assert.equal(await page.locator('.forward-card').count(), 2, 'Old forwards GET cannot drop a confirmed creation')
     const releaseForwardDelete = await staleRefresh('/api/forwards')
     await page.getByLabel('Delete forward Test service').click(); await page.getByText('Forward deleted', { exact: true }).waitFor()
@@ -940,7 +943,7 @@ try {
     await releasePeerCascade()
     await navigate('Forwards'); assert.equal(await page.locator('.forward-card').count(), 0)
     console.log('PASS: delayed forwards reads cannot undo group allowlist or peer-target deletion cascades')
-    await page.getByRole('button', { name: 'New forward', exact: true }).first().click(); await page.getByRole('dialog').getByLabel('Name', { exact: true }).fill('Reused port'); await page.getByRole('dialog').getByLabel('Port', { exact: true }).fill('8080'); await page.getByRole('dialog').getByLabel('Target peer', { exact: true }).selectOption('mac'); await page.getByRole('button', { name: 'Create', exact: true }).click(); await poll(() => forwards.length === 1 && forwards[0].target_peer_id === 'mac', 'Cascade frees the forward port for reuse')
+    await page.getByRole('button', { name: 'New forward', exact: true }).first().click(); await page.getByRole('dialog').getByLabel('Name', { exact: true }).fill('Reused port'); await page.getByRole('dialog').getByLabel('Hub port', { exact: true }).fill('8080'); await page.getByRole('dialog').getByLabel('Target port', { exact: true }).fill('8000'); await page.getByRole('dialog').getByLabel('Target peer', { exact: true }).selectOption('mac'); await page.getByRole('button', { name: 'Create', exact: true }).click(); await poll(() => forwards.length === 1 && forwards[0].target_peer_id === 'mac', 'Cascade frees the forward port for reuse')
     await navigate('Groups'); await page.getByRole('button', { name: 'New group', exact: true }).click(); await noOverflow(); await english(); await screenshot('mobile-dialog'); await page.keyboard.press('Escape')
     // Fresh setup, empty states, session reset, and no persisted access token.
     await page.getByRole('button', { name: 'Open navigation' }).click(); await page.getByRole('button', { name: 'Administrator Sign out' }).click(); await page.getByLabel('Access token').waitFor()

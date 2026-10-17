@@ -109,6 +109,7 @@ def run(binary, duration, output):
                 {
                     "name": protocol,
                     "protocol": protocol,
+                    "listen_port": 28080,
                     "target_port": 18080,
                     "target_peer_id": provisions[1]["peer"]["id"],
                     "allowed_group_ids": [ga],
@@ -139,7 +140,7 @@ def run(binary, duration, output):
             check(result.get("id"), "TCP open failed")
             return result["id"]
 
-        targets = ["172.27.92.1:18080", provisions[1]["peer"]["ipv4"] + ":18080"]
+        targets = ["172.27.92.1:28080", provisions[1]["peer"]["ipv4"] + ":18080"]
         sockets = [opened(target) for target in targets]
 
         def exchange(connection, nonce, expected=True):

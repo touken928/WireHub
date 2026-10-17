@@ -45,6 +45,7 @@ mod tests {
             name: "f".into(),
             protocol: "udp".into(),
             target_peer_id: "b".into(),
+            listen_port: 53,
             target_port: 53,
             allowed_group_ids: vec!["a".into()],
         }

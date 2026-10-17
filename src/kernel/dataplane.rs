@@ -68,6 +68,7 @@ pub(crate) enum RouteOrigin {
     Forward {
         id: String,
         protocol: TransportProtocol,
+        listen_port: u16,
         target_port: u16,
     },
     ReplyOnly,
@@ -303,6 +304,7 @@ impl DataPlane {
                     origin = RouteOrigin::Forward {
                         id: forward.id.clone(),
                         protocol: forward.protocol,
+                        listen_port: forward.listen_port,
                         target_port: forward.target_port,
                     };
                     plan = Some((target.id.clone(), bytes, reservation));
@@ -417,6 +419,7 @@ impl DataPlane {
             RouteOrigin::Forward {
                 id,
                 protocol,
+                listen_port,
                 target_port,
             } => self
                 .config
@@ -427,12 +430,13 @@ impl DataPlane {
                 .is_some_and(|f| {
                     &f.id == id
                         && f.protocol == *protocol
+                        && f.listen_port == *listen_port
                         && f.target_port == *target_port
                         && f.target_peer_id == target.id
                         && ingress.packet.protocol() == protocol.number()
                         && ingress.packet.dst()
                             == self.config.hub_ip.unwrap_or(Ipv4Addr::UNSPECIFIED)
-                        && ingress.packet.dst_port() == Some(*target_port)
+                        && ingress.packet.dst_port() == Some(*listen_port)
                         && policy::forward_allowed(f, &source.group_id)
                 }),
         }

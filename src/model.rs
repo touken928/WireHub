@@ -88,6 +88,8 @@ pub struct Forward {
     pub name: String,
     pub protocol: String,
     pub target_peer_id: String,
+    /// Hub tunnel entry port. Unique within each transport protocol.
+    pub listen_port: u16,
     pub target_port: u16,
     pub allowed_group_ids: Vec<String>,
 }
@@ -151,6 +153,9 @@ pub struct NewForward {
     pub name: String,
     pub protocol: String,
     pub target_peer_id: String,
+    /// Hub tunnel entry port. Defaults to target_port when omitted by legacy clients.
+    #[serde(default)]
+    pub listen_port: Option<u16>,
     pub target_port: u16,
     pub allowed_group_ids: Vec<String>,
 }
@@ -177,7 +182,17 @@ mod tests {
     #[test]
     fn new_forward_rejects_removed_and_unknown_fields() {
         let valid = r#"{"name":"web","protocol":"tcp","target_peer_id":"peer","target_port":443,"allowed_group_ids":[]}"#;
-        assert!(serde_json::from_str::<NewForward>(valid).is_ok());
+        assert!(serde_json::from_str::<NewForward>(valid)
+            .unwrap()
+            .listen_port
+            .is_none());
+        let distinct = valid.replace(
+            "\"target_port\":443",
+            "\"listen_port\":8080,\"target_port\":443",
+        );
+        let parsed = serde_json::from_str::<NewForward>(&distinct).unwrap();
+        assert_eq!(parsed.listen_port, Some(8080));
+        assert_eq!(parsed.target_port, 443);
         let legacy = r#"{"name":"web","protocol":"tcp","listen_port":443,"virtual_ip":"10.0.0.128","target_peer_id":"peer","target_port":443,"allowed_group_ids":[]}"#;
         assert!(serde_json::from_str::<NewForward>(legacy).is_err());
     }
