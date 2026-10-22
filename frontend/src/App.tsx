@@ -5,6 +5,8 @@ import {
   Menu, Network, Pencil, Plus, Radio, RefreshCw, Search, Settings2, Shield, Trash2, X,
 } from 'lucide-react'
 import GroupsPage from './components/groups/GroupsPage'
+import TrafficChart from './components/TrafficChart'
+import { useTraffic, type Traffic } from './useTraffic'
 import Dialog from './components/Dialog'
 import ForwardDialog from './components/forwards/ForwardDialog'
 import '@xyflow/react/dist/style.css'
@@ -19,6 +21,7 @@ type Page = 'overview' | 'peers' | 'groups' | 'forwards' | 'settings'
 
 const initials = (name: string) => name.slice(0, 1).toUpperCase()
 const formatBytes = (n: number) => n > 1_000_000_000 ? `${(n / 1_000_000_000).toFixed(1)} GB` : n > 1_000_000 ? `${(n / 1_000_000).toFixed(1)} MB` : n > 1000 ? `${(n / 1000).toFixed(0)} KB` : `${n} B`
+const formatRate = (n: number) => `${formatBytes(Math.round(n))}/s`
 const timeAgo = (unix?: number | null) => {
   if (!unix) return 'Never'
   const seconds = Math.max(0, Math.floor(Date.now() / 1000 - unix))
@@ -44,6 +47,7 @@ export default function App() {
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null)
   const [runtimeError, setRuntimeError] = useState('')
   const [sampledAt, setSampledAt] = useState<Date | null>(null)
+  const { traffic, sample: sampleTraffic, reset: resetTraffic } = useTraffic()
   const navigate = (next: Page) => { if (next !== page && policyDirty && !confirm('Discard unsaved policy changes?')) return; setPage(next); setMobileNav(false) }
   const [peers, setPeers] = useState<Peer[]>([])
   const [groups, setGroups] = useState<Group[]>([])
@@ -197,29 +201,30 @@ export default function App() {
 
   useEffect(() => {
     if (!connected || !setup?.configured) return
-    let stopped = false, timer: number | undefined, failures = 0, polling = false
+    let stopped = false, timer: number | undefined, failures = 0, polling = false, visibilityGeneration = 0
     const schedule = () => { if (!stopped && !document.hidden) timer = window.setTimeout(() => void poll(), Math.min(30_000, 5_000 * 2 ** failures)) }
     const poll = async () => {
       if (stopped || document.hidden || polling) return
       polling = true
-      const session = sessionRef.current, epoch = mutationEpochRef.current
+      const session = sessionRef.current, epoch = mutationEpochRef.current, visibility = visibilityGeneration
       try {
         const [status, result] = await Promise.all([configApi.status(), client.GET('/api/peers', { cache: 'no-store' })])
-        if (stopped || session !== sessionRef.current) return
+        if (stopped || session !== sessionRef.current || document.hidden || visibility !== visibilityGeneration) return
         setRuntime(status); setRuntimeError(''); failures = 0
         if (result.error || !result.data) throw new Error('Unable to refresh peer statistics.')
         if (epoch === mutationEpochRef.current) {
           const fresh = new Map(result.data.map(peer => [peer.id, peer]))
           setPeers(previous => previous.map(peer => { const stats = fresh.get(peer.id); return stats ? { ...peer, received_bytes: stats.received_bytes, sent_bytes: stats.sent_bytes, last_handshake_unix: stats.last_handshake_unix } : peer }))
+          sampleTraffic(result.data)
           setSampledAt(new Date())
         }
-      } catch (e) { if (!stopped && session === sessionRef.current) { failures = Math.min(3, failures + 1); setRuntimeError(e instanceof Error ? e.message : 'Runtime status unavailable.') } }
+      } catch (e) { if (!stopped && session === sessionRef.current) { resetTraffic(); failures = Math.min(3, failures + 1); setRuntimeError(e instanceof Error ? e.message : 'Runtime status unavailable.') } }
       finally { polling = false; schedule() }
     }
-    const visibility = () => { window.clearTimeout(timer); if (!document.hidden) void poll() }
+    const visibility = () => { ++visibilityGeneration; window.clearTimeout(timer); resetTraffic(); if (!document.hidden) void poll() }
     document.addEventListener('visibilitychange', visibility); void poll()
     return () => { stopped = true; window.clearTimeout(timer); document.removeEventListener('visibilitychange', visibility) }
-  }, [connected, setup?.configured])
+  }, [connected, setup?.configured, sampleTraffic, resetTraffic])
 
   const enter = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -248,6 +253,7 @@ export default function App() {
   const signOut = () => {
     if (policyDirty && !confirm('Sign out and discard unsaved policy changes?')) return
     if (provision && !provisionRetained && !confirmDiscardConfig()) return
+    resetTraffic(true)
     ++sessionRef.current; ++policyVersionRef.current
     ++provisionGenerationRef.current
     policyPendingRef.current = false; policyUncertainRef.current = false
@@ -261,7 +267,7 @@ export default function App() {
   const activeSession = sessionRef.current
   const activeProvisionGeneration = provisionGenerationRef.current
   const filteredPeers = peers.filter(p => `${p.name} ${p.ipv4} ${groupName(groups, p.group_id)}`.toLowerCase().includes(query.toLowerCase()))
-  const stats = useMemo(() => ({ online: peers.filter(p => Date.now() / 1000 - (p.last_handshake_unix ?? 0) < 180).length, sent: peers.reduce((s, p) => s + p.sent_bytes, 0), received: peers.reduce((s, p) => s + p.received_bytes, 0) }), [peers])
+  const stats = useMemo(() => ({ online: peers.filter(p => Date.now() / 1000 - (p.last_handshake_unix ?? 0) < 180).length, transferred: peers.reduce((s, p) => s + p.received_bytes, 0) }), [peers])
 
   if (!connected) return <Login token={token} setToken={setToken} onSubmit={enter} error={loginError} busy={loginBusy} />
   if (setup && !setup.configured) return <SetupWizard onConfigured={settings => { setSetup({ configured: true, settings }); setPage('overview') }} />
@@ -286,7 +292,7 @@ export default function App() {
       <div className="content-wrap" id="main-content" tabIndex={-1}>
         <div className="runtime-strip" role="status"><span className={`status-dot ${!runtime || runtimeError || !runtime.ready || runtime.applied_revision !== runtime.persisted_revision ? 'status-pending' : ''}`} /><b>{runtimeError ? 'Status unavailable' : !runtime ? 'Checking runtime' : !runtime.ready ? 'Runtime unavailable' : runtime.applied_revision !== runtime.persisted_revision ? 'Activating configuration' : 'Runtime ready'}</b><span>{runtimeError || (runtime?.last_activation_error ? 'Configuration activation failed; automatic recovery is running.' : sampledAt ? `Statistics updated ${sampledAt.toLocaleTimeString('en-US')}` : 'Awaiting statistics')}</span></div>
         {error && <div className="error-banner" role="alert"><CircleHelp size={18} /><span>{error}</span><button onClick={() => void load()}>Retry</button></div>}
-        {page === 'overview' && <Overview peers={peers} groups={groups} forwards={forwards} stats={stats} busy={busy} settings={setup?.settings ?? null} updatedAt={updatedAt} setPage={navigate} />}
+        {page === 'overview' && <Overview peers={peers} groups={groups} forwards={forwards} stats={stats} traffic={traffic} busy={busy} settings={setup?.settings ?? null} updatedAt={updatedAt} setPage={navigate} />}
         {page === 'peers' && <PeersPage peers={filteredPeers} allCount={peers.length} groups={groups} query={query} setQuery={setQuery} onCreate={() => setModal({ kind: 'peer' })} pendingPeers={pendingPeers} onCopied={() => setToast('IP copied')} onCopyError={() => setToast('Copy failed. Select the IP to copy it.')} onMove={async (peer, groupId) => {
           if (!beginPeerMutation(peer.id)) return
           const session = sessionRef.current; setError('')
@@ -432,12 +438,11 @@ function Login({ token, setToken, onSubmit, error, busy }: { token: string; setT
 function PageHeading({ title, count, action }: { title: string; count?: string; action?: ReactNode }) {
   return <div className="page-heading"><div><h1>{title}</h1>{count && <span className="heading-count">{count}</span>}</div>{action}</div>
 }
-function Overview({ peers, groups, forwards, stats, busy, settings, updatedAt, setPage }: { peers: Peer[]; groups: Group[]; forwards: Forward[]; stats: { online: number; sent: number; received: number }; busy: boolean; settings: NetworkSettings | null; updatedAt: Date | null; setPage: (p: Page) => void }) {
-  const total = stats.sent + stats.received
+function Overview({ peers, groups, forwards, stats, traffic, busy, settings, updatedAt, setPage }: { peers: Peer[]; groups: Group[]; forwards: Forward[]; stats: { online: number; transferred: number }; traffic: Traffic; busy: boolean; settings: NetworkSettings | null; updatedAt: Date | null; setPage: (p: Page) => void }) {
   return <div className="page-enter"><PageHeading title="Overview" action={<span className="update-time"><RefreshCw size={13} className={busy ? 'spin' : ''} />{busy ? 'Refreshing' : updatedAt ? updatedAt.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }) : 'Awaiting data'}</span>} />
     {settings && <section className="hub-summary"><div className="hub-identity"><Network size={22} /><div><b>Private network</b><span>WireGuard / IPv4</span></div></div><div><small>Subnet</small><b className="mono">{settings.subnet}</b></div><div><small>Endpoint</small><b className="mono">{settings.endpoint}</b></div><button className="icon-button" aria-label="Network settings" onClick={() => setPage('settings')}><ArrowUpRight size={18} /></button></section>}
-    <section className="metric-grid" aria-label="Network metrics"><Metric icon={<Network />} label="Peers" value={String(peers.length).padStart(2, '0')} /><Metric icon={<Activity />} label="Recent handshakes" value={String(stats.online).padStart(2, '0')} foot="Last 3 minutes" /><Metric icon={<ArrowUpRight />} label="Sent" value={formatBytes(stats.sent)} /><Metric icon={<ArrowDownLeft />} label="Received" value={formatBytes(stats.received)} /></section>
-    <div className="overview-grid"><section className="panel traffic-panel"><div className="panel-head"><h2>Traffic</h2><span className="badge">Cumulative</span></div><div className="traffic-value mono">{formatBytes(total)}</div><div className="traffic-breakdown"><div><span className="legend-dot" />Sent <b className="mono">{formatBytes(stats.sent)}</b></div><div><span className="legend-dot received" />Received <b className="mono">{formatBytes(stats.received)}</b></div></div><div className="composition-track" role="img" aria-label={`Cumulative traffic: sent ${formatBytes(stats.sent)}, received ${formatBytes(stats.received)}`}><span style={{ width: `${total ? stats.sent / total * 100 : 0}%` }} /><i style={{ width: `${total ? stats.received / total * 100 : 0}%` }} /></div><div className="composition-caption"><span>Sent {total ? Math.round(stats.sent / total * 100) : 0}%</span><span>Received {total ? Math.round(stats.received / total * 100) : 0}%</span></div></section>
+    <section className="metric-grid" aria-label="Network metrics"><Metric icon={<Network />} label="Peers" value={String(peers.length).padStart(2, '0')} /><Metric icon={<Activity />} label="Recent handshakes" value={String(stats.online).padStart(2, '0')} foot="Last 3 minutes" /><Metric icon={<ArrowLeftRight />} label="Transferred" value={formatBytes(stats.transferred)} foot="Each transfer counted once" /><Metric icon={<Gauge />} label="Current rate" value={traffic.rate === null ? '—' : formatRate(traffic.rate)} foot={traffic.rate === null ? 'Waiting for two fresh samples' : '5 s sample average'} /></section>
+    <div className="overview-grid"><section className="panel traffic-panel"><div className="panel-head"><h2>Live traffic</h2><span className="badge">5 s refresh</span></div><div className="traffic-value mono">{traffic.rate === null ? '—' : formatRate(traffic.rate)}</div><TrafficChart traffic={traffic} formatRate={formatRate} /><p className="traffic-note">{traffic.rate === null ? 'Collecting fresh samples while this tab is visible.' : 'Delivered peer traffic, counted once per transfer.'}</p></section>
     <section className="panel group-panel"><div className="panel-head"><h2>Groups</h2><button className="icon-button" aria-label="Open groups" onClick={() => setPage('groups')}><ArrowUpRight size={17} /></button></div>{busy ? <Loading /> : groups.length ? <div className="group-overview-list">{groups.slice(0, 5).map(g => <button className="group-overview-item" key={g.id} onClick={() => setPage('groups')}><span className="group-symbol"><GitBranch size={16} /></span><b>{g.name}</b><span className="mono">{peers.filter(p => p.group_id === g.id).length}<small> peers</small></span></button>)}</div> : <Empty title="No groups yet" action={<button className="text-action" onClick={() => setPage('groups')}>Create a group <ArrowUpRight size={14} /></button>} />}</section></div>
     <section className="panel recent-panel"><div className="panel-head"><h2>Peers</h2><button className="text-action" onClick={() => setPage('peers')}>View all <ArrowUpRight size={14} /></button></div>{peers.length ? <div className="mini-peer-list">{[...peers].sort((a, b) => (b.last_handshake_unix ?? 0) - (a.last_handshake_unix ?? 0)).slice(0, 4).map(p => <div className="mini-peer" key={p.id}><div className="avatar">{initials(p.name)}</div><div className="mini-peer-main"><b>{p.name}</b><small className="mono">{p.ipv4}</small></div><span className={`connection-dot ${Date.now() / 1000 - (p.last_handshake_unix ?? 0) < 180 ? 'is-online' : ''}`} /><span className="mini-status">{timeAgo(p.last_handshake_unix)}</span><span className="mini-traffic mono">↑ {formatBytes(p.sent_bytes)} <i>/</i> ↓ {formatBytes(p.received_bytes)}</span></div>)}</div> : <Empty title="No peers yet" action={<button className="text-action" onClick={() => setPage('peers')}>Add a peer <Plus size={14} /></button>} />}</section><div className="overview-foot"><span><Shield size={13} /> Default deny</span><span>{forwards.length} forwards</span></div>
   </div>

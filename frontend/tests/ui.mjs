@@ -423,6 +423,60 @@ try {
         appliedRevision = revision; failSave = false
         await page.getByRole('button', { name: 'Reload policy', exact: true }).click(); await poll(async () => await page.getByRole('switch', { name: 'Intra-group access' }).isEnabled(), 'Confirmed activation unlocks')
       },
+      'traffic-sampling': async () => {
+        await navigate('Overview')
+        await page.getByText('Runtime ready', { exact: true }).waitFor()
+        await page.clock.pauseAt(await page.evaluate(() => Date.now()) + 1000)
+        const rate = page.locator('.metric-card').filter({ hasText: 'Current rate' }).locator('.metric-value')
+        const transferred = page.locator('.metric-card').filter({ hasText: 'Transferred' }).locator('.metric-value')
+        assert.equal(await transferred.innerText(), '92.2 MB', 'Internal traffic uses one side of the transfer')
+        assert.equal(await page.locator('.metric-label').filter({ hasText: /^(Sent|Received)$/ }).count(), 0)
+        const tick = async () => {
+          const response = page.waitForResponse(r => new URL(r.url()).pathname === '/api/peers')
+          await page.clock.runFor(5001); await (await response).finished(); await page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
+        }
+        await tick(); assert.equal(await rate.innerText(), '0 B/s', 'Idle is a measured zero')
+        peers[0].received_bytes += 500_000; peers[0].sent_bytes += 500_000
+        await tick(); assert.equal(await rate.innerText(), '100 KB/s', 'Rate counts each transfer once')
+        assert.equal(await transferred.innerText(), '92.7 MB')
+        peers[0].received_bytes += 500_000
+        const delayed = holdNext('GET', '/api/peers')
+        await page.clock.runFor(5001); await delayed.requested
+        await page.clock.runFor(5000); await delayed.release(); await page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
+        assert.equal(await rate.innerText(), '50 KB/s', 'Delayed responses use actual elapsed time')
+        await screenshot('traffic-live')
+        peers[0].received_bytes = 0
+        await tick(); assert.equal(await rate.innerText(), '—', 'Counter resets establish a new baseline')
+        peers[0].received_bytes = 500_000
+        await tick(); assert.equal(await rate.innerText(), '100 KB/s')
+        peers.push({ ...peers[0], id: 'traffic-new', received_bytes: 1_000_000_000 })
+        await tick(); assert.equal(await rate.innerText(), '—', 'New peer counters do not become a rate spike')
+        peers.pop(); await tick(); assert.equal(await rate.innerText(), '—', 'Removed peers establish a new baseline')
+        await tick(); assert.equal(await rate.innerText(), '0 B/s')
+        failStatus = true
+        await tick(); assert.equal(await rate.innerText(), '—', 'Failed polling clears stale speed')
+        failStatus = false
+        const recovery = page.waitForResponse(r => new URL(r.url()).pathname === '/api/peers')
+        await page.clock.runFor(10001); await (await recovery).finished(); await page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
+        assert.equal(await rate.innerText(), '—', 'Recovery starts with a fresh baseline')
+        await tick(); assert.equal(await rate.innerText(), '0 B/s')
+        await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, value: true }); document.dispatchEvent(new Event('visibilitychange')) })
+        assert.equal(await rate.innerText(), '—', 'Hidden tabs clear the current rate')
+        peers[0].received_bytes += 50_000_000
+        await page.clock.runFor(60001)
+        const foreground = page.waitForResponse(r => new URL(r.url()).pathname === '/api/peers')
+        await page.evaluate(() => { delete document.hidden; document.dispatchEvent(new Event('visibilitychange')) })
+        await (await foreground).finished(); await page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
+        assert.equal(await rate.innerText(), '—', 'Background traffic does not become a foreground spike')
+        await tick(); assert.equal(await rate.innerText(), '0 B/s')
+        await page.clock.runFor(300001); await page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
+        assert.ok(await page.locator('.traffic-point').count() <= 61, 'Chart retains only the last five minutes')
+        await page.getByRole('button', { name: 'Administrator Sign out' }).click()
+        await login(); await refreshSettled(); await page.getByText('Runtime ready', { exact: true }).waitFor()
+        assert.equal(await rate.innerText(), '—', 'New sessions do not inherit the old rate')
+        assert.equal(await page.locator('.traffic-point').count(), 0, 'New sessions clear history')
+        await page.clock.resume()
+      },
       'runtime-polling': async () => {
         await page.getByText('Runtime ready', { exact: true }).waitFor()
         await page.clock.pauseAt(await page.evaluate(() => Date.now()) + 1000)

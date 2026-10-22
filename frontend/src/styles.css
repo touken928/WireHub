@@ -93,16 +93,13 @@ h2 { font-size: 14px; font-weight: 600; letter-spacing: -.2px; }
 .metric-foot { font-size: 9px; color: #a2adbb; margin-top: 7px; }
 .overview-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 22px; margin-bottom: 22px; }
 .traffic-panel, .group-panel { padding: 22px; min-height: 240px; }
-.traffic-value { margin: 28px 0 22px; font-size: 31px; letter-spacing: -1.5px; }
-.traffic-breakdown { display: flex; align-items: center; gap: 26px; font-size: 10px; color: #95a1b2; }
-.traffic-breakdown > div { display: flex; align-items: center; gap: 6px; }
-.traffic-breakdown b { font-size: 10px; color: #6d7c92; font-weight: 400; margin-left: 3px; }
-.legend-dot { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: #5376a9; }
-.legend-dot.received { background: #c6d4e9; }
-.composition-track { display: flex; height: 10px; margin: 24px 0 9px; background: #f1f4f8; overflow: hidden; border-radius: 4px; gap: 3px; }
-.composition-track span { background: #5376a9; }
-.composition-track i { background: #c6d4e9; }
-.composition-caption { display: flex; justify-content: space-between; font: 9px var(--mono); color: #a0adbf; }
+.traffic-value { margin: 24px 0 18px; font-size: 31px; letter-spacing: -1.5px; }
+.traffic-chart-scale, .traffic-chart-caption { display: flex; justify-content: space-between; gap: 12px; font-size: 9px; color: #8a99ad; }
+.traffic-chart svg { display: block; width: 100%; height: 100px; margin: 10px 0; overflow: visible; }
+.traffic-grid-line { stroke: #edf1f7; stroke-width: 1; }
+.traffic-line { fill: none; stroke: #5376a9; stroke-width: 2; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.traffic-point { fill: #5376a9; }
+.traffic-note { margin: 14px 0 0; font-size: 9px; line-height: 1.5; color: #8a99ad; }
 .group-overview-list { margin-top: 14px; }
 .group-overview-item { display: flex; align-items: center; gap: 12px; padding: 10px 0; background: transparent; border: 0; border-bottom: 1px solid #f0f3f7; text-align: left; width: 100%; }
 .group-overview-item:last-child { border-bottom: 0; }
@@ -360,7 +357,6 @@ h2 { font-size: 14px; font-weight: 600; letter-spacing: -.2px; }
   .hub-summary { padding: 18px; gap: 21px; }
   .overview-grid { gap: 16px; margin-bottom: 16px; }
   .traffic-panel, .group-panel, .recent-panel { padding: 18px; }
-  .traffic-breakdown { gap: 16px; }
   .peer-card { grid-template-columns: 32px minmax(0, 1fr) 28px; gap: 12px; padding: 15px; }
   .peer-delete { grid-column: 3; grid-row: 1; }
   .peer-row-details { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 12px; border-top: 1px solid var(--line); }

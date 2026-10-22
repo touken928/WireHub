@@ -12,6 +12,16 @@ Initial setup defaults to `10.10.10.0/24` (hub `.1`, peers `.2–.254`). The sub
 
 The dev server proxies `/api` to `127.0.0.1:51820`. Production assets are written to `frontend/dist`; rebuild the Rust binary to embed the latest UI.
 
+## Traffic
+
+Overview counts each delivered transfer once using the sum of hub receive counters,
+rather than adding both sides of the same internal transfer. Current rate is the
+byte delta divided by the actual interval between successful samples (normally
+5 seconds); the chart keeps the last 5 minutes of samples while signed in.
+The first sample, peer membership changes, counter resets, and recovery after a
+failed request or hidden tab establish a new baseline before showing a rate.
+Signing out clears the samples. Individual peer rows retain directional counters.
+
 ## Groups
 
 Drag any of the four handles to connect groups. One-way access follows the drag start → end; both-way access sets both existing ACLs. Select a link to reverse its direction or disconnect it, including with Delete/Backspace. Self-access has a separate switch. Changes apply only after **Save**; partial saves reload server policy, and uncertain results require a successful reload before further editing.
