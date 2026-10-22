@@ -8,7 +8,8 @@
     "build": "pnpm generate:api && tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "generate:api": "openapi-typescript ../openapi.json -o src/api/schema.d.ts",
-    "test:ui": "node tests/ui.mjs"
+    "test:ui": "node tests/ui.mjs",
+    "test:visual": "node tests/visual.mjs"
   },
   "dependencies": {
     "@xyflow/react": "^12.8.4",

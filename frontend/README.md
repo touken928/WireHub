@@ -56,3 +56,13 @@ The test serves the production bundle on a temporary loopback port and intercept
 Every run includes the core suite and all conflict, race and recovery scenarios.
 Screenshots and failure diagnostics are saved automatically under the repository's
 ignored `artifacts/ui/` directory. No test environment variables are required.
+
+## Visual alignment checks
+
+After building, run `pnpm --dir frontend test:visual` with Google Chrome installed.
+The isolated fixture suite captures every page at 320–1920 px, including long
+names, large counters, group/link details, dialogs, validation, empty states,
+policy conflicts and short windows. Geometry checks catch horizontal overflow,
+column drift, inconsistent heading positions, metric baselines, form alignment
+and dialog centering. Screenshots and the JSON report are saved to the ignored
+`artifacts/visual/` directory for visual review.
