@@ -26,6 +26,8 @@ jobs:
         run: python3 -m pip install ruff==0.16.1
       - name: Check Python style
         run: ruff format --check tests scripts && ruff check tests scripts
+      - name: Test kernel probe deadlines and integrity checks
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Check Go style and dependencies
         working-directory: tests/client
         run: |
@@ -85,9 +87,11 @@ jobs:
       - name: Run real Linux kernel WireGuard interoperability
         run: python3 tests/linux_kernel.py --output "$RUNNER_TEMP/linux-kernel.json"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: linux-kernel-interop
           path: ${{ runner.temp }}/linux-kernel.json
+          if-no-files-found: ignore
   userspace-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 30

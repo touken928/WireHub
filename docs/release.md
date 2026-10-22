@@ -52,6 +52,15 @@ edits, schema 5→6 paired backup/restore with a v1.1.0 source-baseline binary,
 schema 6 backup/restore, and five-minute endurance with automatic rekey.
 The exact tagged commit must pass all hosted gates before publication.
 
+The Linux-kernel TCP integrity gate sends and verifies 4 MiB on a single
+connection under a 60-second total deadline; small TCP probes retain a
+5-second budget. Progress never extends the total deadline, and the gate does
+not retry failed transfers. Failure reports distinguish connection errors,
+timeouts, premature EOF and byte mismatches, recording sent/received counts and
+elapsed time without packet contents or keys. CI uploads this evidence on both
+success and failure. Loopback regression tests cover delayed replies, trickling
+progress, corruption and truncation alongside the kernel interoperability job.
+
 ## 1.1.0 release
 
 - Edit forwards in place: name, protocol, port, target peer and allowed groups.

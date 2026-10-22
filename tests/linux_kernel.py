@@ -57,6 +57,7 @@ def run(output, build):
     token = secrets.token_urlsafe(32)
     docker("network", "create", network)
     started = time.monotonic()
+    measurements = []
     try:
         docker(
             "run",
@@ -203,7 +204,6 @@ def run(output, build):
                 "changes": [{"group_id": ga, "allowed_groups": [gb]}],
             },
         )
-        measurements = []
         for target in (ip_b, "172.27.91.1"):
             for protocol in ("tcp", "udp"):
                 result = helper(
@@ -284,11 +284,14 @@ def run(output, build):
         transfer = helper(
             a, "probe", {"protocol": "tcp", "target": "172.27.91.1", "bytes": 4 << 20}
         )
+        measurements.append({"protocol": "tcp", "mode": "forward-bulk", **transfer})
         check(
             transfer["ok"] and transfer["bytes"] == 4 << 20,
-            "Kernel 4 MiB TCP integrity failed",
+            "Kernel 4 MiB TCP integrity failed: "
+            f"{transfer.get('error', 'unknown')} during {transfer.get('phase', 'unknown')}; "
+            f"{transfer.get('bytes', 0)}/{4 << 20} bytes received, "
+            f"{transfer.get('sent_bytes', 0)} sent in {transfer.get('seconds', 0):.3f}s",
         )
-        measurements.append({"protocol": "tcp", "mode": "forward-bulk", **transfer})
         # Revoke while the same kernel interfaces, keys and listeners remain up.
         revision = request(url + "/api/config", token)["revision"]
         result = request(
@@ -377,6 +380,19 @@ def run(output, build):
         }
         write_report(output, report)
         print("PASS: real Linux kernel WireGuard interop; report " + str(output))
+    except Exception as error:
+        # Counters and error classes are safe; raw exceptions/configs can carry keys.
+        write_report(
+            output,
+            {
+                "client": "Linux kernel WireGuard",
+                "result": "failed",
+                "error_class": type(error).__name__,
+                "measurements": measurements,
+                "elapsed_seconds": time.monotonic() - started,
+            },
+        )
+        raise
     finally:
         for name in reversed(containers):
             subprocess.run(

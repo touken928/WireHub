@@ -3,12 +3,16 @@
 import configparser
 import hashlib
 import json
+import select
 import socket
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+
+TCP_PROBE_TIMEOUT = 5
+TCP_BULK_TIMEOUT = 60
 
 
 def command(*args, **kwargs):
@@ -74,6 +78,63 @@ def serve(address, port):
             udp.sendto(data, sender)
 
 
+def tcp_probe(target, port, payload, timeout):
+    """Exchange on one socket under a total deadline, including all progress."""
+    started = time.monotonic()
+    deadline = started + timeout
+    sent = received = 0
+    phase = "connect"
+    error = None
+    expected = memoryview(payload)
+    try:
+        with socket.create_connection(
+            (target, port), timeout=min(TCP_PROBE_TIMEOUT, timeout)
+        ) as connection:
+            connection.setblocking(False)
+            phase = "transfer"
+            while sent < len(payload) or received < len(payload):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                readable, writable, _ = select.select(
+                    [connection] if received < len(payload) else [],
+                    [connection] if sent < len(payload) else [],
+                    [],
+                    remaining,
+                )
+                if readable:
+                    try:
+                        part = connection.recv(min(65536, len(payload) - received))
+                    except BlockingIOError:
+                        continue
+                    if not part:
+                        error = "premature_eof"
+                        break
+                    matches = part == expected[received : received + len(part)]
+                    received += len(part)
+                    if not matches:
+                        error = "integrity_mismatch"
+                        break
+                if writable:
+                    try:
+                        sent += connection.send(expected[sent : sent + 65536])
+                    except BlockingIOError:
+                        continue
+    except TimeoutError:
+        error = "timeout"
+    except OSError:
+        error = "connection_error" if phase == "connect" else "io_error"
+    return {
+        "ok": error is None and sent == received == len(payload),
+        "bytes": received,
+        "sent_bytes": sent,
+        "expected_bytes": len(payload),
+        "seconds": time.monotonic() - started,
+        "phase": phase,
+        "error": error,
+    }
+
+
 def probe(request):
     protocol, target, port = (
         request["protocol"],
@@ -91,22 +152,12 @@ def probe(request):
                 check=True,
             )
         elif protocol == "tcp":
-            with socket.create_connection((target, port), timeout=5) as connection:
-                if request.get("bytes"):
-                    payload = bytes(
-                        (i * 31 + 17) & 255 for i in range(request["bytes"])
-                    )
-                writer = threading.Thread(target=connection.sendall, args=(payload,))
-                writer.start()
-                received = bytearray()
-                while len(received) < len(payload):
-                    part = connection.recv(min(65536, len(payload) - len(received)))
-                    if not part:
-                        raise OSError("premature EOF")
-                    received.extend(part)
-                writer.join(timeout=5)
-                if bytes(received) != payload:
-                    raise OSError("integrity mismatch")
+            bulk = bool(request.get("bytes"))
+            if bulk:
+                payload = bytes((i * 31 + 17) & 255 for i in range(request["bytes"]))
+            return tcp_probe(
+                target, port, payload, TCP_BULK_TIMEOUT if bulk else TCP_PROBE_TIMEOUT
+            )
         else:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
                 udp.settimeout(2)
