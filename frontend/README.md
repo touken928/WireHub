@@ -12,6 +12,12 @@ Initial setup defaults to `10.10.10.0/24` (hub `.1`, peers `.2–.254`). The sub
 
 The dev server proxies `/api` to `127.0.0.1:51820`. Production assets are written to `frontend/dist`; rebuild the Rust binary to embed the latest UI.
 
+After creating a peer, import its configuration by scanning the QR code in the
+WireGuard app, downloading the `.conf` file, or copying the configuration. The QR
+code is generated locally in the browser from the same configuration. Keep this
+panel open until the configuration is saved or imported; the private key cannot
+be retrieved later. **Done** confirms that the configuration has been retained.
+
 ## Traffic
 
 Overview counts each delivered transfer once using the sum of hub receive counters,

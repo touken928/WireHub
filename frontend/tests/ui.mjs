@@ -3,6 +3,9 @@ import { createServer } from 'node:http'
 import { readFile, mkdir, writeFile } from 'node:fs/promises'
 import { resolve, extname } from 'node:path'
 import { chromium } from 'playwright'
+import jsQR from 'jsqr'
+
+const peerConfig = '[Interface]\nPrivateKey = fixture-only\nAddress = 10.77.0.4/32\n\n[Peer]\nPublicKey = fixture-public-key\nAllowedIPs = 0.0.0.0/0\nEndpoint = vpn.example.com:51820\nPersistentKeepalive = 25\n'
 
 // Exercise the production bundle against isolated API fixtures; never touch a running hub.
 const dist = resolve(import.meta.dirname, '../dist')
@@ -132,7 +135,7 @@ try {
     if (path === '/api/groups' && method === 'POST') { const group = { id: 'new-group', ...body, allowed_groups: [] }; groups.push(group); commitConfig(); return reply(group) }
     if (path.startsWith('/api/groups/') && method === 'DELETE') { const id = path.split('/')[3]; groups = groups.filter(g => g.id !== id); groups.forEach(g => { g.allowed_groups = g.allowed_groups.filter(to => to !== id) }); forwards = forwards.map(f => ({ ...f, allowed_group_ids: f.allowed_group_ids.filter(to => to !== id) })); commitConfig(); return route.fulfill({ status: 204 }) }
     if (path === '/api/peers' && method === 'GET') return reply(peers)
-    if (path === '/api/peers' && method === 'POST') { if (peerCreateError) return textError(peerCreateError, 409); const id = peers.some(p => p.id === 'new-peer') ? `new-peer-${peers.length}` : 'new-peer'; const peer = { ...peers[0], ...body, id, ipv4: '10.77.0.4' }; peers.push(peer); commitConfig(); return reply({ peer, config: '[Interface]\nPrivateKey = fixture-only\nAddress = 10.77.0.4/32' }) }
+    if (path === '/api/peers' && method === 'POST') { if (peerCreateError) return textError(peerCreateError, 409); const id = peers.some(p => p.id === 'new-peer') ? `new-peer-${peers.length}` : 'new-peer'; const peer = { ...peers[0], ...body, id, ipv4: '10.77.0.4' }; peers.push(peer); commitConfig(); return reply({ peer, config: peerConfig }) }
     if (path.endsWith('/group')) { const peer = peers.find(p => p.id === path.split('/')[3]); peer.group_id = body.group_id; commitConfig(); return reply(peer) }
     if (path.startsWith('/api/peers/') && method === 'DELETE') { const id = path.split('/')[3]; peers = peers.filter(p => p.id !== id); forwards = forwards.filter(f => f.target_peer_id !== id); commitConfig(); return route.fulfill({ status: 204 }) }
     if (path === '/api/forwards' && method === 'GET') return reply(forwards)
@@ -289,6 +292,32 @@ try {
       await page.getByRole('button', { name: 'Create', exact: true }).click()
     }
     const scenarios = {
+      'provision-qr-import': async () => {
+        await newPeer('Phone'); await page.getByRole('heading', { name: 'Peer ready' }).waitFor()
+        for (const width of [1440, 390, 320]) {
+          await page.setViewportSize({ width, height: 844 })
+          const pixels = await page.getByRole('img', { name: 'WireGuard configuration QR code' }).evaluate(async svg => {
+            const size = Math.round(svg.getBoundingClientRect().width * 3)
+            const image = new Image()
+            image.src = `data:image/svg+xml;base64,${btoa(new XMLSerializer().serializeToString(svg))}`
+            await image.decode()
+            const canvas = document.createElement('canvas'); canvas.width = canvas.height = size
+            const context = canvas.getContext('2d'); context.drawImage(image, 0, 0, size, size)
+            return { data: Array.from(context.getImageData(0, 0, size, size).data), size }
+          })
+          const decoded = jsQR(new Uint8ClampedArray(pixels.data), pixels.size, pixels.size)
+          assert.equal(decoded?.data, peerConfig, `QR at ${width}px decodes to the exact multiline WireGuard configuration`)
+          await noOverflow(); await screenshot(`provision-qr-${width}`)
+        }
+        const before = dialogCount; acceptDialog = false
+        await page.keyboard.press('Escape'); await flushFrames()
+        assert.ok(dialogCount > before, 'Showing the QR code alone does not mark it as imported')
+        await page.getByRole('button', { name: 'Done', exact: true }).click()
+        assert.equal(dialogCount, before + 1, 'Done explicitly confirms import without another discard prompt')
+        assert.equal(await page.getByRole('dialog').count(), 0)
+        await page.setViewportSize({ width: 1440, height: 1000 })
+        acceptDialog = true
+      },
       'forward-create-refresh-before-ack': async () => {
         await navigate('Forwards')
         const refreshRead = holdNext('GET', '/api/setup')
@@ -890,8 +919,10 @@ try {
     const releasePeerCreate = await staleRefresh('/api/peers')
     await page.getByRole('button', { name: 'New peer', exact: true }).click(); await page.getByRole('dialog').getByLabel('Name', { exact: true }).fill('Test laptop'); await page.getByRole('button', { name: 'Create', exact: true }).click(); await page.getByRole('heading', { name: 'Peer ready' }).waitFor(); await english()
     await releasePeerCreate(); assert.equal(await page.locator('.peer-card').count(), 3, 'Old peers GET cannot drop a confirmed creation')
-    const download = page.waitForEvent('download'); await page.getByRole('button', { name: 'Download', exact: true }).click(); assert.equal((await download).suggestedFilename(), 'Test-laptop.conf')
-    await page.getByRole('button', { name: 'Saved. Close.' }).click()
+    const download = page.waitForEvent('download'); await page.getByRole('button', { name: 'Download', exact: true }).click(); const configDownload = await download
+    assert.equal(configDownload.suggestedFilename(), 'Test-laptop.conf')
+    assert.equal(await readFile(await configDownload.path(), 'utf8'), peerConfig, 'Downloaded file preserves the exact QR payload')
+    await page.getByRole('button', { name: 'Done', exact: true }).click()
     const releasePeerDelete = await staleRefresh('/api/peers')
     await page.getByLabel('Delete peer Test laptop').click(); await poll(async () => peers.length === 2 && await page.locator('.peer-card').count() === 2, 'Peer deleted')
     await releasePeerDelete(); assert.equal(await page.locator('.peer-card').count(), 2, 'Old peers GET cannot resurrect a deleted peer'); await screenshot('peers')

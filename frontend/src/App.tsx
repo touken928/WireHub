@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import {
   Activity, ArrowDownLeft, ArrowLeftRight, ArrowUpRight, Check, CircleHelp,
   Copy, Download, Gauge, GitBranch, KeyRound, LoaderCircle, LogOut,
-  Menu, Network, Pencil, Plus, Radio, RefreshCw, Search, Settings2, Shield, Trash2, X,
+  Menu, Network, Pencil, Plus, QrCode, Radio, RefreshCw, Search, Settings2, Shield, Trash2, X,
 } from 'lucide-react'
 import GroupsPage from './components/groups/GroupsPage'
 import TrafficChart from './components/TrafficChart'
 import { useTraffic, type Traffic } from './useTraffic'
 import Dialog from './components/Dialog'
+import PeerQRCode from './components/PeerQRCode'
 import ForwardDialog from './components/forwards/ForwardDialog'
 import '@xyflow/react/dist/style.css'
 import { ApiError, client, configApi, forwardsApi, mutationFailure, rememberToken, setupApi, type Configuration, type RuntimeStatus, type Forward, type NetworkSettings, type SetupStatus } from './api/client'
@@ -529,10 +530,11 @@ function CreateDialog({ kind, groups, session, isSessionCurrent, onClose, onCrea
     } catch (e) { if (isSessionCurrent(session)) setError(mutationFailure(e, 'Result unconfirmed. Refresh before retrying.')) }
     finally { if (isSessionCurrent(session)) setSaving(false) }
   }
-  return <Dialog title={kind === 'peer' ? 'New peer' : 'New group'} onClose={onClose} locked={saving}>
+  return <Dialog title={kind === 'peer' ? 'New peer' : 'New group'} onClose={onClose} locked={saving} className={kind === 'peer' ? 'create-peer-dialog' : ''}>
+    {kind === 'peer' && <div className="peer-dialog-intro"><span className="peer-dialog-symbol"><Network size={20} /></span><div><h3>Connect a device</h3><p>Name your device and choose its access group.</p></div></div>}
     <form className="stack-form" onSubmit={e => void submit(e)}><fieldset className="form-fields" disabled={saving}>
       <label className="form-label">Name<input value={name} onChange={e => setName(e.target.value)} placeholder={kind === 'peer' ? 'MacBook Pro' : 'Engineering'} required maxLength={128} /></label>
-    {kind === 'peer' && <><label className="form-label">Group<select aria-label="Group" value={groupId} onChange={e => setGroupId(e.target.value)} required><option value="" disabled>Select a group</option>{groups.map(g => <option value={g.id} key={g.id}>{g.name}</option>)}</select></label><p className="field-note"><KeyRound size={14} /> Download the configuration after creation. It is shown once.</p>{!groups.length && <div className="field-warning">Create a group first.</div>}</>}
+    {kind === 'peer' && <><label className="form-label">Group<select aria-label="Group" value={groupId} onChange={e => setGroupId(e.target.value)} required><option value="" disabled>Select a group</option>{groups.map(g => <option value={g.id} key={g.id}>{g.name}</option>)}</select></label><div className="peer-create-note"><KeyRound size={16} /><p>Next, scan a QR code or download your configuration.<span>The private key is shown only once.</span></p></div>{!groups.length && <div className="field-warning">Create a group first.</div>}</>}
     </fieldset>{error && <div className="form-error" role="alert">{error}</div>}
     <div className="dialog-actions"><button type="button" className="button button-quiet" disabled={saving} onClick={onClose}>Cancel</button><button className="button button-primary" disabled={saving || (kind === 'peer' && !groups.length)}>{saving && <LoaderCircle size={15} className="spin" />}{saving ? 'Creating…' : 'Create'}</button></div>
     </form>
@@ -546,5 +548,19 @@ function ProvisionDialog({ data, group, retained, onRetained, onClose }: { data:
     a.href = url; a.download = `${data.peer.name.replace(/[^a-z0-9-_]/gi, '-')}.conf`; a.click(); setDownloadStarted(true); onRetained(); window.setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
   const copy = async () => { try { await navigator.clipboard.writeText(data.config); setCopied(true); onRetained(); setError('') } catch { setError('Copy failed. Download the configuration instead.') } }
-  return <Dialog title="Peer ready" onClose={close}><div className="secret-warning"><KeyRound size={18} /><div><b>Save your configuration.</b><span>The private key is shown once and cannot be recovered.</span></div></div><div className="provision-details"><span>Peer</span><b>{data.peer.name}</b><span>Address</span><b className="mono">{data.peer.ipv4}/32</b><span>Group</span><b>{group}</b></div><details className="config-details"><summary>WireGuard configuration</summary><pre>{data.config}</pre></details>{error && <div className="form-error" role="alert">{error}</div>}<div className="dialog-actions"><button className="button button-quiet" onClick={() => void copy()}><Copy size={15} />{copied ? 'Copied' : 'Copy'}</button><button className="button button-primary" onClick={download}><Download size={15} />Download</button></div>{downloadStarted && <p className="field-note" role="status">Download started. Check that the configuration file was saved before closing.</p>}<button className="done-link" onClick={() => { onRetained(); onClose() }}>Saved. Close.</button></Dialog>
+  return <Dialog title="Peer ready" onClose={close} className="provision-dialog">
+    <div className="peer-dialog-intro"><span className="peer-dialog-symbol is-ready"><Check size={20} /></span><div><h3>Your configuration is ready</h3><p>Import it into WireGuard to connect your device.</p></div></div>
+    <div className="provision-layout">
+      <div className="provision-main">
+        <dl className="provision-details"><dt>Peer</dt><dd>{data.peer.name}</dd><dt>Address</dt><dd className="mono">{data.peer.ipv4}/32</dd><dt>Group</dt><dd>{group}</dd></dl>
+        <div className="secret-warning"><KeyRound size={16} /><div><b>Keep your configuration safe.</b><span>The private key and QR code are shown only now and cannot be recovered.</span></div></div>
+        <div className="provision-actions"><button className="button button-quiet" onClick={() => void copy()}>{copied ? <Check size={15} /> : <Copy size={15} />}{copied ? 'Copied' : 'Copy'}</button><button className="button button-primary" onClick={download}><Download size={15} />Download</button></div>
+        {downloadStarted && <p className="field-note" role="status">Download started. Check that the configuration file was saved before closing.</p>}
+        {error && <div className="form-error" role="alert">{error}</div>}
+      </div>
+      <section className="provision-scan" aria-labelledby="scan-title"><h3 id="scan-title"><QrCode size={15} />Scan to connect</h3><div className="provision-qr"><PeerQRCode config={data.config} /></div><p>In the WireGuard app, tap <b>+</b> and choose <b>Create from QR code</b>.</p></section>
+    </div>
+    <details className="config-details"><summary>WireGuard configuration</summary><pre>{data.config}</pre></details>
+    <div className="provision-footer"><p>Saved the file or imported the QR code?<br />You can close this panel.</p><button className="button button-quiet" onClick={() => { onRetained(); onClose() }}><Check size={15} />Done</button></div>
+  </Dialog>
 }

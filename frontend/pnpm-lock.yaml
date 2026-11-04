@@ -17,6 +17,9 @@ importers:
       openapi-fetch:
         specifier: ^0.13.8
         version: 0.13.8
+      qrcode.react:
+        specifier: ^4.2.0
+        version: 4.2.0(react@18.3.1)
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -33,6 +36,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^4.3.4
         version: 4.7.0(supports-color@10.2.2)(vite@5.4.21)
+      jsqr:
+        specifier: ^1.4.0
+        version: 1.4.0
       openapi-typescript:
         specifier: ^7.6.1
         version: 7.13.0(typescript@5.6.3)
@@ -657,6 +663,9 @@ packages:
     engines: {node: '>=6'}
     hasBin: true
 
+  jsqr@1.4.0:
+    resolution: {integrity: sha512-dxLob7q65Xg2DvstYkRpkYtmKm2sPJ9oFhrhmudT1dZvNFFTlroai3AWSpLey/w5vMcLBXRgOJsbXpdN9HzU/A==}
+
   loose-envify@1.4.0:
     resolution: {integrity: sha512-lyuxPGr/Wfhrlem2CL/UcnUc1zcqKAImBDzukY7Y5F/yQiNdko6+fRLevlw1HgMySw7f611UIY408EtxRSoK3Q==}
     hasBin: true
@@ -721,6 +730,11 @@ packages:
   postcss@8.5.28:
     resolution: {integrity: sha512-RRuzqDtt5Y9h3quz5hWhK+TPnsmVs6WwSU6LkJMeY4HstUEDuYTG8UJSdawMRzmzAtV+KEoG8N3Qg2qLy5vM/A==}
     engines: {node: ^10 || ^12 || >=14}
+
+  qrcode.react@4.2.0:
+    resolution: {integrity: sha512-QpgqWi8rD9DsS9EP3z7BT+5lY5SFhsqGjpgW5DY/i3mK4M9DTBNz3ErMi8BWYEfI3L0d8GIbGmcdFAS1uIRGjA==}
+    peerDependencies:
+      react: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
 
   react-dom@18.3.1:
     resolution: {integrity: sha512-5m4nQKp+rZRb09LNH59GM4BxTh9251/ylbKIbpe7TpGxfJ+9kv6BLkLBXIjjspbgbnIBNqlI23tRnTWT0snUIw==}
@@ -1371,6 +1385,8 @@ snapshots:
 
   json5@2.2.3: {}
 
+  jsqr@1.4.0: {}
+
   loose-envify@1.4.0:
     dependencies:
       js-tokens: 4.0.0
@@ -1430,6 +1446,10 @@ snapshots:
       nanoid: 3.3.19
       picocolors: 1.1.1
       source-map-js: 1.2.1
+
+  qrcode.react@4.2.0(react@18.3.1):
+    dependencies:
+      react: 18.3.1
 
   react-dom@18.3.1(react@18.3.1):
     dependencies:

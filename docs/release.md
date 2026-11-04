@@ -1,6 +1,6 @@
 # Release verification
 
-Release target: **1.2.0**, schema **6**. The acceptance scope is one Hub,
+Release target: **1.3.0**, schema **6**. The acceptance scope is one Hub,
 a private IPv4 /24, Linux servers and the embedded management UI. Mobile testing
 is excluded and desktop interoperability is deferred for this acceptance.
 Supported behavior and network limitations are in [operations](operations.md).
@@ -28,6 +28,22 @@ container architectures also passed version/build-ID, startup and embedded-UI
 checks. Its reports and binary artifacts are retained with that workflow run.
 The tag-triggered release workflow repeats the gates on the exact tagged commit
 before publishing binaries, checksums, containers and a GitHub release (prerelease for RC tags).
+
+## 1.3.0 release
+
+- Refine peer creation and provisioning panels with aligned device details,
+  consistent spacing and responsive layouts matching the management UI.
+- Import new peer configurations by scanning a locally generated QR code in the
+  WireGuard app, alongside the existing copy and download options.
+- Preserve one-time configuration dismissal protection until the configuration
+  is retained or the user confirms import with **Done**.
+- Preserve database schema 6 and the existing peer API contract.
+
+Local verification passed the production frontend build, UI regression suite,
+QR decoding at 320, 390 and 1440 px, exact downloaded configuration contents, and
+242 visual captures with no alignment findings. These checks use isolated API
+fixtures; they do not establish mobile WireGuard interoperability acceptance.
+The exact tagged commit must pass all hosted gates before publication.
 
 ## 1.2.0 release
 
@@ -131,7 +147,7 @@ actionlint
 pnpm --dir frontend test:ui
 target/release/wirehub export-openapi > /tmp/wirehub-openapi.json
 cmp openapi.json /tmp/wirehub-openapi.json
-python3 scripts/check-release.py --tag v1.2.0 --binary target/release/wirehub
+python3 scripts/check-release.py --tag v1.3.0 --binary target/release/wirehub
 ```
 
 CI also compiles all targets with the minimum supported Rust **1.89.0**.
