@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: extended-endurance-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   endurance:
     runs-on: ubuntu-latest
@@ -22,12 +26,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9.15.9
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-frontend
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.x'
@@ -36,7 +36,6 @@ jobs:
         env:
           WIREHUB_BUILD_ID: ${{ github.sha }}
         run: |
-          pnpm --dir frontend install --frozen-lockfile
           pnpm --dir frontend build
           cargo build --release --locked
           python3 scripts/check-release.py --binary target/release/wirehub --build-id "$WIREHUB_BUILD_ID"
@@ -45,7 +44,8 @@ jobs:
           DURATION: ${{ inputs.seconds }}
         run: python3 tests/soak.py --binary target/release/wirehub --seconds "$DURATION" --output "$RUNNER_TEMP/rc-endurance.json"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: extended-rc-endurance
           path: ${{ runner.temp }}/rc-endurance.json
-          if-no-files-found: error
+          if-no-files-found: ignore

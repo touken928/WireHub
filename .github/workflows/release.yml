@@ -8,7 +8,10 @@ on:
 
 permissions:
   contents: read
-  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   IMAGE_NAME: ghcr.io/touken928/wirehub
@@ -16,6 +19,7 @@ env:
 jobs:
   release-contract:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -25,6 +29,7 @@ jobs:
         env:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           if [ "$REF_TYPE" = tag ]; then
             python3 scripts/check-release.py --tag "$REF_NAME"
@@ -32,7 +37,9 @@ jobs:
             python3 scripts/check-release.py
           fi
           python3 -c 'import tomllib; print("version=" + tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])' >> "$GITHUB_OUTPUT"
+          python3 scripts/release-notes.py --repository "$REPOSITORY" > /dev/null
   verify:
+    needs: release-contract
     permissions:
       contents: read
     uses: ./.github/workflows/integration.yml
@@ -56,19 +63,18 @@ jobs:
             target: aarch64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9.15.9
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
       - name: Install Linux build tools
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: Build frontend
-        run: pnpm --dir frontend install --frozen-lockfile && pnpm --dir frontend build
       - name: Build release binary
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
@@ -133,6 +139,9 @@ jobs:
 
   build:
     needs: [verify, release-contract]
+    permissions:
+      contents: read
+      packages: write
     name: Build ${{ matrix.arch }} image
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -234,6 +243,10 @@ jobs:
     if: github.event_name == 'push'
     needs: [verify, release-contract, build, binaries]
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -271,9 +284,11 @@ jobs:
     if: github.event_name == 'push'
     needs: [verify, release-contract, binaries, publish]
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -282,56 +297,17 @@ jobs:
       - name: Generate checksums
         working-directory: dist
         run: sha256sum wirehub-* > SHA256SUMS
+      - name: Generate version-specific release notes
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: python3 scripts/release-notes.py --repository "$REPOSITORY" > "$RUNNER_TEMP/release-notes.md"
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           fail_on_unmatched_files: true
+          body_path: ${{ runner.temp }}/release-notes.md
           files: |
             dist/wirehub-*
             dist/SHA256SUMS
-          body: |
-            ## Changes
-
-            - Edit forward names, protocols, ports, target peers and allowed groups with revision checks and acknowledged activation.
-            - Authorize forwarded services independently of direct Groups ACLs; service grants apply only to their configured protocol and port.
-            - Simplify Groups controls and member details.
-            - Fix duplicate forward cards during refresh/create races and dialog focus while loading.
-            - Refactor forward editing and reply routing; index rules once per flow reconciliation.
-
-            ## Acceptance and upgrade
-
-            This release targets Linux servers with one Hub and a private IPv4 /24.
-            Mobile and desktop interoperability are outside this release's acceptance scope.
-            Review the [supported network behavior](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/operations.md#supported-scope)
-            and [release verification](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/release.md).
-
-            **Forward authorization change:** review existing forward allowlists before upgrading.
-            Their allowed groups can now use the configured service even when direct group
-            access is denied. Revoke service access through the forward's allowed groups;
-            changing direct Groups ACLs does not revoke independent service grants.
-
-            The database schema remains 5. Before upgrading, stop the service and preserve a
-            verified database/Hub-key pair. Rollback requires restoring the pre-upgrade pair;
-            do not open a migrated database with an older binary. See the
-            [backup and rollback procedure](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/operations.md#paired-backup-upgrade-and-rollback).
-
-            ## Downloads
-
-            | Platform | Binary |
-            | --- | --- |
-            | Linux amd64 | `wirehub-${{ github.ref_name }}-linux-amd64` |
-            | Linux arm64 | `wirehub-${{ github.ref_name }}-linux-arm64` |
-
-            Download the binary for your platform. The web UI is included.
-            Set `WIREHUB_ADMIN_TOKEN`, start WireHub, and open http://localhost:51820.
-            See the [README](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md) for startup commands.
-
-            ## Docker
-
-            ```sh
-            docker pull ghcr.io/touken928/wirehub:${{ needs.release-contract.outputs.version }}
-            ```
-
-            Supports Linux amd64 and arm64. `SHA256SUMS` contains checksums for the binaries.

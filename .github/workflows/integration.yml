@@ -2,12 +2,18 @@ name: Userspace integration
 
 on:
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
   workflow_call:
 
 permissions:
   contents: read
+
+# The caller's workflow name distinguishes release verification from branch CI.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
   test-style:
@@ -22,6 +28,12 @@ jobs:
         with:
           go-version: '1.26.x'
           cache-dependency-path: tests/client/go.sum
+      - name: Install workflow linter
+        uses: taiki-e/install-action@v2
+        with:
+          tool: actionlint
+      - name: Check workflows
+        run: actionlint
       - name: Install development formatter
         run: python3 -m pip install ruff==0.16.1
       - name: Check Python style
@@ -34,7 +46,26 @@ jobs:
           GO_UNFORMATTED=$(gofmt -l main.go main_test.go)
           test -z "$GO_UNFORMATTED"
           go mod tidy -diff
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-frontend
+      - name: Build embedded frontend
+        run: pnpm --dir frontend build
+      - name: Audit frontend production dependencies
+        run: pnpm --dir frontend audit --prod --audit-level high
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+          retention-days: 7
+
   quality:
+    needs: frontend
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -42,117 +73,152 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: actions/setup-node@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
         with:
-          node-version: 22
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9.15.9
-      - name: Build embedded frontend
-        run: pnpm --dir frontend install --frozen-lockfile && pnpm --dir frontend build
+          name: frontend-dist
+          path: frontend/dist
       - name: Check package version agreement
         run: python3 scripts/check-release.py
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Audit frontend production dependencies
-        run: pnpm --dir frontend audit --prod --audit-level high
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
       - name: Audit Rust dependencies
         run: cargo audit
+
   minimum-rust:
+    needs: frontend
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89.0
-      - uses: actions/setup-node@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
         with:
-          node-version: 22
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9.15.9
-      - name: Build embedded frontend
-        run: pnpm --dir frontend install --frozen-lockfile && pnpm --dir frontend build
+          name: frontend-dist
+          path: frontend/dist
       - name: Check minimum supported Rust
         run: cargo check --locked --all-targets
+
   linux-kernel-interop:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v4
+      - name: Build kernel interoperability images
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          load: true
+          tags: wirehub:interop-hub
+          cache-from: type=gha,scope=kernel-interop
+          cache-to: type=gha,mode=max,scope=kernel-interop
+      - name: Build kernel client fixture
+        run: docker build -t wirehub:interop-client tests/linux-kernel
       - name: Run real Linux kernel WireGuard interoperability
-        run: python3 tests/linux_kernel.py --output "$RUNNER_TEMP/linux-kernel.json"
+        run: python3 tests/linux_kernel.py --skip-build --output "$RUNNER_TEMP/linux-kernel.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: linux-kernel-interop
           path: ${{ runner.temp }}/linux-kernel.json
           if-no-files-found: ignore
+
   userspace-integration:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26.x'
-          cache-dependency-path: tests/client/go.sum
-      - name: Set up pnpm
-        run: corepack enable && corepack prepare pnpm@9.15.9 --activate
-      - name: Run userspace, weak-network and client tests
-        run: python3 tests/integration.py
-      - name: Run operations acceptance
-        run: python3 tests/operations.py --output "$RUNNER_TEMP/operations.json"
-      - name: Run release RC endurance gate
-        run: cargo build --release --locked && python3 tests/soak.py --binary target/release/wirehub --seconds 300 --output "$RUNNER_TEMP/rc-endurance.json"
-      - name: Upload operations and endurance evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: operations-and-endurance
-          path: |
-            ${{ runner.temp }}/operations.json
-            ${{ runner.temp }}/rc-endurance.json
-      - name: Run Rust tests
-        run: cargo test --locked
-      - name: Run release routing and capacity baseline
-        run: python3 tests/performance.py --output "$RUNNER_TEMP/performance.json"
-      - name: Upload performance measurements
-        uses: actions/upload-artifact@v4
-        with:
-          name: routing-performance
-          path: ${{ runner.temp }}/performance.json
-      - name: Verify checked-in OpenAPI contract
-        run: cargo run --locked -- export-openapi > "$RUNNER_TEMP/openapi.json" && cmp openapi.json "$RUNNER_TEMP/openapi.json"
-  frontend-ui:
+    needs: frontend
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
         with:
-          node-version: 22
-      - name: Set up pnpm
-        run: corepack enable && corepack prepare pnpm@9.15.9 --activate
-      - name: Install frontend dependencies
-        run: pnpm --dir frontend install --frozen-lockfile
+          go-version: '1.26.x'
+          cache-dependency-path: tests/client/go.sum
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+      - name: Run userspace, weak-network and client tests
+        run: python3 tests/integration.py --skip-frontend-build
+      - name: Run operations acceptance
+        run: python3 tests/operations.py --output "$RUNNER_TEMP/operations.json"
+      - name: Run Rust tests
+        run: cargo test --locked
+      - name: Verify checked-in OpenAPI contract
+        run: target/debug/wirehub export-openapi > "$RUNNER_TEMP/openapi.json" && cmp openapi.json "$RUNNER_TEMP/openapi.json"
+      - name: Upload operations evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: operations
+          path: ${{ runner.temp }}/operations.json
+          if-no-files-found: ignore
+
+  endurance:
+    needs: frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: tests/client/go.sum
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+      - name: Build endurance binary
+        run: cargo build --release --locked
+      - name: Run five-minute encrypted endurance gate
+        run: python3 tests/soak.py --binary target/release/wirehub --seconds 300 --output "$RUNNER_TEMP/rc-endurance.json"
+      - name: Run release routing and capacity baseline
+        run: python3 tests/performance.py --output "$RUNNER_TEMP/performance.json"
+      - name: Upload endurance and performance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: endurance-and-performance
+          path: |
+            ${{ runner.temp }}/rc-endurance.json
+            ${{ runner.temp }}/performance.json
+          if-no-files-found: ignore
+
+  frontend-ui:
+    needs: frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-frontend
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
       - name: Install Playwright Chrome and system dependencies
         run: pnpm --dir frontend exec playwright install --with-deps chrome
-      - name: Build production frontend
-        run: pnpm --dir frontend build
       - name: Run complete isolated UI regression suite
         run: pnpm --dir frontend test:ui
-      - name: Upload UI screenshots
+      - name: Check responsive visual alignment
+        run: pnpm --dir frontend test:visual
+      - name: Upload UI and visual evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: wirehub-ui-screenshots
-          path: artifacts/ui
+          path: |
+            artifacts/ui
+            artifacts/visual
           if-no-files-found: ignore

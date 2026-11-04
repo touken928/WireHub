@@ -29,6 +29,16 @@ checks. Its reports and binary artifacts are retained with that workflow run.
 The tag-triggered release workflow repeats the gates on the exact tagged commit
 before publishing binaries, checksums, containers and a GitHub release (prerelease for RC tags).
 
+Branch pushes and pull requests run integration checks. Version tags run only
+the Release workflow, which calls the same integration workflow once. New branch
+runs cancel obsolete runs; release and extended-endurance runs are not cancelled.
+One frontend artifact is shared by Rust checks, UI tests and release binaries;
+container builds remain self-contained. pnpm, Rust and Docker caches reduce repeat
+work. The five-minute endurance gate and performance baseline run in parallel
+with userspace integration; all remain required before publishing. UI evidence
+includes responsive visual alignment checks, and diagnostic reports are retained
+on failure. Release notes are generated from the matching version section below.
+
 ## 1.3.0 release
 
 - Refine peer creation and provisioning panels with aligned device details,
@@ -38,6 +48,8 @@ before publishing binaries, checksums, containers and a GitHub release (prerelea
 - Preserve one-time configuration dismissal protection until the configuration
   is retained or the user confirms import with **Done**.
 - Preserve database schema 6 and the existing peer API contract.
+- Reuse frontend artifacts, cache build dependencies and run endurance checks in
+  parallel; version tags trigger one gated release workflow with current notes.
 
 Local verification passed the production frontend build, UI regression suite,
 QR decoding at 320, 390 and 1440 px, exact downloaded configuration contents, and

@@ -852,15 +852,32 @@ def run_scenario(directory, client_binary):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.parse_args()
-    for command in ("pnpm", "cargo", "go"):
+    parser.add_argument(
+        "--skip-frontend-build",
+        action="store_true",
+        help="Use an existing frontend/dist artifact; still build and test Rust and Go",
+    )
+    args = parser.parse_args()
+    for command in (
+        ("cargo", "go") if args.skip_frontend_build else ("pnpm", "cargo", "go")
+    ):
         if shutil.which(command) is None:
             raise RuntimeError(f"Missing required command: {command}")
+    if args.skip_frontend_build:
+        check(
+            (ROOT / "frontend/dist/index.html").is_file(),
+            "Build or download frontend/dist before skipping the frontend build",
+        )
+    else:
+        subprocess.run(
+            ["pnpm", "--dir", "frontend", "install", "--frozen-lockfile"],
+            cwd=ROOT,
+            check=True,
+        )
+        subprocess.run(["pnpm", "--dir", "frontend", "build"], cwd=ROOT, check=True)
     with tempfile.TemporaryDirectory(prefix="wirehub-integration-") as temporary:
         directory = Path(temporary)
         for command, cwd in (
-            (["pnpm", "--dir", "frontend", "install", "--frozen-lockfile"], ROOT),
-            (["pnpm", "--dir", "frontend", "build"], ROOT),
             (
                 ["cargo", "build", "--locked", "--target-dir", str(ROOT / "target")],
                 ROOT,
