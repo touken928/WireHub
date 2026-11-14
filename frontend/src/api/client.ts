@@ -46,8 +46,8 @@ export const configApi = {
     if (!response.ok || !data) throwApiError(response.status, error)
     return data
   },
-  async status(): Promise<RuntimeStatus> {
-    const { data, error, response } = await client.GET('/api/status', { cache: 'no-store' })
+  async status(signal?: AbortSignal): Promise<RuntimeStatus> {
+    const { data, error, response } = await client.GET('/api/status', { cache: 'no-store', signal })
     if (!response.ok || !data) throwApiError(response.status, error)
     return data
   },

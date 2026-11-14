@@ -5,6 +5,8 @@ import { resolve, extname } from 'node:path'
 import { chromium } from 'playwright'
 import jsQR from 'jsqr'
 
+const requestedScenarios = (process.env.WIREHUB_UI_SCENARIOS ?? '').split(',').filter(Boolean)
+
 const peerConfig = '[Interface]\nPrivateKey = fixture-only\nAddress = 10.77.0.4/32\n\n[Peer]\nPublicKey = fixture-public-key\nAllowedIPs = 0.0.0.0/0\nEndpoint = vpn.example.com:51820\nPersistentKeepalive = 25\n'
 
 // Exercise the production bundle against isolated API fixtures; never touch a running hub.
@@ -50,6 +52,7 @@ try {
   let revision = 0, appliedRevision = 0, runtimeReady = true, failStatus = false
   let configured = true, failSave = false, failReload = false, partialSave = false, commitAclThenFail = false
   let failSettings = false
+  let failPeers = false
   let loseSettingsResponse = false, peerCreateError = '', failForwardActivation = false
   const reads = []
   let setupCreateStatus = 200, setupCreateError = ''
@@ -134,7 +137,7 @@ try {
     }
     if (path === '/api/groups' && method === 'POST') { const group = { id: 'new-group', ...body, allowed_groups: [] }; groups.push(group); commitConfig(); return reply(group) }
     if (path.startsWith('/api/groups/') && method === 'DELETE') { const id = path.split('/')[3]; groups = groups.filter(g => g.id !== id); groups.forEach(g => { g.allowed_groups = g.allowed_groups.filter(to => to !== id) }); forwards = forwards.map(f => ({ ...f, allowed_group_ids: f.allowed_group_ids.filter(to => to !== id) })); commitConfig(); return route.fulfill({ status: 204 }) }
-    if (path === '/api/peers' && method === 'GET') return reply(peers)
+    if (path === '/api/peers' && method === 'GET') return failPeers ? reply({ message: 'Statistics unavailable' }, 503) : reply(peers)
     if (path === '/api/peers' && method === 'POST') { if (peerCreateError) return textError(peerCreateError, 409); const id = peers.some(p => p.id === 'new-peer') ? `new-peer-${peers.length}` : 'new-peer'; const peer = { ...peers[0], ...body, id, ipv4: '10.77.0.4' }; peers.push(peer); commitConfig(); return reply({ peer, config: peerConfig }) }
     if (/^\/api\/peers\/[^/]+$/.test(path) && method === 'PUT') {
       const peer = peers.find(p => p.id === path.split('/')[3])
@@ -287,7 +290,7 @@ try {
       settings = { subnet: '10.77.0.0/24', endpoint: 'vpn.example.com:51820', persistent_keepalive: 25 }
       revision = appliedRevision = 0; runtimeReady = true; failStatus = false
       failSave = failReload = partialSave = commitAclThenFail = failSettings = loseSettingsResponse = false
-      peerCreateError = ''; failForwardActivation = false; acceptDialog = true; configured = true
+      failPeers = false; peerCreateError = ''; failForwardActivation = false; acceptDialog = true; configured = true
       setupCreateStatus = 200; setupCreateError = ''
       mutations.length = 0; reads.length = 0; runtimeErrors.length = 0
       await page.goto(url); await login(); await refreshSettled()
@@ -318,7 +321,7 @@ try {
         // and hub egress for server. Mac's upload alone must increase.
         peers[0].received_bytes += 2_000_000; peers[1].sent_bytes += 2_000_000
         const sample = page.waitForResponse(response => new URL(response.url()).pathname === '/api/peers')
-        await page.clock.runFor(5001); await (await sample).finished(); await flushFrames()
+        await page.clock.runFor(1001); await (await sample).finished(); await flushFrames()
         await checkPeer('6.6 MB', '1.8 MB')
         await navigate('Overview'); await checkOverview('6.6 MB', '1.8 MB')
         await navigate('Peers')
@@ -532,77 +535,133 @@ try {
         await page.getByRole('button', { name: 'Reload policy', exact: true }).click(); await poll(async () => await page.getByRole('switch', { name: 'Intra-group access' }).isEnabled(), 'Confirmed activation unlocks')
       },
       'traffic-sampling': async () => {
-        await navigate('Overview')
-        await page.getByText('Runtime ready', { exact: true }).waitFor()
+        await navigate('Overview'); await page.getByText('Runtime ready', { exact: true }).waitFor()
         await page.clock.pauseAt(await page.evaluate(() => Date.now()) + 1000)
         const rate = page.locator('.metric-card').filter({ hasText: 'Current rate' }).locator('.metric-value')
         const transferred = page.locator('.metric-card').filter({ hasText: 'Transferred' }).locator('.metric-value')
-        assert.equal(await transferred.innerText(), '92.2 MB', 'Internal traffic uses one side of the transfer')
-        assert.equal(await page.locator('.metric-label').filter({ hasText: /^(Sent|Received)$/ }).count(), 0)
-        const tick = async () => {
+        const feed = page.getByLabel('Live traffic status', { exact: true })
+        const settle = () => page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
+        const tick = async (milliseconds = 1000) => {
           const response = page.waitForResponse(r => new URL(r.url()).pathname === '/api/peers')
-          await page.clock.runFor(5001); await (await response).finished(); await page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
+          await page.clock.runFor(milliseconds); await (await response).finished(); await settle()
         }
-        await tick(); assert.equal(await rate.innerText(), '0 B/s', 'Idle is a measured zero')
-        peers[0].received_bytes += 500_000; peers[0].sent_bytes += 500_000
-        await tick(); assert.equal(await rate.innerText(), '100 KB/s', 'Rate counts each transfer once')
-        assert.equal(await transferred.innerText(), '92.7 MB')
+        assert.equal(await transferred.innerText(), '92.2 MB', 'Traffic is counted once')
+        await tick(); assert.equal(await rate.innerText(), '0 B/s')
         peers[0].received_bytes += 500_000
+        await tick(); assert.equal(await rate.innerText(), '500 KB/s', 'One-second updates count each transfer once')
+        assert.equal(await feed.innerText(), '1 s refresh')
+        assert.equal(await transferred.innerText(), '92.7 MB')
+        // Slow successful requests use elapsed time and do not wait another interval.
         const delayed = holdNext('GET', '/api/peers')
-        await page.clock.runFor(5001); await delayed.requested
-        await page.clock.runFor(5000); await delayed.release(); await page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
-        assert.equal(await rate.innerText(), '50 KB/s', 'Delayed responses use actual elapsed time')
-        await screenshot('traffic-live')
-        peers[0].received_bytes = 0
-        await tick(); assert.equal(await rate.innerText(), '—', 'Counter resets establish a new baseline')
-        peers[0].received_bytes = 500_000
-        await tick(); assert.equal(await rate.innerText(), '100 KB/s')
+        peers[0].received_bytes += 500_000
+        await page.clock.runFor(1000); await delayed.requested
+        await page.clock.runFor(1000); await delayed.release(); await settle()
+        assert.equal(await rate.innerText(), '250 KB/s', 'Latency uses the actual two-second interval')
+        await tick()
+        peers[0].received_bytes = 0; await tick()
+        assert.equal(await rate.innerText(), '0 B/s', 'A reset peer does not interrupt other peers')
+        peers[0].received_bytes = 500_000; await tick(); assert.equal(await rate.innerText(), '500 KB/s')
         peers.push({ ...peers[0], id: 'traffic-new', received_bytes: 1_000_000_000 })
-        await tick(); assert.equal(await rate.innerText(), '—', 'New peer counters do not become a rate spike')
-        peers.pop(); await tick(); assert.equal(await rate.innerText(), '—', 'Removed peers establish a new baseline')
-        await tick(); assert.equal(await rate.innerText(), '0 B/s')
+        await tick(); assert.equal(await rate.innerText(), '0 B/s', 'A new peer contributes no historical spike')
+        peers.pop(); await tick(); assert.equal(await rate.innerText(), '0 B/s', 'Peer removal preserves sampling')
+        // Runtime health is independent of traffic delivery.
         failStatus = true
-        await tick(); assert.equal(await rate.innerText(), '—', 'Failed polling clears stale speed')
+        await tick(); await tick(); await tick(); await tick(); await tick()
+        assert.equal(await rate.innerText(), '0 B/s'); assert.equal(await feed.innerText(), '1 s refresh')
         failStatus = false
-        const recovery = page.waitForResponse(r => new URL(r.url()).pathname === '/api/peers')
-        await page.clock.runFor(10001); await (await recovery).finished(); await page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
-        assert.equal(await rate.innerText(), '—', 'Recovery starts with a fresh baseline')
-        await tick(); assert.equal(await rate.innerText(), '0 B/s')
+        // A transient traffic failure preserves the last known reading and recovers.
+        peers[0].received_bytes += 500_000; await tick()
+        const last = await rate.innerText()
+        failPeers = true; await tick()
+        assert.equal(await feed.innerText(), 'Reconnecting…'); assert.equal(await rate.innerText(), last)
+        failPeers = false; await tick()
+        assert.equal(await feed.innerText(), '1 s refresh')
+        assert.equal(await rate.innerText(), '0 B/s')
+        // Hidden intervals retain history, but never turn background bytes into a spike.
         await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, value: true }); document.dispatchEvent(new Event('visibilitychange')) })
-        assert.equal(await rate.innerText(), '—', 'Hidden tabs clear the current rate')
-        peers[0].received_bytes += 50_000_000
-        await page.clock.runFor(60001)
+        assert.equal(await feed.innerText(), 'Paused')
+        const count = reads.filter(path => path === '/api/peers').length
+        peers[0].received_bytes += 50_000_000; await page.clock.runFor(60000)
+        assert.equal(reads.filter(path => path === '/api/peers').length, count)
         const foreground = page.waitForResponse(r => new URL(r.url()).pathname === '/api/peers')
         await page.evaluate(() => { delete document.hidden; document.dispatchEvent(new Event('visibilitychange')) })
-        await (await foreground).finished(); await page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
-        assert.equal(await rate.innerText(), '—', 'Background traffic does not become a foreground spike')
+        await (await foreground).finished(); await settle()
+        assert.equal(await rate.innerText(), '—', 'Foreground establishes a fresh baseline')
         await tick(); assert.equal(await rate.innerText(), '0 B/s')
-        await page.clock.runFor(300001); await page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
-        assert.ok(await page.locator('.traffic-point').count() <= 61, 'Chart retains only the last five minutes')
+        await screenshot('traffic-live')
+        // The timeline ages out old points even when requests are paused.
+        await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, value: true }); document.dispatchEvent(new Event('visibilitychange')) })
+        await page.clock.runFor(300001); await settle()
+        assert.equal(await page.locator('.traffic-point').count(), 0, 'Only the last five minutes remain visible')
+        await page.evaluate(() => { delete document.hidden })
         await page.getByRole('button', { name: 'Administrator Sign out' }).click()
-        await login(); await refreshSettled(); await page.getByText('Runtime ready', { exact: true }).waitFor()
-        assert.equal(await rate.innerText(), '—', 'New sessions do not inherit the old rate')
+        await login(); await refreshSettled(); await settle()
+        assert.equal(await rate.innerText(), '—', 'New sessions do not inherit rate')
         assert.equal(await page.locator('.traffic-point').count(), 0, 'New sessions clear history')
+        await page.clock.resume()
+      },
+      'traffic-lifecycle': async () => {
+        await page.getByText('Runtime ready', { exact: true }).waitFor()
+        await page.clock.pauseAt(await page.evaluate(() => Date.now()) + 1000)
+        const feed = page.getByLabel('Live traffic status', { exact: true })
+        const settle = () => page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
+        const count = () => reads.filter(path => path === '/api/peers').length
+        const hung = holdNext('GET', '/api/peers')
+        await page.evaluate(() => window.dispatchEvent(new Event('focus'))); await hung.requested
+        const before = count()
+        await page.clock.runFor(2999); assert.equal(count(), before, 'One in-flight request per feed')
+        await page.clock.runFor(1); await settle()
+        assert.equal(await feed.innerText(), 'Reconnecting…', 'Hung request expires in three seconds')
+        peers[0].received_bytes += 1_000_000
+        const retry = page.waitForResponse(r => new URL(r.url()).pathname === '/api/peers')
+        await page.clock.runFor(1000); await (await retry).finished(); await settle()
+        assert.equal(await feed.innerText(), '1 s refresh', 'A hung request cannot stop future updates')
+        // Release the canceled request without waiting for an aborted response.
+        for (const release of pendingReleases) release(); pendingReleases.clear()
+        await settle()
+        const visible = holdNext('GET', '/api/peers')
+        await page.clock.runFor(1000); await visible.requested
+        await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, value: true }); document.dispatchEvent(new Event('visibilitychange')) })
+        assert.equal(await feed.innerText(), 'Paused')
+        const resumed = page.waitForResponse(r => new URL(r.url()).pathname === '/api/peers')
+        await page.evaluate(() => { delete document.hidden; document.dispatchEvent(new Event('visibilitychange')) })
+        await (await resumed).finished(); await settle()
+        assert.equal(await feed.innerText(), '1 s refresh', 'Foreground resumes before the old request settles')
+        for (const release of pendingReleases) release(); pendingReleases.clear()
+        const focused = page.waitForResponse(r => new URL(r.url()).pathname === '/api/peers')
+        await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+        await (await focused).finished(); await settle()
+        await page.evaluate(() => { Object.defineProperty(navigator, 'onLine', { configurable: true, value: false }); window.dispatchEvent(new Event('offline')) })
+        const offlineCount = count(); await page.clock.runFor(10000)
+        assert.equal(count(), offlineCount); assert.equal(await feed.innerText(), 'Reconnecting…')
+        const online = page.waitForResponse(r => new URL(r.url()).pathname === '/api/peers')
+        await page.evaluate(() => { delete navigator.onLine; window.dispatchEvent(new Event('online')) })
+        await (await online).finished(); await settle()
+        assert.equal(await feed.innerText(), '1 s refresh', 'Online wakes polling immediately')
         await page.clock.resume()
       },
       'runtime-polling': async () => {
         await page.getByText('Runtime ready', { exact: true }).waitFor()
         await page.clock.pauseAt(await page.evaluate(() => Date.now()) + 1000)
         const statusReads = () => reads.filter(path => path === '/api/status').length
+        const settle = () => page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
         let before = statusReads()
-        await page.clock.runFor(5001); await poll(() => statusReads() > before, 'Visible page polls status')
-        await page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
-        await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => window.__hidden }); window.__hidden = true; document.dispatchEvent(new Event('visibilitychange')) })
-        before = statusReads(); await page.clock.runFor(60001)
-        assert.equal(statusReads(), before, 'Background page pauses polling')
-        await page.evaluate(() => { window.__hidden = false; document.dispatchEvent(new Event('visibilitychange')) })
-        await poll(() => statusReads() > before, 'Foreground resumes immediately'); await page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
-        failStatus = true; before = statusReads(); await page.clock.runFor(5001)
-        await page.getByText('Status unavailable', { exact: true }).first().waitFor(); assert.equal(statusReads(), before + 1)
-        before = statusReads(); await page.clock.runFor(9999); assert.equal(statusReads(), before, 'First failure backs off to ten seconds')
-        await page.clock.runFor(2); await poll(() => statusReads() > before, 'Backoff retries'); await page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)))
-        failStatus = false; await page.clock.runFor(20001); await page.getByText('Runtime ready', { exact: true }).waitFor()
-        await page.evaluate(() => { delete document.hidden }); await page.clock.resume()
+        await page.clock.runFor(5000); await poll(() => statusReads() > before, 'Visible page polls status'); await settle()
+        await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, value: true }); document.dispatchEvent(new Event('visibilitychange')) })
+        before = statusReads(); await page.clock.runFor(60000)
+        assert.equal(statusReads(), before, 'Background page pauses status polling')
+        const resumed = page.waitForResponse(r => new URL(r.url()).pathname === '/api/status')
+        await page.evaluate(() => { delete document.hidden; document.dispatchEvent(new Event('visibilitychange')) })
+        await (await resumed).finished(); await settle()
+        failStatus = true
+        const failed = page.waitForResponse(r => new URL(r.url()).pathname === '/api/status')
+        await page.clock.runFor(5000); await (await failed).finished(); await settle()
+        await page.getByText('Status unavailable', { exact: true }).first().waitFor()
+        before = statusReads(); await page.clock.runFor(4999); assert.equal(statusReads(), before, 'Status retries after five seconds')
+        const recovery = page.waitForResponse(r => new URL(r.url()).pathname === '/api/status')
+        failStatus = false; await page.clock.runFor(1); await (await recovery).finished(); await settle()
+        await page.getByText('Runtime ready', { exact: true }).waitFor()
+        await page.clock.resume()
       },
       'acl-mid-batch-get': async () => {
         await navigate('Groups'); await node('engineering').click()
@@ -819,7 +878,8 @@ try {
       }])),
     }
     const failures = []
-    for (const [name, scenario] of Object.entries(scenarios)) {
+    for (const selected of requestedScenarios) assert.ok(selected in scenarios, `Unknown scenario: ${selected}`)
+    for (const [name, scenario] of Object.entries(scenarios).filter(([name]) => !requestedScenarios.length || requestedScenarios.includes(name))) {
       try {
         await fresh(); await scenario()
         assert.deepEqual(runtimeErrors, [], 'No runtime exceptions')
@@ -1131,7 +1191,8 @@ try {
     assert.ok(mutations.every(m => m.path.startsWith('/api/')), 'Existing API paths only')
     console.log('PASS: group details closing, compact peer rows, graph direction, drag, persistence, deletion, self-access, atomic rejection, recovery, CRUD, English, mobile, setup, session reset, and stale-response regressions')
   }
-  await runCore()
+  if (requestedScenarios.length) await page.goto(url)
+  else await runCore()
   await page.setViewportSize({ width: 1440, height: 1000 })
   await page.evaluate(() => localStorage.clear())
   await runRegressions()

@@ -6,7 +6,8 @@ import {
 } from 'lucide-react'
 import GroupsPage from './components/groups/GroupsPage'
 import TrafficChart from './components/TrafficChart'
-import { useTraffic, type Traffic } from './useTraffic'
+import { TRAFFIC_INTERVAL_MS, useTraffic, type Traffic } from './useTraffic'
+import { usePolling } from './usePolling'
 import Dialog from './components/Dialog'
 import PeerQRCode from './components/PeerQRCode'
 import PeersPage from './components/peers/PeersPage'
@@ -50,7 +51,7 @@ export default function App() {
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null)
   const [runtimeError, setRuntimeError] = useState('')
   const [sampledAt, setSampledAt] = useState<Date | null>(null)
-  const { traffic, sample: sampleTraffic, reset: resetTraffic } = useTraffic()
+  const { traffic, sample: sampleTraffic, interrupt: interruptTraffic, reset: resetTraffic } = useTraffic()
   const navigate = (next: Page) => { if (next !== page && policyDirty && !confirm('Discard unsaved policy changes?')) return; setPage(next); setMobileNav(false) }
   const [peers, setPeers] = useState<Peer[]>([])
   const [groups, setGroups] = useState<Group[]>([])
@@ -202,32 +203,36 @@ export default function App() {
     setPolicyConflict(null); setPolicyError('Review the resulting policy, then Save to apply.')
   }
 
-  useEffect(() => {
-    if (!connected || !setup?.configured) return
-    let stopped = false, timer: number | undefined, failures = 0, polling = false, visibilityGeneration = 0
-    const schedule = () => { if (!stopped && !document.hidden) timer = window.setTimeout(() => void poll(), Math.min(30_000, 5_000 * 2 ** failures)) }
-    const poll = async () => {
-      if (stopped || document.hidden || polling) return
-      polling = true
-      const session = sessionRef.current, epoch = mutationEpochRef.current, visibility = visibilityGeneration
-      try {
-        const [status, result] = await Promise.all([configApi.status(), client.GET('/api/peers', { cache: 'no-store' })])
-        if (stopped || session !== sessionRef.current || document.hidden || visibility !== visibilityGeneration) return
-        setRuntime(status); setRuntimeError(''); failures = 0
-        if (result.error || !result.data) throw new Error('Unable to refresh peer statistics.')
-        if (epoch === mutationEpochRef.current) {
-          const fresh = new Map(result.data.map(peer => [peer.id, peer]))
-          setPeers(previous => previous.map(peer => { const stats = fresh.get(peer.id); return stats ? { ...peer, received_bytes: stats.received_bytes, sent_bytes: stats.sent_bytes, last_handshake_unix: stats.last_handshake_unix } : peer }))
-          sampleTraffic(result.data)
-          setSampledAt(new Date())
-        }
-      } catch (e) { if (!stopped && session === sessionRef.current) { resetTraffic(); failures = Math.min(3, failures + 1); setRuntimeError(e instanceof Error ? e.message : 'Runtime status unavailable.') } }
-      finally { polling = false; schedule() }
-    }
-    const visibility = () => { ++visibilityGeneration; window.clearTimeout(timer); resetTraffic(); if (!document.hidden) void poll() }
-    document.addEventListener('visibilitychange', visibility); void poll()
-    return () => { stopped = true; window.clearTimeout(timer); document.removeEventListener('visibilitychange', visibility) }
-  }, [connected, setup?.configured, sampleTraffic, resetTraffic])
+  usePolling({
+    enabled: connected && !!setup?.configured,
+    interval: TRAFFIC_INTERVAL_MS,
+    poll: async signal => {
+      const session = sessionRef.current
+      const { data, error } = await client.GET('/api/peers', { cache: 'no-store', signal })
+      if (signal.aborted || session !== sessionRef.current) return
+      if (error || !data) throw new Error('Unable to refresh peer statistics.')
+      const fresh = new Map(data.map(peer => [peer.id, peer]))
+      // Statistics do not replace inventory or policy, so configuration writes
+      // and manual refreshes must not interrupt the live feed.
+      setPeers(previous => previous.map(peer => { const stats = fresh.get(peer.id); return stats ? { ...peer, received_bytes: stats.received_bytes, sent_bytes: stats.sent_bytes, last_handshake_unix: stats.last_handshake_unix } : peer }))
+      sampleTraffic(data)
+      setSampledAt(new Date())
+    },
+    onError: () => interruptTraffic('reconnecting'),
+    onPause: () => interruptTraffic('paused', true),
+    onResume: () => interruptTraffic('connecting', true),
+  })
+  usePolling({
+    enabled: connected && !!setup?.configured,
+    interval: 5000,
+    maxRetryDelay: 10_000,
+    poll: async signal => {
+      const session = sessionRef.current, status = await configApi.status(signal)
+      if (signal.aborted || session !== sessionRef.current) return
+      setRuntime(status); setRuntimeError('')
+    },
+    onError: error => setRuntimeError(error instanceof Error ? error.message : 'Runtime status unavailable.'),
+  })
 
   const enter = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -463,8 +468,8 @@ function PageHeading({ title, count, action }: { title: string; count?: string; 
 function Overview({ peers, groups, forwards, stats, traffic, busy, settings, updatedAt, setPage }: { peers: Peer[]; groups: Group[]; forwards: Forward[]; stats: { online: number; transferred: number }; traffic: Traffic; busy: boolean; settings: NetworkSettings | null; updatedAt: Date | null; setPage: (p: Page) => void }) {
   return <div className="page-enter"><PageHeading title="Overview" action={<span className="update-time"><RefreshCw size={13} className={busy ? 'spin' : ''} />{busy ? 'Refreshing' : updatedAt ? updatedAt.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }) : 'Awaiting data'}</span>} />
     {settings && <section className="hub-summary"><div className="hub-identity"><Network size={22} /><div><b>Private network</b><span>WireGuard / IPv4</span></div></div><div><small>Subnet</small><b className="mono">{settings.subnet}</b></div><div><small>Endpoint</small><b className="mono">{settings.endpoint}</b></div><button className="icon-button" aria-label="Network settings" onClick={() => setPage('settings')}><ArrowUpRight size={18} /></button></section>}
-    <section className="metric-grid" aria-label="Network metrics"><Metric icon={<Network />} label="Peers" value={String(peers.length).padStart(2, '0')} /><Metric icon={<Activity />} label="Recent handshakes" value={String(stats.online).padStart(2, '0')} foot="Last 3 minutes" /><Metric icon={<ArrowLeftRight />} label="Transferred" value={formatBytes(stats.transferred)} foot="Each transfer counted once" /><Metric icon={<Gauge />} label="Current rate" value={traffic.rate === null ? '—' : formatRate(traffic.rate)} foot={traffic.rate === null ? 'Waiting for two fresh samples' : '5 s sample average'} /></section>
-    <div className="overview-grid"><section className="panel traffic-panel"><div className="panel-head"><h2>Live traffic</h2><span className="badge">5 s refresh</span></div><div className="traffic-value mono">{traffic.rate === null ? '—' : formatRate(traffic.rate)}</div><TrafficChart traffic={traffic} formatRate={formatRate} /><p className="traffic-note">{traffic.rate === null ? 'Collecting fresh samples while this tab is visible.' : 'Delivered peer traffic, counted once per transfer.'}</p></section>
+    <section className="metric-grid" aria-label="Network metrics"><Metric icon={<Network />} label="Peers" value={String(peers.length).padStart(2, '0')} /><Metric icon={<Activity />} label="Recent handshakes" value={String(stats.online).padStart(2, '0')} foot="Last 3 minutes" /><Metric icon={<ArrowLeftRight />} label="Transferred" value={formatBytes(stats.transferred)} foot="Each transfer counted once" /><Metric icon={<Gauge />} label="Current rate" value={traffic.rate === null ? '—' : formatRate(traffic.rate)} foot={traffic.status === 'paused' ? 'Paused while this tab is hidden' : traffic.status === 'reconnecting' ? 'Reconnecting · last known rate' : traffic.status === 'connecting' ? 'Connecting · waiting for samples' : traffic.rate === null ? 'Collecting fresh samples' : 'Updated every second'} /></section>
+    <div className="overview-grid"><section className="panel traffic-panel"><div className="panel-head"><h2>Live traffic</h2><span className="badge" role="status" aria-label="Live traffic status">{traffic.status === 'live' ? '1 s refresh' : traffic.status === 'paused' ? 'Paused' : traffic.status === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}</span></div><div className="traffic-value mono">{traffic.rate === null ? '—' : formatRate(traffic.rate)}</div><TrafficChart traffic={traffic} formatRate={formatRate} /><p className="traffic-note">{traffic.status === 'paused' ? 'Updates resume automatically when you return to this tab.' : traffic.status === 'reconnecting' ? 'Reconnecting automatically. Showing the last received rate.' : traffic.status === 'connecting' || traffic.rate === null ? 'Collecting fresh samples…' : 'Delivered peer traffic, counted once per transfer.'}</p></section>
     <section className="panel group-panel"><div className="panel-head"><h2>Groups</h2><button className="icon-button" aria-label="Open groups" onClick={() => setPage('groups')}><ArrowUpRight size={17} /></button></div>{busy ? <Loading /> : groups.length ? <div className="group-overview-list">{groups.slice(0, 5).map(g => <button className="group-overview-item" key={g.id} onClick={() => setPage('groups')}><span className="group-symbol"><GitBranch size={16} /></span><b title={g.name}>{g.name}</b><span className="mono">{peers.filter(p => p.group_id === g.id).length}<small> peers</small></span></button>)}</div> : <Empty title="No groups yet" action={<button className="text-action" onClick={() => setPage('groups')}>Create a group <ArrowUpRight size={14} /></button>} />}</section></div>
     <section className="panel recent-panel"><div className="panel-head"><h2>Peers</h2><button className="text-action" onClick={() => setPage('peers')}>View all <ArrowUpRight size={14} /></button></div>{peers.length ? <div className="mini-peer-list">{[...peers].sort((a, b) => a.ipv4.localeCompare(b.ipv4, 'en', { numeric: true })).slice(0, 4).map(p => <div className="mini-peer" key={p.id}><div className="avatar">{initials(p.name)}</div><div className="mini-peer-main"><b title={p.name}>{p.name}</b><small className="mono">{p.ipv4}</small></div><span className={`connection-dot ${p.enabled !== false && Date.now() / 1000 - (p.last_handshake_unix ?? 0) < 180 ? 'is-online' : ''}`} /><span className="mini-status">{p.enabled === false ? 'Disabled' : timeAgo(p.last_handshake_unix)}</span><PeerTraffic peer={p} compact /></div>)}</div> : <Empty title="No peers yet" action={<button className="text-action" onClick={() => setPage('peers')}>Add a peer <Plus size={14} /></button>} />}</section><div className="overview-foot"><span><Shield size={13} /> Default deny</span><span>{forwards.length} forwards</span></div>
   </div>

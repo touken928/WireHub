@@ -112,6 +112,8 @@ Click **Create network** to finish setup. The subnet cannot be changed afterward
 
 Save the configuration when you create the peer; it is only provided once. If you lose it, delete and recreate the peer.
 
+Live traffic updates every second while the page is visible. Slow requests time out and retry automatically; returning to the tab or reconnecting the network refreshes immediately. Traffic and runtime health refresh independently. During interruptions, the last received rate is labeled as reconnecting, and background intervals are rebaselined to avoid false spikes.
+
 Traffic totals use the peer’s perspective: **Upload** is traffic from that peer to the hub; **Download** is traffic delivered by the hub to that peer.
 
 The peer list is sorted by IP address. Use the pencil to rename a peer, or its access switch to disable and restore it. Disabled peers cannot connect or receive forwarded traffic; their original configuration remains valid when restored.
