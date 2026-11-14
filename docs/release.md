@@ -1,6 +1,6 @@
 # Release verification
 
-Release target: **1.3.0**, schema **6**. The acceptance scope is one Hub,
+Release target: **1.4.0**, schema **7**. The acceptance scope is one Hub,
 a private IPv4 /24, Linux servers and the embedded management UI. Mobile testing
 is excluded and desktop interoperability is deferred for this acceptance.
 Supported behavior and network limitations are in [operations](operations.md).
@@ -20,14 +20,13 @@ Supported behavior and network limitations are in [operations](operations.md).
   RC tags remain prereleases; formal releases require exact agreement between the tag and packages.
 
 The reusable integration workflow gates publishing. The
-[hosted RC preflight](https://github.com/touken928/WireHub/actions/runs/37187394418)
-passed on commit `3fcd5a2`: quality, minimum Rust, UI, real Linux kernel and
-userspace network checks, operations, five-minute endurance, Rust tests,
-performance and OpenAPI agreement. Native Linux amd64/arm64 binaries and both
-container architectures also passed version/build-ID, startup and embedded-UI
-checks. Its reports and binary artifacts are retained with that workflow run.
-The tag-triggered release workflow repeats the gates on the exact tagged commit
-before publishing binaries, checksums, containers and a GitHub release (prerelease for RC tags).
+[hosted 1.4.0 preflight](https://github.com/touken928/WireHub/actions/runs/43609091513)
+passed on commit `4e9fe5b`: quality, minimum Rust, complete UI and visual checks,
+real Linux kernel and userspace network checks, operations, five-minute endurance,
+Rust tests, performance and OpenAPI agreement. Its reports are retained with that
+workflow run. The tag-triggered release workflow repeats these gates on the exact
+release commit, verifies native Linux amd64/arm64 binaries and both container
+architectures, then publishes binaries, checksums, images and the GitHub release.
 
 Branch pushes and pull requests run integration checks. Version tags run only
 the Release workflow, which calls the same integration workflow once. New branch
@@ -38,6 +37,32 @@ work. The five-minute endurance gate and performance baseline run in parallel
 with userspace integration; all remain required before publishing. UI evidence
 includes responsive visual alignment checks, and diagnostic reports are retained
 on failure. Release notes are generated from the matching version section below.
+
+## 1.4.0 release
+
+- Align the Peers panel across desktop and narrow screens, sort peers by numeric
+  IP address, and support renaming individual peers with validation and feedback.
+- Disable and restore individual peers without changing their IP, keys, group or
+  forward definitions. Disabling removes the live tunnel and routes; restoring
+  reuses the original client configuration.
+- Display upload and download totals from the peer's perspective consistently in
+  the Peers panel and Overview.
+- Refresh live traffic every second independently of runtime health, with request
+  timeouts, bounded retries, and immediate refresh on page or network recovery.
+  Preserve history during interruptions and avoid spikes or whole-chart gaps
+  when peers are added, removed or have their counters reset.
+- Upgrade canonical database schemas 3–6 atomically to schema 7. Existing peers
+  start enabled, and backup/restore supports the new access state. Preserve the
+  verified pre-upgrade database/Hub-key pair for rollback to v1.3.0 or earlier.
+- Upgrade bundled SQLite through rusqlite 0.41.1 / libsqlite3-sys 0.39.1, Tokio to
+  1.53.3 and rustix to 1.1.6 to address dependency security advisories, while
+  preserving the Rust 1.89 minimum requirement.
+
+Local verification passed 202 Rust tests (one opt-in benchmark ignored), Clippy,
+dependency auditing, database migration and paired backup/restore, production UI
+regressions and 242 responsive visual captures. The hosted preflight above passed
+all eight integration jobs. The exact tagged commit must pass the full release
+workflow before publication.
 
 ## 1.3.0 release
 
@@ -159,7 +184,7 @@ actionlint
 pnpm --dir frontend test:ui
 target/release/wirehub export-openapi > /tmp/wirehub-openapi.json
 cmp openapi.json /tmp/wirehub-openapi.json
-python3 scripts/check-release.py --tag v1.3.0 --binary target/release/wirehub
+python3 scripts/check-release.py --tag v1.4.0 --binary target/release/wirehub
 ```
 
 CI also compiles all targets with the minimum supported Rust **1.89.0**.

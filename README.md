@@ -32,7 +32,7 @@ Save the following as [`compose.yml`](compose.yml), or use the file included in 
 ```yaml
 services:
   wirehub:
-    image: ghcr.io/touken928/wirehub:1.3.0
+    image: ghcr.io/touken928/wirehub:1.4.0
     restart: unless-stopped
     environment:
       WIREHUB_ADMIN_TOKEN: ${WIREHUB_ADMIN_TOKEN:?Set WIREHUB_ADMIN_TOKEN to a long random secret}
@@ -176,7 +176,7 @@ Building the service requires Rust 1.89 or newer for the standard-library file
 locking API. This minimum requirement does not imply that every Rust release
 has been independently tested.
 
-This release (`1.3.0`) uses strict schema version 7. Canonical version 3, 4, 5 and 6 databases are validated and upgraded atomically. Existing forwards keep their entry ports (`listen_port` is backfilled from `target_port`); configuration, revision and Hub identity are preserved. Peer access defaults to enabled during migration. Peers can be renamed or disabled individually; disabling removes their live tunnel and routes while preserving their address, key, group and forward definitions for restoration. Older or structurally drifted databases are rejected. Version 7 databases require a binary with schema 7 support; rollback requires the pre-upgrade database/key pair. At startup, WireHub binds the hub private-key file to the public identity persisted in SQLite; network setup does not create or bind that identity. Back up the SQLite database and hub private-key file together as an immutable identity pair. Restoring only one half can make startup fail because the persisted public identity must match the private key. Schema drift detection includes unexpected SQLite statistics tables and index objects.
+This release (`1.4.0`) uses strict schema version 7. Canonical version 3, 4, 5 and 6 databases are validated and upgraded atomically. Existing forwards keep their entry ports (`listen_port` is backfilled from `target_port`); configuration, revision and Hub identity are preserved. Peer access defaults to enabled during migration. Peers can be renamed or disabled individually; disabling removes their live tunnel and routes while preserving their address, key, group and forward definitions for restoration. Older or structurally drifted databases are rejected. Version 7 databases require a binary with schema 7 support; rollback requires the pre-upgrade database/key pair. At startup, WireHub binds the hub private-key file to the public identity persisted in SQLite; network setup does not create or bind that identity. Back up the SQLite database and hub private-key file together as an immutable identity pair. Restoring only one half can make startup fail because the persisted public identity must match the private key. Schema drift detection includes unexpected SQLite statistics tables and index objects.
 
 Peer provisioning records its pending state without storing the private key. Pending peers are hidden from the peer inventory and cannot be forwarding targets. Cancelling an HTTP request during activation schedules peer removal and a cleanup reload; startup removes any remaining unfinished provisions before loading the router. Successful provisioning clears the pending marker before returning the one-time configuration. Save that response: delivery acknowledgement by the client is not tracked, so a lost response still requires deleting and recreating the peer.
 

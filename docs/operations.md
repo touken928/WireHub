@@ -1,6 +1,6 @@
 # Operations
 
-The release target is **1.3.0**, with schema 6.
+The release target is **1.4.0**, with schema 7.
 HTTP bind addresses no longer require an additional proxy-mode opt-in;
 management API bearer authentication remains required.
 See [release verification](release.md) and [performance measurements](performance.md).
@@ -159,10 +159,11 @@ durable manifest with checksums, schema version and revision. Protect the archiv
 as a private key; it is not encrypted by this utility. Preserve an immutable
 pre-upgrade archive plus the exact old binary/image version and build ID.
 
-Schema 6 separates Forward entry and target ports, preserving old entries by
-backfilling `listen_port = target_port`. Canonical schemas **3, 4 and 5**
-are validated and migrated atomically to 6 on startup, preserving the monotonic
-configuration revision and Hub identity. Drifted or unsupported
+Schema 7 persists individual peer access state; existing peers start enabled.
+Canonical schemas **3, 4, 5 and 6** are validated and migrated atomically to 7 on
+startup, preserving peer identity, assigned addresses, the monotonic configuration
+revision and Hub identity. Older Forward entries retain their entry ports by
+backfilling `listen_port = target_port`. Drifted or unsupported
 schemas are rejected. For an upgrade, verify the new binary version and the
 pre-upgrade pair, install the binary, start once and check `/api/ready` plus
 authenticated `/api/status`, then check saved inventory and traffic. Preserve
@@ -178,8 +179,8 @@ python3 scripts/state-backup.py restore \
 ```
 
 Set both state paths to that directory, preserve service-account ownership and
-key mode 0600, then start the recorded old binary. A v1.1.0 or earlier binary cannot
-open schema 6; replacing only the executable is insufficient. Rollback discards
+key mode 0600, then start the recorded old binary. A v1.3.0 or earlier binary cannot
+open schema 7; replacing only the executable is insufficient. Rollback discards
 configuration changes made since the archive, so preserve the stopped upgraded
 pair separately if those changes need review. Do not edit schema numbers to
 force compatibility. Do not replace live files or overwrite existing archives.
