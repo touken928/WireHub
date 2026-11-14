@@ -9,11 +9,11 @@ axum = { version = "0.7", features = ["macros"] }
 boringtun = "=0.7.1"
 hex = "0.4"
 rand = "0.8"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.53.3", features = ["full"] }
 utoipa = { version = "4", features = ["axum_extras"] }
 base64 = "0.22"
 mime_guess = "2"
