@@ -40,7 +40,11 @@ pub struct Peer {
     pub public_key: String,
     pub ipv4: String,
     pub group_id: String,
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+    /// Plaintext bytes received by the hub from this peer (peer upload).
     pub received_bytes: u64,
+    /// Plaintext bytes sent by the hub to this peer (peer download).
     pub sent_bytes: u64,
     pub last_handshake_unix: Option<i64>,
 }
@@ -51,7 +55,10 @@ pub struct PeerStatus {
     pub public_key: String,
     pub ipv4: String,
     pub group_id: String,
+    pub enabled: bool,
+    /// Plaintext bytes received by the hub from this peer (peer upload).
     pub received_bytes: u64,
+    /// Plaintext bytes sent by the hub to this peer (peer download).
     pub sent_bytes: u64,
     pub last_handshake_unix: Option<i64>,
     pub last_data_unix: Option<i64>,
@@ -73,6 +80,15 @@ pub struct PeerProvision {
 #[derive(Deserialize, ToSchema)]
 pub struct MovePeer {
     pub group_id: String,
+}
+fn enabled_by_default() -> bool {
+    true
+}
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdatePeer {
+    pub name: Option<String>,
+    pub enabled: Option<bool>,
 }
 #[derive(Deserialize, ToSchema)]
 pub struct SetAcl {
@@ -171,6 +187,7 @@ mod tests {
             public_key: "public".into(),
             ipv4: "10.77.0.2".into(),
             group_id: "g".into(),
+            enabled: true,
             received_bytes: 0,
             sent_bytes: 0,
             last_handshake_unix: None,

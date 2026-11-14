@@ -1,6 +1,7 @@
 use super::*;
 use rusqlite::Connection;
 fn legacy_forwards(db: &Connection) {
+    db.execute_batch("DROP TABLE disabled_peers;").unwrap();
     db.execute_batch("ALTER TABLE forwards RENAME TO forwards_new; CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,target_port INTEGER NOT NULL,allowed TEXT NOT NULL,UNIQUE(protocol,target_port)); INSERT INTO forwards(id,name,protocol,target_peer_id,target_port,allowed) SELECT id,name,protocol,target_peer_id,target_port,allowed FROM forwards_new; DROP TABLE forwards_new; ").unwrap();
 }
 
@@ -18,6 +19,7 @@ fn peer(id: &str) -> Peer {
         public_key: format!("key-{id}"),
         ipv4: String::new(),
         group_id: "group".into(),
+        enabled: true,
         received_bytes: 0,
         sent_bytes: 0,
         last_handshake_unix: None,
@@ -1614,4 +1616,90 @@ fn invalid_listen_ports_and_drifted_v5_are_rejected_without_mutation() {
     let before = std::fs::read(&path).unwrap();
     assert!(Store::open(path.to_str().unwrap()).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn peer_updates_are_atomic_persistent_and_preserve_identity_and_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peer-updates.db");
+    let s = Store::open(path.to_str().unwrap()).unwrap();
+    s.bind_test_identity();
+    s.setup("10.77.0.0/24", "hub.example:51820", 25).unwrap();
+    s.add_group(&group("group")).unwrap();
+    let mut original = peer("peer");
+    s.create_peer_allocated(&mut original).unwrap();
+    s.create_peer_allocated(&mut peer("other")).unwrap();
+    s.create_forward(&mut forward("f")).unwrap();
+    let revision = s.revision().unwrap();
+    assert!(s.update_peer("peer", Some("other"), Some(false)).is_err());
+    assert!(s.update_peer("peer", Some("   "), None).is_err());
+    assert_eq!(s.update_peer("missing", None, Some(false)).unwrap(), 0);
+    assert_eq!(s.revision().unwrap(), revision);
+    assert!(s.peers().unwrap().iter().all(|p| p.enabled));
+    s.update_peer("peer", Some("  My laptop  "), Some(false))
+        .unwrap();
+    assert_eq!(s.revision().unwrap(), revision + 1);
+    drop(s);
+    let s = Store::open(path.to_str().unwrap()).unwrap();
+    let saved = s
+        .peers()
+        .unwrap()
+        .into_iter()
+        .find(|p| p.id == "peer")
+        .unwrap();
+    assert_eq!(saved.name, "My laptop");
+    assert!(!saved.enabled);
+    assert_eq!(
+        (saved.ipv4, saved.public_key, saved.group_id),
+        (original.ipv4, original.public_key, original.group_id)
+    );
+    assert_eq!(s.forwards().unwrap().len(), 1);
+    s.update_peer("peer", None, Some(true)).unwrap();
+    assert!(
+        s.peers()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == "peer")
+            .unwrap()
+            .enabled
+    );
+    s.update_peer("peer", None, Some(false)).unwrap();
+    s.remove_peer("peer").unwrap();
+    assert_eq!(
+        s.db.lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM disabled_peers", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn canonical_v6_migrates_with_peers_enabled_and_preserves_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v6.db");
+    let s = Store::open(path.to_str().unwrap()).unwrap();
+    s.bind_test_identity();
+    s.setup("10.77.0.0/24", "hub.example:51820", 25).unwrap();
+    s.add_group(&group("group")).unwrap();
+    s.create_peer_allocated(&mut peer("peer")).unwrap();
+    let revision = s.revision().unwrap();
+    drop(s);
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch("DROP TABLE disabled_peers; PRAGMA user_version=6;")
+        .unwrap();
+    drop(db);
+    let s = Store::open(path.to_str().unwrap()).unwrap();
+    assert!(s.peers().unwrap()[0].enabled);
+    assert_eq!(s.revision().unwrap(), revision);
+    s.update_peer("peer", None, Some(false)).unwrap();
+    drop(s);
+    assert!(
+        !Store::open(path.to_str().unwrap())
+            .unwrap()
+            .peers()
+            .unwrap()[0]
+            .enabled
+    );
 }

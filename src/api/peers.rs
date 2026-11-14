@@ -3,7 +3,7 @@ use crate::{
         activation_failure, auth, creation_error, delete_result, err, is_input_error, uuid,
         AppState,
     },
-    model::{MovePeer, NewPeer, Peer, PeerProvision, PeerStatus},
+    model::{MovePeer, NewPeer, Peer, PeerProvision, PeerStatus, UpdatePeer},
 };
 use axum::{
     extract::{Path, State},
@@ -38,6 +38,7 @@ pub async fn list_peers(State(state): State<AppState>, headers: HeaderMap) -> im
                         public_key: peer.public_key,
                         ipv4: peer.ipv4,
                         group_id: peer.group_id,
+                        enabled: peer.enabled,
                         received_bytes: peer.received_bytes,
                         sent_bytes: peer.sent_bytes,
                         last_handshake_unix: peer.last_handshake_unix,
@@ -177,6 +178,7 @@ pub async fn create_peer(
         public_key,
         ipv4: String::new(),
         group_id: new.group_id,
+        enabled: true,
         received_bytes: 0,
         sent_bytes: 0,
         last_handshake_unix: None,
@@ -295,6 +297,46 @@ pub async fn move_peer(
     }
 }
 
+#[utoipa::path(put, path = "/api/peers/{id}", tag = "crate", request_body = UpdatePeer, responses((status = 200, body = Peer)))]
+pub async fn update_peer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(update): Json<UpdatePeer>,
+) -> impl IntoResponse {
+    if !auth(&headers, &state) {
+        return err(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    if update.name.is_none() && update.enabled.is_none() {
+        return err(StatusCode::BAD_REQUEST, "name or enabled is required").into_response();
+    }
+    let permit = match state.kernel.reserve_reload().await {
+        Ok(permit) => permit,
+        Err(_) => {
+            return err(StatusCode::SERVICE_UNAVAILABLE, "runtime reload failed").into_response()
+        }
+    };
+    match state
+        .store
+        .update_peer(&id, update.name.as_deref(), update.enabled)
+    {
+        Ok(1) => {
+            if permit.send().wait().await.is_err() {
+                return activation_failure(&state.store);
+            }
+            match state.store.peers() {
+                Ok(peers) => match peers.into_iter().find(|peer| peer.id == id) {
+                    Some(peer) => Json(peer).into_response(),
+                    None => err(StatusCode::NOT_FOUND, "peer not found").into_response(),
+                },
+                Err(_) => err(StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+            }
+        }
+        Ok(_) => err(StatusCode::NOT_FOUND, "peer not found").into_response(),
+        Err(error) => creation_error(error, "peer name already exists"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::cleanup_failed_provision_until_done;
@@ -326,6 +368,7 @@ mod tests {
             public_key: "public-key".into(),
             ipv4: String::new(),
             group_id: "g".into(),
+            enabled: true,
             received_bytes: 0,
             sent_bytes: 0,
             last_handshake_unix: None,

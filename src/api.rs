@@ -20,7 +20,7 @@ mod settings;
 pub use configuration::{get_config, get_status, put_policy};
 pub use forwards::{create_forward, delete_forward, list_forwards, update_forward};
 pub use groups::{create_group, delete_group, list_groups, set_acl};
-pub use peers::{create_peer, delete_peer, list_peers, move_peer};
+pub use peers::{create_peer, delete_peer, list_peers, move_peer, update_peer};
 pub use settings::{get_setup, post_setup, put_settings};
 
 #[derive(Clone)]
@@ -212,7 +212,7 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/api/groups/:id", delete(delete_group))
         .route("/api/groups/:id/acl", put(set_acl))
         .route("/api/peers", get(list_peers).post(create_peer))
-        .route("/api/peers/:id", delete(delete_peer))
+        .route("/api/peers/:id", delete(delete_peer).put(update_peer))
         .route("/api/peers/:id/group", put(move_peer))
         .route("/api/forwards", get(list_forwards).post(create_forward))
         .route(
@@ -254,6 +254,7 @@ pub fn openapi() -> String {
             peers::create_peer,
             peers::delete_peer,
             peers::move_peer,
+            peers::update_peer,
             forwards::list_forwards,
             forwards::create_forward,
             forwards::delete_forward,
@@ -271,6 +272,7 @@ pub fn openapi() -> String {
             NewPeer,
             PeerProvision,
             MovePeer,
+            UpdatePeer,
             SetAcl,
             Status,
             Forward,

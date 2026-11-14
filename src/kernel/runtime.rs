@@ -312,13 +312,12 @@ fn install_snapshot(
         .collect();
     let retained = state.wireguard.install(identities)?;
     let mut next_stats = HashMap::new();
-    for id in compiled.peers.keys() {
-        let prior = retained
-            .get(id)
-            .copied()
-            .unwrap_or(false)
-            .then(|| state.stats.get(id).copied())
-            .flatten();
+    for id in compiled.initial_stats.keys() {
+        // Keep counters while disabled; its tunnel and routes are removed.
+        let keep_stats = retained.get(id).copied().unwrap_or(false)
+            || !compiled.peers.contains_key(id)
+            || !state.dataplane.config.peers.contains_key(id);
+        let prior = keep_stats.then(|| state.stats.get(id).copied()).flatten();
         let (rx_bytes, tx_bytes, last_handshake_unix) = prior
             .map(|s| (s.rx_bytes, s.tx_bytes, s.last_handshake_unix))
             .unwrap_or_else(|| compiled.initial_stats.get(id).copied().unwrap_or_default());

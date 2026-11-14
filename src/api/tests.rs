@@ -371,6 +371,7 @@ async fn endpoint_validation_status_matrix_does_not_queue_reload_for_failures() 
         public_key: "pk".into(),
         ipv4: String::new(),
         group_id: "g".into(),
+        enabled: true,
         received_bytes: 0,
         sent_bytes: 0,
         last_handshake_unix: None,
@@ -887,6 +888,7 @@ async fn full_reload_queue_rejects_each_mutation_family_before_writing() {
         public_key: "pk".into(),
         ipv4: String::new(),
         group_id: "g".into(),
+        enabled: true,
         received_bytes: 0,
         sent_bytes: 0,
         last_handshake_unix: None,
@@ -1270,6 +1272,7 @@ async fn forward_edit_requires_revision_and_activation_acknowledgement() {
         public_key: "key-p".into(),
         ipv4: String::new(),
         group_id: "g".into(),
+        enabled: true,
         received_bytes: 0,
         sent_bytes: 0,
         last_handshake_unix: None,
@@ -1356,4 +1359,91 @@ async fn forward_edit_requires_revision_and_activation_acknowledgement() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(text.contains("activation_unconfirmed"));
     assert!(text.contains(&format!("\"persisted_revision\":{}", revision + 1)));
+}
+
+#[tokio::test]
+async fn peer_update_validates_and_waits_for_activation_before_success() {
+    let (state, mut rx, headers) = test_state(true);
+    state
+        .store
+        .add_group(&Group {
+            id: "g".into(),
+            name: "g".into(),
+            allowed_groups: vec![],
+        })
+        .unwrap();
+    let mut peer = Peer {
+        id: "p".into(),
+        name: "p".into(),
+        public_key: "key".into(),
+        ipv4: String::new(),
+        group_id: "g".into(),
+        enabled: true,
+        received_bytes: 0,
+        sent_bytes: 0,
+        last_handshake_unix: None,
+    };
+    state.store.create_peer_allocated(&mut peer).unwrap();
+    for (id, name, enabled, expected) in [
+        ("p", None, None, StatusCode::BAD_REQUEST),
+        ("p", Some("   "), None, StatusCode::BAD_REQUEST),
+        ("missing", None, Some(false), StatusCode::NOT_FOUND),
+    ] {
+        let response = update_peer(
+            State(state.clone()),
+            headers.clone(),
+            Path(id.into()),
+            Json(UpdatePeer {
+                name: name.map(str::to_string),
+                enabled,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), expected);
+        assert_no_reload(&mut rx).await;
+    }
+    let response = update_peer(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path("p".into()),
+        Json(UpdatePeer {
+            name: None,
+            enabled: Some(false),
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_no_reload(&mut rx).await;
+    let update = tokio::spawn(update_peer(
+        State(state.clone()),
+        headers.clone(),
+        Path("p".into()),
+        Json(UpdatePeer {
+            name: Some("Laptop".into()),
+            enabled: Some(false),
+        }),
+    ));
+    let command = rx.recv().await.unwrap();
+    assert!(!update.is_finished());
+    assert!(!state.store.peers().unwrap()[0].enabled);
+    command.respond(Ok(()));
+    let (status, body) = response_text(update.await.unwrap().into_response()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Laptop") && body.contains("\"enabled\":false"));
+    let update = tokio::spawn(update_peer(
+        State(state.clone()),
+        headers,
+        Path("p".into()),
+        Json(UpdatePeer {
+            name: None,
+            enabled: Some(true),
+        }),
+    ));
+    rx.recv().await.unwrap().respond(Err(ReloadError::Rejected));
+    let (status, body) = response_text(update.await.unwrap().into_response()).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body.contains("activation_unconfirmed"));
+    assert!(state.store.peers().unwrap()[0].enabled);
 }

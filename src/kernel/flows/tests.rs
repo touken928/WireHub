@@ -10,6 +10,7 @@ fn peer(id: &str, ip: &str) -> Peer {
         public_key: String::new(),
         ipv4: ip.into(),
         group_id: String::new(),
+        enabled: true,
         received_bytes: 0,
         sent_bytes: 0,
         last_handshake_unix: None,

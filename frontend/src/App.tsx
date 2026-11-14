@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
-  Activity, ArrowDownLeft, ArrowLeftRight, ArrowUpRight, Check, CircleHelp,
+  Activity, ArrowLeftRight, ArrowUpRight, Check, CircleHelp,
   Copy, Download, Gauge, GitBranch, KeyRound, LoaderCircle, LogOut,
-  Menu, Network, Pencil, Plus, QrCode, Radio, RefreshCw, Search, Settings2, Shield, Trash2, X,
+  Menu, Network, Pencil, Plus, QrCode, Radio, RefreshCw, Settings2, Shield, Trash2,
 } from 'lucide-react'
 import GroupsPage from './components/groups/GroupsPage'
 import TrafficChart from './components/TrafficChart'
 import { useTraffic, type Traffic } from './useTraffic'
 import Dialog from './components/Dialog'
 import PeerQRCode from './components/PeerQRCode'
+import PeersPage from './components/peers/PeersPage'
+import PeerTraffic from './components/peers/PeerTraffic'
 import ForwardDialog from './components/forwards/ForwardDialog'
 import '@xyflow/react/dist/style.css'
 import { ApiError, client, configApi, forwardsApi, mutationFailure, rememberToken, setupApi, type Configuration, type RuntimeStatus, type Forward, type NetworkSettings, type SetupStatus } from './api/client'
@@ -265,10 +267,29 @@ export default function App() {
     pendingPeersRef.current.clear(); setPendingPeers(new Set())
     settingsPendingRef.current = false; setSettingsSaving(false); setSettingsError(''); setSettingsVersion(0); setPolicyDirty(false); setPage('overview')
   }
+  const updatePeer = async (peer: Peer, changes: components['schemas']['UpdatePeer']) => {
+    if (!beginPeerMutation(peer.id)) return false
+    const session = sessionRef.current
+    invalidateLoads(); setError('')
+    try {
+      const { data, error, response } = await client.PUT('/api/peers/{id}', { params: { path: { id: peer.id } }, body: changes })
+      if (session !== sessionRef.current) return false
+      if (error || !data) throw new ApiError(error?.message ?? 'Update unconfirmed. Refresh peers before retrying.', response.status)
+      configurationChanged()
+      setPeers(items => items.map(item => item.id === peer.id ? { ...item, name: data.name, enabled: data.enabled } : item))
+      setToast(changes.name !== undefined ? 'Peer renamed' : data.enabled ? 'Peer enabled' : 'Peer disabled')
+      return true
+    } catch (e) {
+      if (session !== sessionRef.current) return false
+      throw new Error(mutationFailure(e, 'Update unconfirmed. Refresh peers before retrying.'))
+    } finally {
+      if (session === sessionRef.current) { configurationChanged(); finishPeerMutation(peer.id) }
+    }
+  }
   const activeSession = sessionRef.current
   const activeProvisionGeneration = provisionGenerationRef.current
   const filteredPeers = peers.filter(p => `${p.name} ${p.ipv4} ${groupName(groups, p.group_id)}`.toLowerCase().includes(query.toLowerCase()))
-  const stats = useMemo(() => ({ online: peers.filter(p => Date.now() / 1000 - (p.last_handshake_unix ?? 0) < 180).length, transferred: peers.reduce((s, p) => s + p.received_bytes, 0) }), [peers])
+  const stats = useMemo(() => ({ online: peers.filter(p => p.enabled !== false && Date.now() / 1000 - (p.last_handshake_unix ?? 0) < 180).length, transferred: peers.reduce((s, p) => s + p.received_bytes, 0) }), [peers])
 
   if (!connected) return <Login token={token} setToken={setToken} onSubmit={enter} error={loginError} busy={loginBusy} />
   if (setup && !setup.configured) return <SetupWizard onConfigured={settings => { setSetup({ configured: true, settings }); setPage('overview') }} />
@@ -294,28 +315,28 @@ export default function App() {
         <div className="runtime-strip" role="status"><span className={`status-dot ${!runtime || runtimeError || !runtime.ready || runtime.applied_revision !== runtime.persisted_revision ? 'status-pending' : ''}`} /><b>{runtimeError ? 'Status unavailable' : !runtime ? 'Checking runtime' : !runtime.ready ? 'Runtime unavailable' : runtime.applied_revision !== runtime.persisted_revision ? 'Activating configuration' : 'Runtime ready'}</b><span>{runtimeError || (runtime?.last_activation_error ? 'Configuration activation failed; automatic recovery is running.' : sampledAt ? `Statistics updated ${sampledAt.toLocaleTimeString('en-US')}` : 'Awaiting statistics')}</span></div>
         {error && <div className="error-banner" role="alert"><CircleHelp size={18} /><span>{error}</span><button onClick={() => void load()}>Retry</button></div>}
         {page === 'overview' && <Overview peers={peers} groups={groups} forwards={forwards} stats={stats} traffic={traffic} busy={busy} settings={setup?.settings ?? null} updatedAt={updatedAt} setPage={navigate} />}
-        {page === 'peers' && <PeersPage peers={filteredPeers} allCount={peers.length} groups={groups} query={query} setQuery={setQuery} onCreate={() => setModal({ kind: 'peer' })} pendingPeers={pendingPeers} onCopied={() => setToast('IP copied')} onCopyError={() => setToast('Copy failed. Select the IP to copy it.')} onMove={async (peer, groupId) => {
+        {page === 'peers' && <PeersPage peers={filteredPeers} allCount={peers.length} groups={groups} query={query} setQuery={setQuery} onCreate={() => setModal({ kind: 'peer' })} pendingPeers={pendingPeers} onCopied={() => setToast('IP copied')} onCopyError={() => setToast('Copy failed. Select the IP to copy it.')} onRename={(peer, name) => updatePeer(peer, { name })} onToggle={async peer => { try { await updatePeer(peer, { enabled: peer.enabled === false }) } catch (e) { setError(e instanceof Error ? e.message : 'Unable to update peer.') } }} onMove={async (peer, groupId) => {
           if (!beginPeerMutation(peer.id)) return
-          const session = sessionRef.current; setError('')
+          const session = sessionRef.current; invalidateLoads(); setError('')
           try {
             const r = await client.PUT('/api/peers/{id}/group', { params: { path: { id: peer.id } }, body: { group_id: groupId } })
             if (session !== sessionRef.current) return
             if (r.error || !r.data) throw new Error('Move unconfirmed. Refresh to check the group.')
-            configurationChanged(); setPeers(v => v.map(x => x.id === peer.id ? r.data! : x)); setToast('Group updated')
+            configurationChanged(); setPeers(v => v.map(x => x.id === peer.id ? { ...x, group_id: r.data!.group_id } : x)); setToast('Group updated')
           } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Unable to move peer.')) }
-          finally { if (session === sessionRef.current) finishPeerMutation(peer.id) }
+          finally { if (session === sessionRef.current) { configurationChanged(); finishPeerMutation(peer.id) } }
         }} onDelete={async peer => {
           if (pendingPeersRef.current.has(peer.id)) return
           if (!confirm(`Remove peer "${peer.name}"? Its configuration will stop working.`)) return
           if (!beginPeerMutation(peer.id)) return
-          const session = sessionRef.current; setError('')
+          const session = sessionRef.current; invalidateLoads(); setError('')
           try {
             const r = await client.DELETE('/api/peers/{id}', { params: { path: { id: peer.id } } })
             if (session !== sessionRef.current) return
             if (r.error) throw new Error('Deletion unconfirmed. Refresh to check the current state.')
             configurationChanged(); setPeers(v => v.filter(x => x.id !== peer.id)); setForwards(v => v.filter(x => x.target_peer_id !== peer.id)); setToast('Peer removed')
           } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Unable to delete peer.')) }
-          finally { if (session === sessionRef.current) finishPeerMutation(peer.id) }
+          finally { if (session === sessionRef.current) { configurationChanged(); finishPeerMutation(peer.id) } }
         }} />}
           {page === 'groups' && <GroupsPage conflict={policyConflict} onResolveConflict={resolveConflict} onDirtyChange={setPolicyDirty} groups={groups} peers={peers} saving={policySaving} uncertain={policyUncertain} error={policyError} onCreate={() => { if (!policyPendingRef.current && !policyUncertainRef.current) setModal({ kind: 'group' }) }} onDelete={async g => { if (policyPendingRef.current || policyUncertainRef.current) return; if (!confirm(`Delete group "${g.name}"?`)) return; try { const r = await client.DELETE('/api/groups/{id}', { params: { path: { id: g.id } } }); if (activeSession !== sessionRef.current) return; if (!r.error) { configurationChanged(); setGroups(v => v.filter(x => x.id !== g.id).map(x => ({ ...x, allowed_groups: (x.allowed_groups ?? []).filter(id => id !== g.id) }))); setForwards(v => v.map(f => ({ ...f, allowed_group_ids: f.allowed_group_ids.filter(id => id !== g.id) }))); setToast('Group deleted') } else setError('Deletion unconfirmed. Refresh before retrying.') } catch (e) { if (activeSession === sessionRef.current) setError(mutationFailure(e, 'Unable to delete group.')) } }} onSavePolicy={savePolicy} onReload={recoverPolicy} />}
           {page === 'forwards' && <ForwardsPage forwards={forwards} subnet={setup?.settings?.subnet ?? ''} loadError={forwardsError} onRetry={() => void load()} peers={peers} groups={groups} onCreate={() => setModal({ kind: 'forward' })} onEdit={forward => setModal({ kind: 'forward', id: forward.id })} onDelete={async f => { if (!confirm(`Delete forward "${f.name}"?`)) return; const session = sessionRef.current; try { await forwardsApi.remove(f.id); if (session !== sessionRef.current) return; configurationChanged(); setForwards(v => v.filter(x => x.id !== f.id)); setToast('Forward deleted') } catch (e) { if (session === sessionRef.current) setError(mutationFailure(e, 'Deletion unconfirmed. Refresh before retrying.')) } }} />}
@@ -445,30 +466,12 @@ function Overview({ peers, groups, forwards, stats, traffic, busy, settings, upd
     <section className="metric-grid" aria-label="Network metrics"><Metric icon={<Network />} label="Peers" value={String(peers.length).padStart(2, '0')} /><Metric icon={<Activity />} label="Recent handshakes" value={String(stats.online).padStart(2, '0')} foot="Last 3 minutes" /><Metric icon={<ArrowLeftRight />} label="Transferred" value={formatBytes(stats.transferred)} foot="Each transfer counted once" /><Metric icon={<Gauge />} label="Current rate" value={traffic.rate === null ? '—' : formatRate(traffic.rate)} foot={traffic.rate === null ? 'Waiting for two fresh samples' : '5 s sample average'} /></section>
     <div className="overview-grid"><section className="panel traffic-panel"><div className="panel-head"><h2>Live traffic</h2><span className="badge">5 s refresh</span></div><div className="traffic-value mono">{traffic.rate === null ? '—' : formatRate(traffic.rate)}</div><TrafficChart traffic={traffic} formatRate={formatRate} /><p className="traffic-note">{traffic.rate === null ? 'Collecting fresh samples while this tab is visible.' : 'Delivered peer traffic, counted once per transfer.'}</p></section>
     <section className="panel group-panel"><div className="panel-head"><h2>Groups</h2><button className="icon-button" aria-label="Open groups" onClick={() => setPage('groups')}><ArrowUpRight size={17} /></button></div>{busy ? <Loading /> : groups.length ? <div className="group-overview-list">{groups.slice(0, 5).map(g => <button className="group-overview-item" key={g.id} onClick={() => setPage('groups')}><span className="group-symbol"><GitBranch size={16} /></span><b title={g.name}>{g.name}</b><span className="mono">{peers.filter(p => p.group_id === g.id).length}<small> peers</small></span></button>)}</div> : <Empty title="No groups yet" action={<button className="text-action" onClick={() => setPage('groups')}>Create a group <ArrowUpRight size={14} /></button>} />}</section></div>
-    <section className="panel recent-panel"><div className="panel-head"><h2>Peers</h2><button className="text-action" onClick={() => setPage('peers')}>View all <ArrowUpRight size={14} /></button></div>{peers.length ? <div className="mini-peer-list">{[...peers].sort((a, b) => (b.last_handshake_unix ?? 0) - (a.last_handshake_unix ?? 0)).slice(0, 4).map(p => <div className="mini-peer" key={p.id}><div className="avatar">{initials(p.name)}</div><div className="mini-peer-main"><b title={p.name}>{p.name}</b><small className="mono">{p.ipv4}</small></div><span className={`connection-dot ${Date.now() / 1000 - (p.last_handshake_unix ?? 0) < 180 ? 'is-online' : ''}`} /><span className="mini-status">{timeAgo(p.last_handshake_unix)}</span><span className="mini-traffic mono"><span>↑ {formatBytes(p.sent_bytes)}</span><i>/</i><span>↓ {formatBytes(p.received_bytes)}</span></span></div>)}</div> : <Empty title="No peers yet" action={<button className="text-action" onClick={() => setPage('peers')}>Add a peer <Plus size={14} /></button>} />}</section><div className="overview-foot"><span><Shield size={13} /> Default deny</span><span>{forwards.length} forwards</span></div>
+    <section className="panel recent-panel"><div className="panel-head"><h2>Peers</h2><button className="text-action" onClick={() => setPage('peers')}>View all <ArrowUpRight size={14} /></button></div>{peers.length ? <div className="mini-peer-list">{[...peers].sort((a, b) => a.ipv4.localeCompare(b.ipv4, 'en', { numeric: true })).slice(0, 4).map(p => <div className="mini-peer" key={p.id}><div className="avatar">{initials(p.name)}</div><div className="mini-peer-main"><b title={p.name}>{p.name}</b><small className="mono">{p.ipv4}</small></div><span className={`connection-dot ${p.enabled !== false && Date.now() / 1000 - (p.last_handshake_unix ?? 0) < 180 ? 'is-online' : ''}`} /><span className="mini-status">{p.enabled === false ? 'Disabled' : timeAgo(p.last_handshake_unix)}</span><PeerTraffic peer={p} compact /></div>)}</div> : <Empty title="No peers yet" action={<button className="text-action" onClick={() => setPage('peers')}>Add a peer <Plus size={14} /></button>} />}</section><div className="overview-foot"><span><Shield size={13} /> Default deny</span><span>{forwards.length} forwards</span></div>
   </div>
 }
 function Metric({ icon, label, value, foot }: { icon: ReactNode; label: string; value: string; foot?: string }) { return <div className="metric-card"><div className="metric-label">{label}{icon}</div><div className="metric-value mono">{value}</div>{foot && <div className="metric-foot">{foot}</div>}</div> }
 function Empty({ title, action }: { title: string; action?: ReactNode }) { return <div className="empty-state"><div className="empty-mark"><Network size={23} /></div><b>{title}</b>{action}</div> }
 function Loading() { return <div className="loading-state"><LoaderCircle size={18} className="spin" /> Loading…</div> }
-function PeersPage({ peers, allCount, groups, query, setQuery, onCreate, onMove, onDelete, pendingPeers, onCopied, onCopyError }: { peers: Peer[]; allCount: number; groups: Group[]; query: string; setQuery: (v: string) => void; onCreate: () => void; onMove: (p: Peer, groupId: string) => void; onDelete: (p: Peer) => void; pendingPeers: ReadonlySet<string>; onCopied: () => void; onCopyError: () => void }) {
-  return <div className="page-enter"><PageHeading title="Peers" count={`${allCount} peers`} action={<button className="button button-primary" onClick={onCreate}><Plus size={16} />New peer</button>} /><div className="list-toolbar"><div className="search-box"><Search size={16} /><input aria-label="Search peers" value={query} onChange={e => setQuery(e.target.value)} placeholder="Search name, IP, or group" />{query && <button className="icon-button tiny" aria-label="Clear search" onClick={() => setQuery('')}><X size={14} /></button>}</div><span className="result-count mono">{peers.length} / {allCount}</span></div>
-    {peers.length ? <div className="peer-list">{peers.map(p => {
-      const recent = Date.now() / 1000 - (p.last_handshake_unix ?? 0) < 180
-      return <article className="peer-card" key={p.id}>
-        <div className="avatar">{initials(p.name)}</div>
-        <div className="peer-identity"><h3 title={p.name}>{p.name}</h3>
-          <div className="peer-address mono">{p.ipv4}<button className="icon-button tiny" aria-label={`Copy IP for ${p.name}`} onClick={async () => { try { await navigator.clipboard.writeText(p.ipv4); onCopied() } catch { onCopyError() } }}><Copy size={13} /></button></div>
-          <div className="peer-card-state"><span className={`connection-dot ${recent ? 'is-online' : ''}`} />{recent ? 'Recent handshake' : 'No recent handshake'}<span>{timeAgo(p.last_handshake_unix)}</span></div>
-        </div>
-        <div className="peer-row-details"><label className="peer-meta-row"><span>Group</span><select disabled={pendingPeers.has(p.id)} aria-label={`Group for ${p.name}`} value={p.group_id} onChange={e => onMove(p, e.target.value)}>{groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label>
-          <div className="peer-traffic mono"><span><ArrowUpRight size={13} />{formatBytes(p.sent_bytes)}</span><span><ArrowDownLeft size={13} />{formatBytes(p.received_bytes)}</span></div>
-        </div>
-        <button className="icon-button danger-on-hover peer-delete" disabled={pendingPeers.has(p.id)} aria-label={`Delete peer ${p.name}`} onClick={() => onDelete(p)}><Trash2 size={15} /></button>
-      </article>
-    })}</div> : <div className="panel empty-panel"><Empty title={query ? 'No matching peers' : 'No peers yet'} action={query ? <button className="text-action" onClick={() => setQuery('')}>Clear search</button> : <button className="button button-primary" onClick={onCreate}><Plus size={15} />New peer</button>} /></div>}
-  </div>
-}
 function ForwardsPage({ forwards, subnet, peers, groups, onCreate, onEdit, onDelete, loadError, onRetry }: { forwards: Forward[]; subnet: string; peers: Peer[]; groups: Group[]; onCreate: () => void; onEdit: (f: Forward) => void; onDelete: (f: Forward) => void; loadError: string; onRetry: () => void }) {
   const hubAddress = subnet.replace(/\.0\/24$/, '.1')
   return <div className="page-enter">

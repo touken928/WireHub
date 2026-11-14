@@ -226,6 +226,9 @@
       },
       "Peer": {
         "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
           "group_id": {
             "type": "string"
           },
@@ -247,11 +250,13 @@
             "type": "string"
           },
           "received_bytes": {
+            "description": "Plaintext bytes received by the hub from this peer (peer upload).",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "sent_bytes": {
+            "description": "Plaintext bytes sent by the hub to this peer (peer download).",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -285,6 +290,9 @@
       },
       "PeerStatus": {
         "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
           "group_id": {
             "type": "string"
           },
@@ -311,11 +319,13 @@
             "type": "string"
           },
           "received_bytes": {
+            "description": "Plaintext bytes received by the hub from this peer (peer upload).",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "sent_bytes": {
+            "description": "Plaintext bytes sent by the hub to this peer (peer download).",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -327,6 +337,7 @@
           "public_key",
           "ipv4",
           "group_id",
+          "enabled",
           "received_bytes",
           "sent_bytes"
         ],
@@ -502,6 +513,20 @@
         "required": [
           "ok"
         ],
+        "type": "object"
+      },
+      "UpdatePeer": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "nullable": true,
+            "type": "boolean"
+          },
+          "name": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
         "type": "object"
       }
     },
@@ -1609,6 +1634,139 @@
               }
             },
             "description": "Conflict"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Persistence failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Runtime unavailable or activation unconfirmed"
+          }
+        },
+        "security": [
+          {
+            "adminBearer": []
+          }
+        ],
+        "tags": [
+          "crate"
+        ]
+      },
+      "put": {
+        "operationId": "update_peer",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePeer"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Peer"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Resource missing"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Body too large"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "JSON content type required"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid JSON body"
           },
           "500": {
             "content": {

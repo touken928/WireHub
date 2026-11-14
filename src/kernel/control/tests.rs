@@ -35,6 +35,7 @@ fn snapshot(id: &str, bytes: u64) -> CompiledSnapshot {
             public_key: base64::engine::general_purpose::STANDARD.encode([bytes as u8; 32]),
             ipv4: "10.9.0.2".into(),
             group_id: "group".into(),
+            enabled: true,
             received_bytes: bytes,
             sent_bytes: bytes + 1,
             last_handshake_unix: Some(bytes as i64),

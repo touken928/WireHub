@@ -140,7 +140,7 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        put?: never;
+        put: operations["update_peer"];
         post?: never;
         delete: operations["delete_peer"];
         options?: never;
@@ -311,6 +311,7 @@ export interface components {
             name: string;
         };
         Peer: {
+            enabled?: boolean;
             group_id: string;
             id: string;
             ipv4: string;
@@ -318,9 +319,15 @@ export interface components {
             last_handshake_unix?: number | null;
             name: string;
             public_key: string;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Plaintext bytes received by the hub from this peer (peer upload).
+             */
             received_bytes: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Plaintext bytes sent by the hub to this peer (peer download).
+             */
             sent_bytes: number;
         };
         PeerProvision: {
@@ -328,6 +335,7 @@ export interface components {
             peer: components["schemas"]["Peer"];
         };
         PeerStatus: {
+            enabled: boolean;
             group_id: string;
             id: string;
             ipv4: string;
@@ -337,9 +345,15 @@ export interface components {
             last_handshake_unix?: number | null;
             name: string;
             public_key: string;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Plaintext bytes received by the hub from this peer (peer upload).
+             */
             received_bytes: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Plaintext bytes sent by the hub to this peer (peer download).
+             */
             sent_bytes: number;
         };
         PolicyChange: {
@@ -386,6 +400,10 @@ export interface components {
         };
         Status: {
             ok: boolean;
+        };
+        UpdatePeer: {
+            enabled?: boolean | null;
+            name?: string | null;
         };
     };
     responses: never;
@@ -1167,6 +1185,112 @@ export interface operations {
             };
             /** @description Authentication required */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Body too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description JSON content type required */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Invalid JSON body */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Persistence failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Runtime unavailable or activation unconfirmed */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    update_peer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdatePeer"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Peer"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Resource missing */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

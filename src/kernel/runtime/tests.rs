@@ -435,6 +435,7 @@ fn persisted_peer_address_validation_accepts_last_peer_ip_and_rejects_reserved_a
                     .encode(PublicKey::from(&secret).as_bytes()),
                 ipv4: ip.into(),
                 group_id: "g".into(),
+                enabled: true,
                 received_bytes: 0,
                 sent_bytes: 0,
                 last_handshake_unix: None,
@@ -514,6 +515,7 @@ async fn apply_snapshot_seeds_persisted_stats_and_retained_reload_keeps_runtime_
                 .encode(PublicKey::from(&secret).as_bytes()),
             ipv4: "10.77.0.2".into(),
             group_id: "g".into(),
+            enabled: true,
             received_bytes: 111,
             sent_bytes: 222,
             last_handshake_unix: Some(333),
@@ -559,6 +561,26 @@ async fn apply_snapshot_seeds_persisted_stats_and_retained_reload_keeps_runtime_
             last_data_unix: Some(777)
         }
     );
+    store.update_peer("p", None, Some(false)).unwrap();
+    install_snapshot(load(), &mut state).unwrap();
+    assert!(state.dataplane.authenticated_peer("p").is_none());
+    assert!(!state
+        .dataplane
+        .config
+        .by_ip
+        .contains_key(&"10.77.0.2".parse().unwrap()));
+    assert_eq!(state.stats["p"].rx_bytes, 444);
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut out = vec![0; 65535];
+    assert!(matches!(
+        state.wireguard.deliver(&socket, "p", &[], &mut out).await,
+        wireguard::TransportOutcome::Failed
+    ));
+    store.update_peer("p", None, Some(true)).unwrap();
+    install_snapshot(load(), &mut state).unwrap();
+    assert!(state.dataplane.authenticated_peer("p").is_some());
+    assert_eq!(state.stats["p"].rx_bytes, 444);
+    assert_eq!(state.stats["p"].tx_bytes, 555);
 }
 
 #[tokio::test]
@@ -719,6 +741,7 @@ async fn forward_load_errors_fail_closed_and_are_acknowledged() {
                     .encode(PublicKey::from(&secret).as_bytes()),
                 ipv4: "10.77.0.2".into(),
                 group_id: "g".into(),
+                enabled: true,
                 received_bytes: 0,
                 sent_bytes: 0,
                 last_handshake_unix: None,
@@ -842,6 +865,7 @@ async fn malformed_snapshot_recovery_installs_only_latest_policy_and_peers() {
                         .encode(PublicKey::from(secret).as_bytes()),
                     ipv4: ip.into(),
                     group_id: group.into(),
+                    enabled: true,
                     received_bytes: 0,
                     sent_bytes: 0,
                     last_handshake_unix: None,
@@ -926,6 +950,7 @@ async fn malformed_snapshot_recovery_installs_only_latest_policy_and_peers() {
                     .encode(PublicKey::from(&d_secret).as_bytes()),
                 ipv4: "10.88.0.5".into(),
                 group_id: "new".into(),
+                enabled: true,
                 received_bytes: 0,
                 sent_bytes: 0,
                 last_handshake_unix: None,
@@ -1406,6 +1431,7 @@ async fn boringtun_nat_tcp_udp_roundtrip_and_live_policy_revocation() {
                     .encode(PublicKey::from(secret).as_bytes()),
                 ipv4: (*ip).into(),
                 group_id: (*group).into(),
+                enabled: true,
                 received_bytes: 0,
                 sent_bytes: 0,
                 last_handshake_unix: None,
@@ -1961,6 +1987,7 @@ async fn only_authenticated_keepalive_can_migrate_peer_endpoint() {
                     .encode(PublicKey::from(secret).as_bytes()),
                 ipv4: ip.into(),
                 group_id: group.into(),
+                enabled: true,
                 received_bytes: 0,
                 sent_bytes: 0,
                 last_handshake_unix: None,
@@ -2072,6 +2099,7 @@ async fn router_does_not_publish_stats_per_packet_and_ignores_unauthenticated_up
                 .encode(PublicKey::from(&a_secret).as_bytes()),
             ipv4: "10.1.0.2".into(),
             group_id: "a".into(),
+            enabled: true,
             received_bytes: 0,
             sent_bytes: 0,
             last_handshake_unix: None,
@@ -2294,6 +2322,7 @@ async fn unrelated_reload_preserves_established_client_tunnels_and_direct_udp_fl
                     .encode(PublicKey::from(secret).as_bytes()),
                 ipv4: ip.into(),
                 group_id: group.into(),
+                enabled: true,
                 received_bytes: 0,
                 sent_bytes: 0,
                 last_handshake_unix: None,
@@ -2406,6 +2435,7 @@ async fn boringtun_clients_handshake_and_route_only_authorized_ipv4() {
             public_key: base64::engine::general_purpose::STANDARD.encode(public.as_bytes()),
             ipv4: ip.into(),
             group_id: group.into(),
+            enabled: true,
             received_bytes: 0,
             sent_bytes: 0,
             last_handshake_unix: None,
@@ -2656,6 +2686,7 @@ async fn unrelated_reload_preserves_established_forward_tcp_tunnel_and_nat_tuple
                     .encode(PublicKey::from(secret).as_bytes()),
                 ipv4: ip.into(),
                 group_id: group.into(),
+                enabled: true,
                 received_bytes: 0,
                 sent_bytes: 0,
                 last_handshake_unix: None,
@@ -2823,6 +2854,7 @@ async fn cold_forward_two_syns_deliver_after_handshake_with_exact_reverse_mappin
                     .encode(PublicKey::from(secret).as_bytes()),
                 ipv4: ip.into(),
                 group_id: group.into(),
+                enabled: true,
                 received_bytes: 0,
                 sent_bytes: 0,
                 last_handshake_unix: None,
@@ -3094,6 +3126,7 @@ async fn cold_forward_deletion_ack_prevents_late_handshake_delivery() {
                     .encode(PublicKey::from(secret).as_bytes()),
                 ipv4: ip.into(),
                 group_id: group.into(),
+                enabled: true,
                 received_bytes: 0,
                 sent_bytes: 0,
                 last_handshake_unix: None,
@@ -3283,6 +3316,7 @@ async fn reload_revocation_blocks_established_direct_flow_requests_and_replies()
                     .encode(PublicKey::from(secret).as_bytes()),
                 ipv4: ip.into(),
                 group_id: group.into(),
+                enabled: true,
                 received_bytes: 0,
                 sent_bytes: 0,
                 last_handshake_unix: None,

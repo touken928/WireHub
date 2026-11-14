@@ -389,6 +389,38 @@ impl Store {
     pub fn remove_peer(&self, id: &str) -> rusqlite::Result<usize> {
         self.delete_rows("DELETE FROM peers WHERE id=?1", [id])
     }
+    pub fn update_peer(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        enabled: Option<bool>,
+    ) -> rusqlite::Result<usize> {
+        let name = name.map(normalized_name).transpose()?;
+        let mut db = self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM peers WHERE id=?1 AND id NOT IN (SELECT peer_id FROM pending_provisions))", [id], |r| r.get(0))?;
+        if !exists {
+            return Ok(0);
+        }
+        if let Some(name) = name {
+            tx.execute("UPDATE peers SET name=?2 WHERE id=?1", params![id, name])?;
+        }
+        match enabled {
+            Some(true) => {
+                tx.execute("DELETE FROM disabled_peers WHERE peer_id=?1", [id])?;
+            }
+            Some(false) => {
+                tx.execute(
+                    "INSERT OR IGNORE INTO disabled_peers(peer_id) VALUES(?1)",
+                    [id],
+                )?;
+            }
+            None => {}
+        }
+        advance_revision(&tx)?;
+        tx.commit()?;
+        Ok(1)
+    }
     pub fn forwards(&self) -> rusqlite::Result<Vec<Forward>> {
         let db = self.db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
         read_forwards(&db)
@@ -498,7 +530,7 @@ fn read_groups(db: &Connection) -> rusqlite::Result<Vec<Group>> {
 }
 fn read_peers(db: &Connection) -> rusqlite::Result<Vec<Peer>> {
     let mut q = db
-        .prepare("SELECT id,trim(name),public_key,ipv4,group_id,rx,tx,last_handshake FROM peers")?;
+        .prepare("SELECT id,trim(name),public_key,ipv4,group_id,rx,tx,last_handshake,NOT EXISTS(SELECT 1 FROM disabled_peers WHERE peer_id=peers.id) FROM peers")?;
     let rows = q.query_map([], |r| {
         Ok(Peer {
             id: r.get(0)?,
@@ -509,6 +541,7 @@ fn read_peers(db: &Connection) -> rusqlite::Result<Vec<Peer>> {
             received_bytes: r.get(5)?,
             sent_bytes: r.get(6)?,
             last_handshake_unix: r.get(7)?,
+            enabled: r.get(8)?,
         })
     })?;
     rows.collect()

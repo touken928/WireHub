@@ -2,7 +2,7 @@ use super::{sql_error, Store};
 use crate::network;
 use rusqlite::{Connection, OptionalExtension};
 
-pub(super) const SCHEMA_VERSION: i64 = 6;
+pub(super) const SCHEMA_VERSION: i64 = 7;
 const LEGACY_FORWARDS: &str = "CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,target_port INTEGER NOT NULL,allowed TEXT NOT NULL,UNIQUE(protocol,target_port));";
 const FORWARDS: &str = "CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,listen_port INTEGER NOT NULL,target_port INTEGER NOT NULL,allowed TEXT NOT NULL,UNIQUE(protocol,listen_port));";
 pub(super) const TABLES: &str = "
@@ -16,6 +16,7 @@ CREATE UNIQUE INDEX peers_name_unique ON peers(name);
 CREATE TABLE pending_provisions(peer_id TEXT PRIMARY KEY NOT NULL REFERENCES peers(id) ON DELETE CASCADE);
 CREATE TABLE config_state(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision BETWEEN 0 AND 9007199254740991));
 INSERT INTO config_state(id,revision) VALUES(1,0);
+CREATE TABLE disabled_peers(peer_id TEXT PRIMARY KEY NOT NULL REFERENCES peers(id) ON DELETE CASCADE);
 ";
 
 pub(super) fn open(
@@ -26,7 +27,7 @@ pub(super) fn open(
     db.pragma_update(None, "foreign_keys", "ON")?;
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version != 0 && version != 3 && version != 4 && version != 5 && version != SCHEMA_VERSION {
+    if ![0, 3, 4, 5, 6, SCHEMA_VERSION].contains(&version) {
         return Err(sql_error("database schema version is unsupported (including v1/v2); export any needed data and create a fresh database; refusing to modify database"));
     }
     if version == 0 {
@@ -63,7 +64,13 @@ pub(super) fn open(
         if version < 5 {
             tx.execute_batch(&format!(
                 "CREATE TABLE config_state{}",
-                TABLES.split_once("CREATE TABLE config_state").unwrap().1
+                TABLES
+                    .split_once("CREATE TABLE config_state")
+                    .unwrap()
+                    .1
+                    .split("CREATE TABLE disabled_peers")
+                    .next()
+                    .unwrap()
             ))?;
         } else {
             let valid: i64 = tx.query_row("SELECT COUNT(*) FROM config_state WHERE id=1 AND typeof(revision)='integer' AND revision BETWEEN 0 AND 9007199254740991", [], |r| r.get(0))?;
@@ -78,8 +85,11 @@ pub(super) fn open(
             tx.execute_batch("ALTER TABLE forwards RENAME TO forwards_legacy;")?;
             tx.execute_batch(FORWARDS)?;
             tx.execute_batch("INSERT INTO forwards(id,name,protocol,target_peer_id,listen_port,target_port,allowed) SELECT id,name,protocol,target_peer_id,target_port,target_port,allowed FROM forwards_legacy; DROP TABLE forwards_legacy;")?;
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
+        if version < 7 {
+            tx.execute_batch("CREATE TABLE disabled_peers(peer_id TEXT PRIMARY KEY NOT NULL REFERENCES peers(id) ON DELETE CASCADE);")?;
+        }
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     tx.commit()?;
     Ok(Store {
@@ -124,6 +134,8 @@ fn validate_schema_exact(db: &Connection, version: i64) -> rusqlite::Result<()> 
             .unwrap()
     } else if version == 4 {
         TABLES.split("CREATE TABLE config_state").next().unwrap()
+    } else if version < 7 {
+        TABLES.split("CREATE TABLE disabled_peers").next().unwrap()
     } else {
         TABLES
     };

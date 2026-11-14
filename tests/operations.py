@@ -192,30 +192,30 @@ def run(binary, rollback_binary, output):
         checks.append(
             "restart preserves identity with residual key publication hard link"
         )
-        current_archive = directory / "schema-6-backup"
+        current_archive = directory / "schema-7-backup"
         backup.backup(hub.directory / "wirehub.sqlite3", key, current_archive)
         current_metadata = backup.verify(current_archive)
         check(
-            current_metadata["schema_version"] == 6,
+            current_metadata["schema_version"] == 7,
             "Current backup lost schema version",
         )
-        current_restored = directory / "schema-6-restored"
+        current_restored = directory / "schema-7-restored"
         backup.restore(current_archive, current_restored)
         current_hub = Hub(binary, current_restored)
         try:
             check(
                 snapshot(current_hub.url, current_hub.token) == before,
-                "Schema 6 backup restore changed inventory",
+                "Schema 7 backup restore changed inventory",
             )
         finally:
             current_hub.stop()
         checks.append(
-            "schema 6 paired backup verifies and restores complete service state"
+            "schema 7 paired backup verifies and restores complete service state"
         )
         # Canonical schema 5 pre-upgrade fixture, using only the temporary pair.
         with sqlite3.connect(hub.directory / "wirehub.sqlite3") as connection:
             connection.executescript(
-                "ALTER TABLE forwards RENAME TO forwards_new; CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,target_port INTEGER NOT NULL,allowed TEXT NOT NULL,UNIQUE(protocol,target_port)); INSERT INTO forwards(id,name,protocol,target_peer_id,target_port,allowed) SELECT id,name,protocol,target_peer_id,target_port,allowed FROM forwards_new; DROP TABLE forwards_new; "
+                "DROP TABLE disabled_peers; ALTER TABLE forwards RENAME TO forwards_new; CREATE TABLE forwards(id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL,target_peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,target_port INTEGER NOT NULL,allowed TEXT NOT NULL,UNIQUE(protocol,target_port)); INSERT INTO forwards(id,name,protocol,target_peer_id,target_port,allowed) SELECT id,name,protocol,target_peer_id,target_port,allowed FROM forwards_new; DROP TABLE forwards_new; "
             )
             connection.execute("PRAGMA user_version=5")
             connection.commit()
@@ -271,8 +271,8 @@ def run(binary, rollback_binary, output):
             )
             with sqlite3.connect(upgraded / "wirehub.sqlite3") as connection:
                 check(
-                    connection.execute("PRAGMA user_version").fetchone()[0] == 6,
-                    "Upgrade did not install schema 6",
+                    connection.execute("PRAGMA user_version").fetchone()[0] == 7,
+                    "Upgrade did not install schema 7",
                 )
             request(
                 migrated.url + "/api/settings",

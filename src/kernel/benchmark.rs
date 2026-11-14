@@ -31,6 +31,7 @@ fn plane(peers: usize, forwards: usize) -> DataPlane {
                     public_key: base64::engine::general_purpose::STANDARD.encode(key),
                     ipv4: format!("10.77.0.{}", i + 2),
                     group_id: "g".into(),
+                    enabled: true,
                     received_bytes: 0,
                     sent_bytes: 0,
                     last_handshake_unix: None,

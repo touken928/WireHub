@@ -158,6 +158,7 @@ impl TryFrom<NetworkSnapshot> for CompiledSnapshot {
         let hub_ip = subnet.map(Subnet24::hub_ip);
         let mut peers = HashMap::new();
         let mut seen_keys = std::collections::HashSet::new();
+        let mut seen_ips = std::collections::HashSet::new();
         let mut peer_by_ip = HashMap::new();
         let groups: HashMap<_, _> = raw.groups.iter().map(|g| (g.id.as_str(), g)).collect();
         for peer in &raw.peers {
@@ -171,9 +172,13 @@ impl TryFrom<NetworkSnapshot> for CompiledSnapshot {
                 .ok_or(())?
                 .to_owned()
                 .clone();
-            if !seen_keys.insert(key) || peer_by_ip.insert(ip, peer.id.clone()).is_some() {
+            if !seen_keys.insert(key) || !seen_ips.insert(ip) {
                 return Err(());
             }
+            if !peer.enabled {
+                continue;
+            }
+            peer_by_ip.insert(ip, peer.id.clone());
             peers.insert(
                 peer.id.clone(),
                 PeerConfig {
@@ -266,6 +271,7 @@ mod tests {
                 public_key: key,
                 ipv4: "10.1.2.2".into(),
                 group_id: "g".into(),
+                enabled: true,
                 received_bytes: 0,
                 sent_bytes: 0,
                 last_handshake_unix: None,

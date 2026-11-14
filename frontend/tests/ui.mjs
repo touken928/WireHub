@@ -136,6 +136,12 @@ try {
     if (path.startsWith('/api/groups/') && method === 'DELETE') { const id = path.split('/')[3]; groups = groups.filter(g => g.id !== id); groups.forEach(g => { g.allowed_groups = g.allowed_groups.filter(to => to !== id) }); forwards = forwards.map(f => ({ ...f, allowed_group_ids: f.allowed_group_ids.filter(to => to !== id) })); commitConfig(); return route.fulfill({ status: 204 }) }
     if (path === '/api/peers' && method === 'GET') return reply(peers)
     if (path === '/api/peers' && method === 'POST') { if (peerCreateError) return textError(peerCreateError, 409); const id = peers.some(p => p.id === 'new-peer') ? `new-peer-${peers.length}` : 'new-peer'; const peer = { ...peers[0], ...body, id, ipv4: '10.77.0.4' }; peers.push(peer); commitConfig(); return reply({ peer, config: peerConfig }) }
+    if (/^\/api\/peers\/[^/]+$/.test(path) && method === 'PUT') {
+      const peer = peers.find(p => p.id === path.split('/')[3])
+      if (!peer) return reply({ message: 'peer not found' }, 404)
+      if (body.name !== undefined && (!body.name.trim() || peers.some(p => p.id !== peer.id && p.name === body.name.trim()))) return reply({ message: 'peer name already exists' }, 409)
+      Object.assign(peer, body); commitConfig(); return reply(peer)
+    }
     if (path.endsWith('/group')) { const peer = peers.find(p => p.id === path.split('/')[3]); peer.group_id = body.group_id; commitConfig(); return reply(peer) }
     if (path.startsWith('/api/peers/') && method === 'DELETE') { const id = path.split('/')[3]; peers = peers.filter(p => p.id !== id); forwards = forwards.filter(f => f.target_peer_id !== id); commitConfig(); return route.fulfill({ status: 204 }) }
     if (path === '/api/forwards' && method === 'GET') return reply(forwards)
@@ -292,6 +298,79 @@ try {
       await page.getByRole('button', { name: 'Create', exact: true }).click()
     }
     const scenarios = {
+      'peer-traffic-directions': async () => {
+        const checkOverview = async (upload, download) => {
+          const row = page.locator('.mini-peer').filter({ hasText: 'MacBook Pro' })
+          assert.equal(await row.getByTitle('Upload from this peer', { exact: true }).innerText(), `↑ ${upload}`)
+          assert.equal(await row.getByTitle('Download to this peer', { exact: true }).innerText(), `↓ ${download}`)
+        }
+        const checkPeer = async (upload, download) => {
+          const row = page.getByRole('article', { name: 'Peer MacBook Pro', exact: true })
+          const up = row.getByTitle('Upload from this peer', { exact: true }), down = row.getByTitle('Download to this peer', { exact: true })
+          assert.equal(await up.locator('span').innerText(), 'Upload')
+          assert.equal(await down.locator('span').innerText(), 'Download')
+          assert.equal(await up.locator('b').innerText(), upload)
+          assert.equal(await down.locator('b').innerText(), download)
+        }
+        await checkOverview('4.6 MB', '1.8 MB')
+        await navigate('Peers'); await checkPeer('4.6 MB', '1.8 MB')
+        // A one-way transfer from Mac to server increments hub ingress for Mac
+        // and hub egress for server. Mac's upload alone must increase.
+        peers[0].received_bytes += 2_000_000; peers[1].sent_bytes += 2_000_000
+        const sample = page.waitForResponse(response => new URL(response.url()).pathname === '/api/peers')
+        await page.clock.runFor(5001); await (await sample).finished(); await flushFrames()
+        await checkPeer('6.6 MB', '1.8 MB')
+        await navigate('Overview'); await checkOverview('6.6 MB', '1.8 MB')
+        await navigate('Peers')
+        peers[0].received_bytes = 0; peers[0].sent_bytes = 3_200_000_000
+        await refresh.click(); await refreshSettled(); await checkPeer('0 B', '3.2 GB')
+        await page.setViewportSize({ width: 320, height: 844 }); await checkPeer('0 B', '3.2 GB'); await flushFrames(); await noOverflow()
+        await screenshot('peer-traffic-mobile'); await page.setViewportSize({ width: 1440, height: 1000 })
+      },
+      'peer-sort-rename-access': async () => {
+        peers = [
+          { ...initialPeers[0], id: 'tenth', name: 'Tenth peer', ipv4: '10.77.0.10', enabled: true },
+          { ...initialPeers[0], enabled: true },
+          { ...initialPeers[1], enabled: true },
+        ]
+        await refresh.click(); await refreshSettled(); await navigate('Peers')
+        assert.deepEqual(await page.locator('.peer-address > span').allTextContents(), ['10.77.0.2', '10.77.0.3', '10.77.0.10'], 'Numeric IP order ignores response order')
+        const staleName = await staleRefresh('/api/peers')
+        await page.getByLabel('Rename peer MacBook Pro', { exact: true }).click()
+        const dialog = page.getByRole('dialog'), input = dialog.getByLabel('Name', { exact: true }), saveName = dialog.getByRole('button', { name: 'Save changes', exact: true })
+        assert.ok(await saveName.isDisabled(), 'Unchanged name cannot submit')
+        await input.fill('   '); assert.ok(await saveName.isDisabled(), 'Blank name cannot submit')
+        await input.fill('Build server'); await saveName.click()
+        await dialog.getByRole('alert').filter({ hasText: 'peer name already exists' }).waitFor()
+        assert.equal(await input.inputValue(), 'Build server', 'Failed rename retains draft')
+        await input.fill('  Work laptop  ')
+        const renameAck = holdNext('PUT', '/api/peers/mac')
+        await saveName.click(); await renameAck.requested
+        assert.ok(await input.isDisabled() && await dialog.getByRole('button', { name: 'Saving…', exact: true }).isDisabled(), 'Rename locks form while saving')
+        await page.keyboard.press('Escape'); assert.equal(await dialog.count(), 1, 'Pending rename cannot be dismissed')
+        await renameAck.release(); await poll(async () => await dialog.count() === 0, 'Rename completes')
+        await staleName(); await page.getByLabel('Rename peer Work laptop', { exact: true }).waitFor()
+        assert.equal(peers.find(p => p.id === 'mac').name, 'Work laptop')
+        assert.ok(await page.getByLabel('Rename peer Work laptop', { exact: true }).evaluate(button => button === document.activeElement), 'Rename restores focus to its trigger')
+        const access = page.getByRole('switch', { name: 'Access for Work laptop', exact: true })
+        const staleAccess = await staleRefresh('/api/peers'), accessAck = holdNext('PUT', '/api/peers/mac')
+        await access.click(); await accessAck.requested
+        assert.ok(await access.isDisabled() && await page.getByLabel('Rename peer Work laptop', { exact: true }).isDisabled() && await page.getByLabel('Group for Work laptop').isDisabled(), 'Access update locks all mutations for that peer')
+        assert.ok(await page.getByRole('switch', { name: 'Access for Build server', exact: true }).isEnabled(), 'Other peers remain available')
+        const count = mutations.filter(m => m.path === '/api/peers/mac').length
+        await access.dispatchEvent('click'); await flushFrames()
+        assert.equal(mutations.filter(m => m.path === '/api/peers/mac').length, count, 'Pending access cannot reenter')
+        await accessAck.release(); await poll(async () => !(await access.isChecked()), 'Peer disabled after acknowledgement')
+        await staleAccess(); assert.ok(!(await access.isChecked()), 'Stale GET cannot undo disable')
+        const row = page.getByRole('article', { name: 'Peer Work laptop', exact: true })
+        assert.ok((await row.innerText()).includes('Disabled'))
+        assert.ok(!(await row.innerText()).includes('Recent handshake'), 'Disabled peer never appears recently connected')
+        await screenshot('peer-disabled')
+        await access.click(); await poll(async () => await access.isChecked() && await access.isEnabled(), 'Peer restored')
+        assert.equal(peers.find(p => p.id === 'mac').ipv4, '10.77.0.2')
+        await page.getByLabel('Search peers').fill('Work laptop'); assert.equal(await page.locator('.peer-card').count(), 1)
+        await page.getByLabel('Clear search').click()
+      },
       'provision-qr-import': async () => {
         await newPeer('Phone'); await page.getByRole('heading', { name: 'Peer ready' }).waitFor()
         for (const width of [1440, 390, 320]) {

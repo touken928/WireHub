@@ -79,6 +79,7 @@ mod tests {
             public_key: "".into(),
             ipv4: "10.0.0.2".into(),
             group_id: "g".into(),
+            enabled: true,
             received_bytes: 0,
             sent_bytes: 0,
             last_handshake_unix: None,
